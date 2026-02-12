@@ -18,6 +18,12 @@ import (
 	"github.com/nishisan-dev/n-backup/internal/pki"
 )
 
+// sessionTTL é o tempo máximo que uma sessão parcial pode ficar ativa sem resume (1h).
+const sessionTTL = 1 * time.Hour
+
+// sessionCleanupInterval é o intervalo entre limpezas de sessões expiradas.
+const sessionCleanupInterval = 5 * time.Minute
+
 // Run inicia o servidor de backup e bloqueia até o context ser cancelado.
 func Run(ctx context.Context, cfg *config.ServerConfig, logger *slog.Logger) error {
 	// Configura TLS
@@ -37,7 +43,22 @@ func Run(ctx context.Context, cfg *config.ServerConfig, logger *slog.Logger) err
 
 	// Locks por agent (para prevenir backups simultâneos do mesmo agent)
 	locks := &sync.Map{}
-	handler := NewHandler(cfg, logger, locks)
+	sessions := &sync.Map{}
+	handler := NewHandler(cfg, logger, locks, sessions)
+
+	// Goroutine para cleanup de sessões expiradas
+	go func() {
+		ticker := time.NewTicker(sessionCleanupInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				CleanupExpiredSessions(sessions, sessionTTL, logger)
+			}
+		}
+	}()
 
 	// Goroutine para fechar o listener quando o context for cancelado
 	go func() {
@@ -77,7 +98,22 @@ func Run(ctx context.Context, cfg *config.ServerConfig, logger *slog.Logger) err
 // RunWithListener inicia o servidor com um listener já existente (para testes).
 func RunWithListener(ctx context.Context, ln net.Listener, cfg *config.ServerConfig, logger *slog.Logger) error {
 	locks := &sync.Map{}
-	handler := NewHandler(cfg, logger, locks)
+	sessions := &sync.Map{}
+	handler := NewHandler(cfg, logger, locks, sessions)
+
+	// Cleanup goroutine
+	go func() {
+		ticker := time.NewTicker(sessionCleanupInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				CleanupExpiredSessions(sessions, sessionTTL, logger)
+			}
+		}
+	}()
 
 	go func() {
 		<-ctx.Done()

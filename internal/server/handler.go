@@ -15,24 +15,41 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/nishisan-dev/n-backup/internal/config"
 	"github.com/nishisan-dev/n-backup/internal/protocol"
 )
 
+// sackInterval define a cada quantos bytes o server envia um SACK.
+const sackInterval = 64 * 1024 * 1024 // 64MB
+
+// PartialSession rastreia um backup parcial para resume.
+type PartialSession struct {
+	TmpPath      string
+	BytesWritten int64
+	AgentName    string
+	StorageName  string
+	BaseDir      string
+	CreatedAt    time.Time
+}
+
 // Handler processa conexões individuais de backup.
 type Handler struct {
-	cfg    *config.ServerConfig
-	logger *slog.Logger
-	locks  *sync.Map // Mapa de locks por "agent:storage"
+	cfg      *config.ServerConfig
+	logger   *slog.Logger
+	locks    *sync.Map // Mapa de locks por "agent:storage"
+	sessions *sync.Map // Mapa de sessões parciais por sessionID
 }
 
 // NewHandler cria um novo Handler.
-func NewHandler(cfg *config.ServerConfig, logger *slog.Logger, locks *sync.Map) *Handler {
+func NewHandler(cfg *config.ServerConfig, logger *slog.Logger, locks *sync.Map, sessions *sync.Map) *Handler {
 	return &Handler{
-		cfg:    cfg,
-		logger: logger,
-		locks:  locks,
+		cfg:      cfg,
+		logger:   logger,
+		locks:    locks,
+		sessions: sessions,
 	}
 }
 
@@ -54,6 +71,8 @@ func (h *Handler) HandleConnection(ctx context.Context, conn net.Conn) {
 		h.handleHealthCheck(conn, logger)
 	case "NBKP":
 		h.handleBackup(ctx, conn, logger)
+	case "RSME":
+		h.handleResume(ctx, conn, logger)
 	default:
 		logger.Warn("unknown magic bytes", "magic", string(magic))
 	}
@@ -145,30 +164,183 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 		return
 	}
 
-	// Stream: conn → buffer → arquivo .tmp (256KB buffers para reduzir syscalls)
-	bufConn := bufio.NewReaderSize(conn, 256*1024)
-	bufFile := bufio.NewWriterSize(tmpFile, 256*1024)
-
-	bytesReceived, err := io.Copy(bufFile, bufConn)
-
-	// Flush antes de fechar
-	if flushErr := bufFile.Flush(); flushErr != nil && err == nil {
-		err = flushErr
+	// Registra sessão parcial
+	session := &PartialSession{
+		TmpPath:     tmpPath,
+		AgentName:   agentName,
+		StorageName: storageName,
+		BaseDir:     storageInfo.BaseDir,
+		CreatedAt:   time.Now(),
 	}
+	h.sessions.Store(sessionID, session)
+	defer h.sessions.Delete(sessionID) // limpa quando terminar com sucesso
+
+	// Stream com SACK periódico
+	bytesReceived, err := h.receiveWithSACK(ctx, conn, tmpFile, tmpPath, session, logger)
 	tmpFile.Close()
 
 	if err != nil {
-		logger.Error("receiving data stream", "error", err)
-		writer.Abort(tmpPath)
+		logger.Error("receiving data stream", "error", err, "bytes", bytesReceived)
+		// NÃO aborta o tmp — mantém para resume
 		return
 	}
 
-	logger.Info("data stream received", "bytes", bytesReceived)
+	// Remove sessão — backup recebido com sucesso, resume não será necessário
+	h.sessions.Delete(sessionID)
 
+	// Validação do trailer e commit
+	h.validateAndCommit(conn, writer, tmpPath, bytesReceived, storageInfo, logger)
+}
+
+// handleResume processa um pedido de resume do agent.
+func (h *Handler) handleResume(ctx context.Context, conn net.Conn, logger *slog.Logger) {
+	resume, err := protocol.ReadResume(conn)
+	if err != nil {
+		logger.Error("reading resume frame", "error", err)
+		return
+	}
+
+	logger = logger.With("session", resume.SessionID, "agent", resume.AgentName, "storage", resume.StorageName)
+	logger.Info("resume request received")
+
+	// Busca sessão parcial
+	raw, ok := h.sessions.Load(resume.SessionID)
+	if !ok {
+		logger.Warn("session not found for resume")
+		protocol.WriteResumeACK(conn, protocol.ResumeStatusNotFound, 0)
+		return
+	}
+	session := raw.(*PartialSession)
+
+	// Valida agent e storage
+	if session.AgentName != resume.AgentName || session.StorageName != resume.StorageName {
+		logger.Warn("resume session mismatch",
+			"expected_agent", session.AgentName, "got_agent", resume.AgentName,
+			"expected_storage", session.StorageName, "got_storage", resume.StorageName)
+		protocol.WriteResumeACK(conn, protocol.ResumeStatusNotFound, 0)
+		return
+	}
+
+	// Verifica que o arquivo .tmp ainda existe
+	fi, err := os.Stat(session.TmpPath)
+	if err != nil {
+		logger.Warn("tmp file gone for resume", "path", session.TmpPath, "error", err)
+		h.sessions.Delete(resume.SessionID)
+		protocol.WriteResumeACK(conn, protocol.ResumeStatusNotFound, 0)
+		return
+	}
+
+	lastOffset := fi.Size()
+	session.BytesWritten = lastOffset
+	logger.Info("resume accepted", "last_offset", lastOffset)
+
+	if err := protocol.WriteResumeACK(conn, protocol.ResumeStatusOK, uint64(lastOffset)); err != nil {
+		logger.Error("writing resume ack", "error", err)
+		return
+	}
+
+	// Lock: por agent:storage
+	lockKey := session.AgentName + ":" + session.StorageName
+	if _, loaded := h.locks.LoadOrStore(lockKey, true); loaded {
+		logger.Warn("backup already in progress for agent during resume")
+		return
+	}
+	defer h.locks.Delete(lockKey)
+
+	// Reabrir tmp file para append
+	tmpFile, err := os.OpenFile(session.TmpPath, os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		logger.Error("reopening tmp file for resume", "error", err)
+		return
+	}
+
+	storageInfo, ok := h.cfg.GetStorage(session.StorageName)
+	if !ok {
+		logger.Error("storage not found during resume")
+		tmpFile.Close()
+		return
+	}
+
+	// Continua recebendo dados
+	bytesReceived, err := h.receiveWithSACK(ctx, conn, tmpFile, session.TmpPath, session, logger)
+	tmpFile.Close()
+
+	totalBytes := lastOffset + bytesReceived
+
+	if err != nil {
+		logger.Error("receiving resumed data", "error", err, "new_bytes", bytesReceived, "total", totalBytes)
+		return
+	}
+
+	// Sucesso — remove sessão
+	h.sessions.Delete(resume.SessionID)
+
+	// Validação e commit
+	writer, wErr := NewAtomicWriter(storageInfo.BaseDir, session.AgentName)
+	if wErr != nil {
+		logger.Error("creating atomic writer for resume", "error", wErr)
+		return
+	}
+
+	h.validateAndCommit(conn, writer, session.TmpPath, totalBytes, storageInfo, logger)
+}
+
+// receiveWithSACK lê dados do conn, escreve no tmpFile, e envia SACKs periódicos.
+// Retorna o número de bytes recebidos nesta sessão (não o total do arquivo).
+func (h *Handler) receiveWithSACK(ctx context.Context, conn net.Conn, tmpFile *os.File, tmpPath string, session *PartialSession, logger *slog.Logger) (int64, error) {
+	bufConn := bufio.NewReaderSize(conn, 256*1024)
+	bufFile := bufio.NewWriterSize(tmpFile, 256*1024)
+
+	var bytesReceived int64
+	var lastSACK int64
+	var sackErr atomic.Value // armazena erro de SACK para não bloquear
+
+	buf := make([]byte, 256*1024)
+	for {
+		n, readErr := bufConn.Read(buf)
+		if n > 0 {
+			if _, wErr := bufFile.Write(buf[:n]); wErr != nil {
+				bufFile.Flush()
+				return bytesReceived, fmt.Errorf("writing to tmp: %w", wErr)
+			}
+			bytesReceived += int64(n)
+			session.BytesWritten += int64(n)
+
+			// Envia SACK a cada sackInterval bytes
+			if bytesReceived-lastSACK >= sackInterval {
+				if fErr := bufFile.Flush(); fErr != nil {
+					return bytesReceived, fmt.Errorf("flushing before sack: %w", fErr)
+				}
+				totalWritten := session.BytesWritten
+				if sErr := protocol.WriteSACK(conn, uint64(totalWritten)); sErr != nil {
+					sackErr.Store(sErr)
+					logger.Warn("failed to send SACK", "error", sErr, "offset", totalWritten)
+				} else {
+					logger.Debug("SACK sent", "offset", totalWritten)
+				}
+				lastSACK = bytesReceived
+			}
+		}
+
+		if readErr != nil {
+			// Flush antes de retornar
+			if fErr := bufFile.Flush(); fErr != nil && readErr == io.EOF {
+				return bytesReceived, fmt.Errorf("flushing file: %w", fErr)
+			}
+			if readErr == io.EOF {
+				return bytesReceived, nil
+			}
+			return bytesReceived, readErr
+		}
+	}
+}
+
+// validateAndCommit valida o trailer, checksum e comita o backup.
+func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath string, totalBytes int64, storageInfo config.StorageInfo, logger *slog.Logger) {
 	const trailerSize int64 = 4 + 32 + 8
 
-	if bytesReceived < trailerSize {
-		logger.Error("received data too small", "bytes", bytesReceived)
+	if totalBytes < trailerSize {
+		logger.Error("received data too small", "bytes", totalBytes)
 		writer.Abort(tmpPath)
 		return
 	}
@@ -182,7 +354,7 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	}
 
 	// Trunca o arquivo para remover o trailer (mantém apenas os dados)
-	dataSize := bytesReceived - trailerSize
+	dataSize := totalBytes - trailerSize
 	if err := os.Truncate(tmpPath, dataSize); err != nil {
 		logger.Error("truncating temp file", "error", err)
 		writer.Abort(tmpPath)
@@ -295,4 +467,23 @@ func generateSessionID() string {
 	b[8] = (b[8] & 0x3f) | 0x80 // variant RFC 4122
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// CleanupExpiredSessions remove sessões parciais expiradas e seus arquivos .tmp.
+func CleanupExpiredSessions(sessions *sync.Map, ttl time.Duration, logger *slog.Logger) {
+	sessions.Range(func(key, value any) bool {
+		session := value.(*PartialSession)
+		if time.Since(session.CreatedAt) > ttl {
+			logger.Info("cleaning expired session",
+				"session", key,
+				"agent", session.AgentName,
+				"storage", session.StorageName,
+				"age", time.Since(session.CreatedAt).Round(time.Second),
+			)
+			// Remove .tmp
+			os.Remove(session.TmpPath)
+			sessions.Delete(key)
+		}
+		return true
+	})
 }
