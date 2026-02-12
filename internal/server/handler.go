@@ -73,6 +73,8 @@ func (h *Handler) HandleConnection(ctx context.Context, conn net.Conn) {
 		h.handleBackup(ctx, conn, logger)
 	case "RSME":
 		h.handleResume(ctx, conn, logger)
+	case "PJIN":
+		h.handleParallelJoin(ctx, conn, logger)
 	default:
 		logger.Warn("unknown magic bytes", "magic", string(magic))
 	}
@@ -149,6 +151,30 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 		return
 	}
 
+	// Detecta extensão ParallelInit: peek 1 byte
+	// Se valor estiver entre 1-8, é MaxStreams de ParallelInit → modo paralelo
+	br := bufio.NewReaderSize(conn, 8)
+	peek, err := br.Peek(1)
+	if err != nil {
+		logger.Error("peeking for parallel init", "error", err)
+		return
+	}
+
+	if peek[0] >= 1 && peek[0] <= 8 {
+		// Modo paralelo — lê ParallelInit completo
+		pi, err := protocol.ReadParallelInit(br)
+		if err != nil {
+			logger.Error("reading ParallelInit", "error", err)
+			return
+		}
+		logger.Info("parallel mode detected", "maxStreams", pi.MaxStreams, "chunkSize", pi.ChunkSize)
+
+		h.handleParallelBackup(ctx, conn, br, sessionID, agentName, storageName, storageInfo, pi, lockKey, logger)
+		return
+	}
+
+	// Modo single-stream (legacy) — usa br que já tem os dados bufferizados
+
 	// Prepara escrita atômica
 	writer, err := NewAtomicWriter(storageInfo.BaseDir, agentName)
 	if err != nil {
@@ -175,8 +201,8 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	h.sessions.Store(sessionID, session)
 	defer h.sessions.Delete(sessionID) // limpa quando terminar com sucesso
 
-	// Stream com SACK periódico
-	bytesReceived, err := h.receiveWithSACK(ctx, conn, tmpFile, tmpPath, session, logger)
+	// Stream com SACK periódico — usa br em vez de conn para não perder dados bufferizados
+	bytesReceived, err := h.receiveWithSACK(ctx, br, conn, tmpFile, tmpPath, session, logger)
 	tmpFile.Close()
 
 	if err != nil {
@@ -262,7 +288,7 @@ func (h *Handler) handleResume(ctx context.Context, conn net.Conn, logger *slog.
 	}
 
 	// Continua recebendo dados
-	bytesReceived, err := h.receiveWithSACK(ctx, conn, tmpFile, session.TmpPath, session, logger)
+	bytesReceived, err := h.receiveWithSACK(ctx, conn, conn, tmpFile, session.TmpPath, session, logger)
 	tmpFile.Close()
 
 	totalBytes := lastOffset + bytesReceived
@@ -287,8 +313,8 @@ func (h *Handler) handleResume(ctx context.Context, conn net.Conn, logger *slog.
 
 // receiveWithSACK lê dados do conn, escreve no tmpFile, e envia SACKs periódicos.
 // Retorna o número de bytes recebidos nesta sessão (não o total do arquivo).
-func (h *Handler) receiveWithSACK(ctx context.Context, conn net.Conn, tmpFile *os.File, tmpPath string, session *PartialSession, logger *slog.Logger) (int64, error) {
-	bufConn := bufio.NewReaderSize(conn, 256*1024)
+func (h *Handler) receiveWithSACK(ctx context.Context, reader io.Reader, sackWriter io.Writer, tmpFile *os.File, tmpPath string, session *PartialSession, logger *slog.Logger) (int64, error) {
+	bufConn := bufio.NewReaderSize(reader, 256*1024)
 	bufFile := bufio.NewWriterSize(tmpFile, 256*1024)
 
 	var bytesReceived int64
@@ -312,7 +338,7 @@ func (h *Handler) receiveWithSACK(ctx context.Context, conn net.Conn, tmpFile *o
 					return bytesReceived, fmt.Errorf("flushing before sack: %w", fErr)
 				}
 				totalWritten := session.BytesWritten
-				if sErr := protocol.WriteSACK(conn, uint64(totalWritten)); sErr != nil {
+				if sErr := protocol.WriteSACK(sackWriter, uint64(totalWritten)); sErr != nil {
 					sackErr.Store(sErr)
 					logger.Warn("failed to send SACK", "error", sErr, "offset", totalWritten)
 				} else {
@@ -486,4 +512,212 @@ func CleanupExpiredSessions(sessions *sync.Map, ttl time.Duration, logger *slog.
 		}
 		return true
 	})
+}
+
+// ParallelSession rastreia uma sessão de backup com streams paralelos.
+type ParallelSession struct {
+	SessionID   string
+	Assembler   *ChunkAssembler
+	Writer      *AtomicWriter
+	StorageInfo config.StorageInfo
+	AgentName   string
+	StorageName string
+	StreamConns sync.Map // streamIndex (uint8) → net.Conn
+	MaxStreams  uint8
+	ChunkSize   uint32
+	Done        chan struct{} // sinaliza conclusão
+}
+
+// handleParallelBackup processa um backup paralelo.
+// Recebe dados pela conexão primária (stream 0) + streams secundários via ParallelJoin.
+func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io.Reader, sessionID, agentName, storageName string, storageInfo config.StorageInfo, pi *protocol.ParallelInit, lockKey string, logger *slog.Logger) {
+	defer h.locks.Delete(lockKey)
+
+	logger = logger.With("session", sessionID, "mode", "parallel", "maxStreams", pi.MaxStreams)
+	logger.Info("starting parallel backup session")
+
+	// Prepara escrita atômica
+	writer, err := NewAtomicWriter(storageInfo.BaseDir, agentName)
+	if err != nil {
+		logger.Error("creating atomic writer", "error", err)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+		return
+	}
+
+	// Cria assembler para staging de chunks
+	assembler, err := NewChunkAssembler(sessionID, writer.AgentDir(), logger)
+	if err != nil {
+		logger.Error("creating chunk assembler", "error", err)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+		return
+	}
+	defer assembler.Cleanup()
+
+	// Registra sessão paralela para que handleParallelJoin possa encontrar
+	pSession := &ParallelSession{
+		SessionID:   sessionID,
+		Assembler:   assembler,
+		Writer:      writer,
+		StorageInfo: storageInfo,
+		AgentName:   agentName,
+		StorageName: storageName,
+		MaxStreams:  pi.MaxStreams,
+		ChunkSize:   pi.ChunkSize,
+		Done:        make(chan struct{}),
+	}
+	h.sessions.Store(sessionID, pSession)
+	defer h.sessions.Delete(sessionID)
+
+	// Abre chunk file para stream 0 e recebe dados
+	chunkFile, _, err := assembler.ChunkFile(0)
+	if err != nil {
+		logger.Error("opening chunk file for stream 0", "error", err)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+		return
+	}
+
+	// Recebe dados do stream 0 com ChunkSACK
+	bytesReceived, err := h.receiveParallelStream(ctx, br, conn, chunkFile, 0, pSession, logger)
+	chunkFile.Close()
+
+	if err != nil {
+		logger.Error("receiving parallel stream 0", "error", err, "bytes", bytesReceived)
+		return
+	}
+
+	logger.Info("stream 0 data received", "bytes", bytesReceived)
+
+	// Monta o arquivo final
+	assembledPath, totalBytes, err := assembler.Assemble()
+	if err != nil {
+		logger.Error("assembling chunks", "error", err)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+		return
+	}
+
+	// Validação do trailer e commit
+	logger.Info("parallel assembly complete, awaiting trailer", "totalBytes", totalBytes)
+	h.validateAndCommit(conn, writer, assembledPath, totalBytes, storageInfo, logger)
+}
+
+// receiveParallelStream recebe dados de um stream paralelo e envia ChunkSACKs.
+func (h *Handler) receiveParallelStream(ctx context.Context, reader io.Reader, sackWriter io.Writer, chunkFile *os.File, streamIndex uint8, session *ParallelSession, logger *slog.Logger) (int64, error) {
+	bufReader := bufio.NewReaderSize(reader, 256*1024)
+	bufWriter := bufio.NewWriterSize(chunkFile, 256*1024)
+
+	var bytesReceived int64
+	var chunkSeq uint32
+
+	buf := make([]byte, 256*1024)
+	for {
+		n, readErr := bufReader.Read(buf)
+		if n > 0 {
+			if _, wErr := bufWriter.Write(buf[:n]); wErr != nil {
+				bufWriter.Flush()
+				return bytesReceived, fmt.Errorf("writing chunk: %w", wErr)
+			}
+			bytesReceived += int64(n)
+
+			// Envia ChunkSACK a cada chunk processado
+			if bytesReceived-int64(chunkSeq)*int64(session.ChunkSize) >= int64(session.ChunkSize) {
+				if fErr := bufWriter.Flush(); fErr != nil {
+					return bytesReceived, fmt.Errorf("flushing before chunk sack: %w", fErr)
+				}
+				chunkSeq++
+				if sErr := protocol.WriteChunkSACK(sackWriter, streamIndex, chunkSeq, uint64(bytesReceived)); sErr != nil {
+					logger.Warn("failed to send ChunkSACK", "error", sErr, "stream", streamIndex, "seq", chunkSeq)
+				} else {
+					logger.Debug("ChunkSACK sent", "stream", streamIndex, "seq", chunkSeq, "offset", bytesReceived)
+				}
+			}
+
+			// Registra chunk no manifest
+			session.Assembler.RegisterChunk(ChunkMeta{
+				StreamIndex: streamIndex,
+				ChunkSeq:    chunkSeq,
+				Offset:      uint64(bytesReceived),
+				Length:      int64(n),
+			})
+		}
+
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			bufWriter.Flush()
+			return bytesReceived, fmt.Errorf("reading from stream %d: %w", streamIndex, readErr)
+		}
+	}
+
+	if err := bufWriter.Flush(); err != nil {
+		return bytesReceived, fmt.Errorf("final flush stream %d: %w", streamIndex, err)
+	}
+
+	// Envia ChunkSACK final
+	chunkSeq++
+	protocol.WriteChunkSACK(sackWriter, streamIndex, chunkSeq, uint64(bytesReceived))
+
+	return bytesReceived, nil
+}
+
+// handleParallelJoin processa uma conexão secundária de ParallelJoin.
+func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger *slog.Logger) {
+	// O magic "PJIN" já foi lido pelo HandleConnection
+	pj, err := protocol.ReadParallelJoin(conn)
+	if err != nil {
+		logger.Error("reading ParallelJoin", "error", err)
+		return
+	}
+
+	logger = logger.With("session", pj.SessionID, "stream", pj.StreamIndex)
+	logger.Info("parallel join request received")
+
+	// Busca sessão paralela
+	raw, ok := h.sessions.Load(pj.SessionID)
+	if !ok {
+		logger.Warn("parallel session not found")
+		protocol.WriteParallelACK(conn, protocol.ParallelStatusNotFound)
+		return
+	}
+
+	pSession, ok := raw.(*ParallelSession)
+	if !ok {
+		logger.Warn("session is not a parallel session")
+		protocol.WriteParallelACK(conn, protocol.ParallelStatusNotFound)
+		return
+	}
+
+	// Valida stream index
+	if pj.StreamIndex >= pSession.MaxStreams {
+		logger.Warn("stream index exceeds max", "maxStreams", pSession.MaxStreams)
+		protocol.WriteParallelACK(conn, protocol.ParallelStatusFull)
+		return
+	}
+
+	// ACK OK
+	if err := protocol.WriteParallelACK(conn, protocol.ParallelStatusOK); err != nil {
+		logger.Error("writing ParallelACK", "error", err)
+		return
+	}
+
+	// Registra conexão do stream
+	pSession.StreamConns.Store(pj.StreamIndex, conn)
+
+	// Abre chunk file para este stream
+	chunkFile, _, err := pSession.Assembler.ChunkFile(pj.StreamIndex)
+	if err != nil {
+		logger.Error("opening chunk file", "error", err)
+		return
+	}
+
+	// Recebe dados do stream
+	bytesReceived, err := h.receiveParallelStream(ctx, conn, conn, chunkFile, pj.StreamIndex, pSession, logger)
+	chunkFile.Close()
+
+	if err != nil {
+		logger.Error("receiving parallel stream", "error", err, "bytes", bytesReceived)
+		return
+	}
+
+	logger.Info("parallel stream complete", "bytes", bytesReceived)
 }
