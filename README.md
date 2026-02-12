@@ -50,7 +50,9 @@ Exemplos em [`configs/`](configs/).
 
 ## Documentação
 
-- [Especificação Técnica](docs/specification.md)
+- [Guia de Instalação](docs/installation.md) — Build, PKI/mTLS, configuração, systemd
+- [Guia de Uso](docs/usage.md) — Comandos, daemon, retry, rotação, troubleshooting
+- [Especificação Técnica](docs/specification.md) — Protocolo, arquitetura, decisões
 - Diagramas: [`docs/diagrams/`](docs/diagrams/)
 
 ## Stack
