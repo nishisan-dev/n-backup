@@ -429,6 +429,7 @@ Quando a conexão cai mid-stream, o agent tenta reconectar e resumir automaticam
 ```yaml
 resume:
   buffer_size: 256mb    # Tamanho do ring buffer (kb, mb, gb)
+  chunk_size: 1mb       # Tamanho de cada chunk paralelo (64kb-16mb, default: 1mb)
 ```
 
 ### 5.5 Graceful Shutdown

@@ -204,6 +204,7 @@ Para backups grandes (>1GB), o agent mantém um **ring buffer** em memória. Se 
 ```yaml
 resume:
   buffer_size: 256mb    # Tamanho do ring buffer (kb, mb, gb, default: 256mb)
+  chunk_size: 1mb       # Tamanho de cada chunk paralelo (64kb-16mb, default: 1mb)
 ```
 
 ### Como Funciona
@@ -222,6 +223,7 @@ resume:
 | Parâmetro | Default | Descrição |
 |----------|---------|----------|
 | `resume.buffer_size` | `256mb` | Tamanho do ring buffer |
+| `resume.chunk_size` | `1mb` | Tamanho de cada chunk paralelo (64kb-16mb) |
 | SACK interval (fixo) | 64MB | Server confirma a cada 64MB |
 | Max resume attempts (fixo) | 5 | Tentativas antes de reiniciar |
 | Session TTL (fixo) | 1h | Tempo máximo para reconectar |
@@ -261,7 +263,7 @@ backups:
 | Parâmetro | Default | Descrição |
 |----------|---------|----------|
 | `parallels` | `0` | Número máximo de streams (0=desabilita) |
-| Chunk size (fixo) | 1MB | Tamanho de cada chunk distribuído |
+| `resume.chunk_size` | `1mb` | Tamanho de cada chunk distribuído (64kb-16mb) |
 | Hysteresis window (fixo) | 3 | Janelas consecutivas para escalar |
 
 > [!TIP]
