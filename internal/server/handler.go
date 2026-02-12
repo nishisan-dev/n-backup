@@ -368,6 +368,7 @@ func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath
 	if totalBytes < trailerSize {
 		logger.Error("received data too small", "bytes", totalBytes)
 		writer.Abort(tmpPath)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
 		return
 	}
 
@@ -376,6 +377,7 @@ func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath
 	if err != nil {
 		logger.Error("reading trailer from file", "error", err)
 		writer.Abort(tmpPath)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
 		return
 	}
 
@@ -384,6 +386,7 @@ func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath
 	if err := os.Truncate(tmpPath, dataSize); err != nil {
 		logger.Error("truncating temp file", "error", err)
 		writer.Abort(tmpPath)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
 		return
 	}
 
@@ -392,6 +395,7 @@ func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath
 	if err != nil {
 		logger.Error("computing server checksum", "error", err)
 		writer.Abort(tmpPath)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
 		return
 	}
 
@@ -598,6 +602,7 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 
 	if err != nil {
 		logger.Error("receiving parallel stream 0", "error", err, "bytes", bytesReceived)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
 		return
 	}
 
