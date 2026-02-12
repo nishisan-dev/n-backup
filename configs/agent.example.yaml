@@ -38,6 +38,9 @@ retry:
   initial_delay: 1s
   max_delay: 5m
 
+resume:
+  buffer_size: 256mb               # Tamanho do ring buffer (kb, mb, gb)
+
 logging:
   level: info                      # debug, info, warn, error
   format: json                     # json, text

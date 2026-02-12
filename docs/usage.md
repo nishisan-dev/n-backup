@@ -163,6 +163,43 @@ O delay cresce exponencialmente:
 
 ---
 
+## Resume Automático
+
+Para backups grandes (>1GB), o agent mantém um **ring buffer** em memória. Se a conexão cair mid-stream, o agent reconecta e retoma de onde parou sem reenviar tudo.
+
+```yaml
+resume:
+  buffer_size: 256mb    # Tamanho do ring buffer (kb, mb, gb, default: 256mb)
+```
+
+### Como Funciona
+
+```
+1. Agent envia dados via ring buffer (backpressure se cheio)
+2. Server confirma recebimento a cada 64MB (SACK)
+3. Agent libera espaço no buffer após cada SACK
+4. Se conexão cair: agent reconecta e envia RESUME + sessionID
+5. Server responde com último offset gravado em disco
+6. Agent retoma envio do offset (se ainda no buffer)
+```
+
+### Parâmetros
+
+| Parâmetro | Default | Descrição |
+|----------|---------|----------|
+| `resume.buffer_size` | `256mb` | Tamanho do ring buffer |
+| SACK interval (fixo) | 64MB | Server confirma a cada 64MB |
+| Max resume attempts (fixo) | 5 | Tentativas antes de reiniciar |
+| Session TTL (fixo) | 1h | Tempo máximo para reconectar |
+
+> [!TIP]
+> Para backups de 700GB+, considere aumentar o buffer para `1gb` para tolerar interrupções mais longas.
+
+> [!IMPORTANT]
+> Se o offset não estiver mais no ring buffer (avançou além da capacidade), o backup reinicia do zero.
+
+---
+
 ## Rotação Automática (Server)
 
 Cada storage nomeado mantém no máximo `max_backups` por agent. Os mais antigos são removidos automaticamente após cada backup bem-sucedido.
@@ -239,3 +276,6 @@ Exemplo de log JSON do agent:
 | `storage not found` | Nome do storage não existe no server | Verificar `storages:` no server.yaml |
 | `checksum mismatch` | Corrupção de dados na rede | O backup é descartado; será retentado |
 | `all N attempts failed` | Server persistentemente indisponível | Verificar conectividade e logs do server |
+| `offset no longer in buffer` | Ring buffer overflow durante resume | Aumentar `resume.buffer_size` ou melhorar rede |
+| `session not found for resume` | Sessão expirou no server (>1h) | O backup reiniciará automaticamente |
+| `max resume attempts reached` | 5 tentativas de resume falharam | Verificar estabilidade da rede |

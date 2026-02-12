@@ -37,14 +37,16 @@ tar -cvf - -C / app/scripts/ home/ etc/ | gzip | ssh "$REMOTE_HOST" "cat > '$REM
 ### 2.3 Streaming Pipeline
 
 ```
-fs.WalkDir ──▶ tar.Writer ──▶ gzip.Writer ──▶ tls.Conn ──▶ Server (io.Copy → disk)
-     │
-     └── excludes/includes (glob patterns do YAML)
+fs.WalkDir ──▶ tar.Writer ──▶ gzip.Writer ──▶ RingBuffer ──▶ tls.Conn ──▶ Server (io.Copy → disk)
+     │                                    │
+     └── excludes/includes (glob)           └── backpressure (bloqueia se cheio)
 ```
 
-- `io.Pipe` conecta tar → gzip → socket sem buffering intermediário.
-- Backpressure natural via TCP flow control.
-- SHA-256 calculado inline via `io.TeeReader` (client) e `io.MultiWriter` (server).
+- O RingBuffer implementa `io.Writer` e aplica backpressure quando cheio.
+- Sender goroutine lê do buffer por offset absoluto e envia para a conexão.
+- ACK reader processa SACKs do server e avança o tail do buffer.
+- SHA-256 é calculado inline via `io.MultiWriter` sobre o stream compactado.
+- Se a conexão cair, o sender reconecta e retoma do último offset válido.
 
 ### 2.4 Agent: Daemon Mode
 
@@ -71,16 +73,29 @@ Client                                     Server
   │◀─── TLS Established ──────────────────── │
   │                                          │
   │──── HANDSHAKE (agent, storage, ver) ──▶ │
-  │◀─── ACK/NACK (status) ────────────── │
+  │◀─── ACK (status, sessionID) ────────── │
   │                                          │
   │──── DATA STREAM (tar.gz bytes) ───────▶ │  ← bulk transfer
   │     ... streaming contínuo ...           │
+  │◀─── SACK (offset confirmado) ────────── │  ← a cada 64MB
+  │     ... mais dados + SACKs ...           │
   │──── EOF ─────────────────────────────▶ │
   │                                          │
   │──── TRAILER (SHA-256, size) ─────────▶ │
   │◀─── FINAL ACK (status) ───────────── │
   │                                          │
   │──── Conexão encerrada ──────────────▶ │
+
+--- RESUME (após queda de conexão) ---
+
+  │──── TLS 1.3 Handshake (mTLS) ──────────▶│
+  │◀─── TLS Established ──────────────────── │
+  │                                          │
+  │──── RESUME (sessionID, agent, stor) ──▶ │
+  │◀─── ResumeACK (status, lastOffset) ─── │
+  │                                          │
+  │──── DATA STREAM (do lastOffset) ──────▶ │
+  │     ... fluxo normal continua ...        │
 ```
 
 ### 3.2 Frames
@@ -102,10 +117,10 @@ Client                                     Server
 #### ACK (Server → Client)
 
 ```
-┌──────────┬──────────────────┬───────┐
-│ Status   │ Message (UTF8)   │ '\n'  │
-│ 1 byte   │ variável (opt)   │ 1B    │
-└──────────┴──────────────────┴───────┘
+┌──────────┬──────────────────┬───────┬────────────────┬───────┐
+│ Status   │ Message (UTF8)   │ '\n'  │ SessionID (UTF8)│ '\n'  │
+│ 1 byte   │ variável (opt)   │ 1B    │ variável (opt)  │ 1B    │
+└──────────┴──────────────────┴───────┴────────────────┴───────┘
 ```
 
 | Status | Código | Significado |
@@ -115,6 +130,8 @@ Client                                     Server
 | BUSY | `0x02` | Backup deste agent:storage já em andamento |
 | REJECT | `0x03` | Agent não autorizado |
 | STORAGE_NOT_FOUND | `0x04` | Storage nomeado não existe no server |
+
+O campo `SessionID` é um UUID v4 gerado pelo server, usado para identificar a sessão em caso de resume.
 
 #### Data Stream (Client → Server)
 
@@ -154,6 +171,47 @@ Server → Client: Status (1B) + DiskFree (8B uint64) + '\n'
 ```
 
 CLI: `nbackup-agent health <server:port>`
+
+### 3.4 Resume Protocol
+
+Quando uma conexão cai mid-stream, o agent pode reconectar e retomar de onde parou.
+
+#### RESUME (Client → Server)
+
+```
+┌──────────┬──────┬────────────────┬───────┬──────────────────┬───────┬───────────────────┬───────┐
+│ "RSME"   │ Ver  │ SessionID (UTF8)│ '\n'  │ AgentName (UTF8) │ '\n'  │ StorageName (UTF8) │ '\n'  │
+│ 4 bytes  │ 1B   │ variável         │ 1B    │ variável          │ 1B    │ variável            │ 1B    │
+└──────────┴──────┴────────────────┴───────┴──────────────────┴───────┴───────────────────┴───────┘
+```
+
+- **Magic**: `0x52 0x53 0x4D 0x45` ("RSME")
+- **SessionID**: UUID da sessão original (retornado no ACK do Handshake)
+
+#### ResumeACK (Server → Client)
+
+```
+┌──────────┬─────────────┐
+│ Status   │ LastOffset    │
+│ 1 byte   │ 8B uint64     │
+└──────────┴─────────────┘
+```
+
+| Status | Código | Significado |
+|---|---|---|
+| OK | `0x00` | Resume aceito, continuar do LastOffset |
+| NOT_FOUND | `0x01` | Sessão expirada ou inválida, reiniciar |
+
+#### SACK (Server → Client)
+
+```
+┌──────────┬─────────────┐
+│ "SACK"   │ Offset        │
+│ 4 bytes  │ 8B uint64     │
+└──────────┴─────────────┘
+```
+
+Enviado periodicamente pelo server (a cada 64MB) para confirmar recebimento. O agent avança o tail do ring buffer, liberando espaço para novas escritas.
 
 ---
 
@@ -256,7 +314,32 @@ O daemon garante que **apenas um backup por agent** é executado simultaneamente
 
 O server grava em arquivo temporário (`.tmp`) e só renomeia (atomic rename) após validação do checksum SHA-256.
 
-### 5.4 Graceful Shutdown
+### 5.4 Resume de Backups
+
+Quando a conexão cai mid-stream, o agent tenta reconectar e resumir automaticamente.
+
+**Mecânica:**
+
+1. O agent mantém um **ring buffer** em memória (256MB padrão, configurável até 1GB).
+2. O server envia **SACKs** a cada 64MB confirmando recebimento.
+3. Ao receber um SACK, o agent avança o tail do buffer, liberando espaço.
+4. Se a conexão cair, o agent reconecta e envia **RESUME** com o `sessionID`.
+5. O server responde com o último offset gravado em disco.
+6. O agent retoma o envio a partir desse offset (se ainda estiver no buffer).
+
+**Limites:**
+
+- Máximo de 5 tentativas de resume com backoff exponencial (2s, 4s, 8s...).
+- Se o offset não estiver mais no buffer, o backup reinicia do zero.
+- Sessões parciais no server expiram após 1 hora (TTL).
+- O `.tmp` parcial é deletado na expiração.
+
+```yaml
+resume:
+  buffer_size: 256mb    # Tamanho do ring buffer (kb, mb, gb)
+```
+
+### 5.5 Graceful Shutdown
 
 O daemon responde a `SIGTERM` e `SIGINT`:
 - Se ocioso: shutdown imediato.
