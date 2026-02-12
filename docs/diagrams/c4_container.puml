@@ -1,0 +1,72 @@
+@startuml c4_container
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontName Inter
+skinparam componentStyle rectangle
+
+title NBackup — C4 Container Diagram
+
+actor "Administrador" as admin
+
+package "Host de Origem" as origin {
+  component "nbackup-agent" as agent <<Go Binary>> {
+    component "Scheduler" as sched
+    component "Scanner" as scan
+    component "Streamer" as stream
+    component "RingBuffer" as rb
+    component "Retry Engine" as retry
+    component "Config" as cfg_a
+  }
+  database "Filesystem\n(Origem)" as fs_origin
+}
+
+package "Host de Destino" as dest {
+  component "nbackup-server" as server <<Go Binary>> {
+    component "TLS Listener" as tls_srv
+    component "Protocol Handler" as proto
+    component "Storage Writer" as sw
+    component "Rotation Manager" as rot
+    component "Config" as cfg_s
+  }
+  database "Filesystem\n(Destino)" as fs_dest
+}
+
+cloud "Rede" as net
+
+admin --> cfg_a : Configura\n(YAML)
+admin --> cfg_s : Configura\n(YAML)
+
+sched --> scan : trigger (cron)
+scan --> fs_origin : fs.WalkDir\n(glob filter)
+scan --> stream : file list
+stream --> rb : tar → gzip → buffer
+rb --> net : TCP + TLS 1.3\n(mTLS)
+retry ..> net : reconnect
+
+net --> tls_srv
+tls_srv --> proto : conexão aceita
+proto --> sw : data stream
+sw --> fs_dest : .tmp → rename\n(atomic write)
+sw --> rot : após checksum OK
+rot --> fs_dest : remove antigos
+
+note right of net
+  Protocolo NBKP binário
+  ~60 bytes overhead/sessão
+  Payload: tar.gz stream raw
+  Porta: 9847/tcp
+end note
+
+note bottom of rb
+  Ring buffer: 256MB (default)
+  Backpressure se cheio
+  Suporta resume mid-stream
+end note
+
+note bottom of sw
+  1. Grava em .tmp
+  2. Calcula SHA-256 inline
+  3. Compara com hash do agent
+  4. Rename atômico
+end note
+@enduml
