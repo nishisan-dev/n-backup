@@ -66,7 +66,7 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 		logger.Info("handshake successful, starting parallel pipeline", "maxStreams", entry.Parallels)
 
 		// Envia extensão ParallelInit na conexão primária
-		chunkSize := uint32(cfg.Resume.BufferSizeRaw)
+		chunkSize := uint32(cfg.Resume.ChunkSizeRaw)
 		if err := protocol.WriteParallelInit(conn, uint8(entry.Parallels), chunkSize); err != nil {
 			conn.Close()
 			return fmt.Errorf("writing ParallelInit: %w", err)
@@ -346,7 +346,7 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 	dispatcher := NewDispatcher(DispatcherConfig{
 		MaxStreams:  entry.Parallels,
 		BufferSize:  cfg.Resume.BufferSizeRaw,
-		ChunkSize:   int(cfg.Resume.BufferSizeRaw), // chunk = buffer_size
+		ChunkSize:   int(cfg.Resume.ChunkSizeRaw),
 		SessionID:   sessionID,
 		ServerAddr:  cfg.Server.Address,
 		TLSConfig:   tlsCfg,
