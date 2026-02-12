@@ -168,6 +168,47 @@ func (d *Dispatcher) StartSender(streamIdx int) {
 	}()
 }
 
+// StartSelfDrainingSender inicia um sender que auto-avança o ring buffer após cada write.
+// Usado para stream 0 onde não há ACK reader (a mesma conn é usada para FinalACK).
+// Sem Advance(), o ring buffer enche e o produtor bloqueia para sempre.
+func (d *Dispatcher) StartSelfDrainingSender(streamIdx int) {
+	stream := d.streams[streamIdx]
+
+	go func() {
+		defer close(stream.senderDone)
+		buf := make([]byte, 256*1024)
+		for {
+			stream.sendMu.Lock()
+			offset := stream.sendOffset
+			stream.sendMu.Unlock()
+
+			n, err := stream.rb.ReadAt(offset, buf)
+			if err != nil {
+				if err == ErrBufferClosed {
+					stream.senderErr <- nil
+					return
+				}
+				stream.senderErr <- err
+				return
+			}
+
+			if _, err := stream.conn.Write(buf[:n]); err != nil {
+				stream.senderErr <- fmt.Errorf("writing to stream %d conn: %w", streamIdx, err)
+				return
+			}
+
+			stream.sendMu.Lock()
+			stream.sendOffset += int64(n)
+			newOffset := stream.sendOffset
+			stream.sendMu.Unlock()
+
+			// Auto-advance: libera espaço no ring buffer imediatamente.
+			// Seguro para stream 0 pois resume não é suportado em modo paralelo.
+			stream.rb.Advance(newOffset)
+		}
+	}()
+}
+
 // StartACKReader inicia a goroutine que lê ChunkSACKs do server para um stream.
 func (d *Dispatcher) StartACKReader(streamIdx int) {
 	stream := d.streams[streamIdx]

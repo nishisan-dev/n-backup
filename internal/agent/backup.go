@@ -356,10 +356,10 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 	})
 	defer dispatcher.Close()
 
-	// Inicia sender e ACK reader para stream 0
-	dispatcher.StartSender(0)
-	// Nao iniciar ACK reader no stream 0: este mesmo conn e usado para FinalACK.
-	// Um reader concorrente pode consumir o byte do FinalACK e causar EOF espurio.
+	// Inicia sender auto-drenante para stream 0 — como não há ACK reader neste stream
+	// (a mesma conn é usada para Trailer+FinalACK), o sender avança o ring buffer
+	// diretamente após cada write, evitando deadlock por buffer cheio.
+	dispatcher.StartSelfDrainingSender(0)
 
 	// Inicia auto-scaler
 	scalerCtx, scalerCancel := context.WithCancel(ctx)
