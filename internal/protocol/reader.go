@@ -231,3 +231,96 @@ func ReadResumeACK(r io.Reader) (*ResumeACK, error) {
 		LastOffset: lastOffset,
 	}, nil
 }
+
+// ReadParallelInit lê a extensão ParallelInit do handshake (Client → Server).
+// Formato: [MaxStreams uint8 1B] [ChunkSize uint32 4B]
+func ReadParallelInit(r io.Reader) (*ParallelInit, error) {
+	var maxStreams [1]byte
+	if _, err := io.ReadFull(r, maxStreams[:]); err != nil {
+		return nil, fmt.Errorf("reading parallel init max streams: %w", err)
+	}
+
+	var chunkSize uint32
+	if err := binary.Read(r, binary.BigEndian, &chunkSize); err != nil {
+		return nil, fmt.Errorf("reading parallel init chunk size: %w", err)
+	}
+
+	return &ParallelInit{
+		MaxStreams: maxStreams[0],
+		ChunkSize:  chunkSize,
+	}, nil
+}
+
+// ReadParallelJoin lê o frame ParallelJoin (Client → Server).
+// O magic "PJIN" já foi lido pelo dispatcher; lê version + sessionID + streamIndex.
+func ReadParallelJoin(r io.Reader) (*ParallelJoin, error) {
+	// Lê version
+	var version [1]byte
+	if _, err := io.ReadFull(r, version[:]); err != nil {
+		return nil, fmt.Errorf("reading parallel join version: %w", err)
+	}
+	if version[0] != ProtocolVersion {
+		return nil, ErrInvalidVersion
+	}
+
+	// Lê sessionID até '\n'
+	br := bufio.NewReader(r)
+	sessionID, err := br.ReadString('\n')
+	if err != nil {
+		return nil, fmt.Errorf("reading parallel join session id: %w", err)
+	}
+	sessionID = sessionID[:len(sessionID)-1]
+
+	// Lê streamIndex
+	var streamIndex [1]byte
+	if _, err := io.ReadFull(br, streamIndex[:]); err != nil {
+		return nil, fmt.Errorf("reading parallel join stream index: %w", err)
+	}
+
+	return &ParallelJoin{
+		SessionID:   sessionID,
+		StreamIndex: streamIndex[0],
+	}, nil
+}
+
+// ReadParallelACK lê a resposta ao ParallelJoin (Server → Client).
+// Formato: [Status 1B]
+func ReadParallelACK(r io.Reader) (byte, error) {
+	var status [1]byte
+	if _, err := io.ReadFull(r, status[:]); err != nil {
+		return 0, fmt.Errorf("reading parallel ack: %w", err)
+	}
+	return status[0], nil
+}
+
+// ReadChunkSACK lê o frame ChunkSACK (Server → Client).
+func ReadChunkSACK(r io.Reader) (*ChunkSACK, error) {
+	var magic [4]byte
+	if _, err := io.ReadFull(r, magic[:]); err != nil {
+		return nil, fmt.Errorf("reading chunk sack magic: %w", err)
+	}
+	if magic != MagicChunkSACK {
+		return nil, ErrInvalidMagic
+	}
+
+	var streamIndex [1]byte
+	if _, err := io.ReadFull(r, streamIndex[:]); err != nil {
+		return nil, fmt.Errorf("reading chunk sack stream index: %w", err)
+	}
+
+	var chunkSeq uint32
+	if err := binary.Read(r, binary.BigEndian, &chunkSeq); err != nil {
+		return nil, fmt.Errorf("reading chunk sack chunk seq: %w", err)
+	}
+
+	var offset uint64
+	if err := binary.Read(r, binary.BigEndian, &offset); err != nil {
+		return nil, fmt.Errorf("reading chunk sack offset: %w", err)
+	}
+
+	return &ChunkSACK{
+		StreamIndex: streamIndex[0],
+		ChunkSeq:    chunkSeq,
+		Offset:      offset,
+	}, nil
+}

@@ -10,11 +10,20 @@ import "errors"
 
 // Magic bytes para identificação de frames.
 var (
-	MagicHandshake = [4]byte{'N', 'B', 'K', 'P'}
-	MagicTrailer   = [4]byte{'D', 'O', 'N', 'E'}
-	MagicPing      = [4]byte{'P', 'I', 'N', 'G'}
-	MagicResume    = [4]byte{'R', 'S', 'M', 'E'}
-	MagicSACK      = [4]byte{'S', 'A', 'C', 'K'}
+	MagicHandshake    = [4]byte{'N', 'B', 'K', 'P'}
+	MagicTrailer      = [4]byte{'D', 'O', 'N', 'E'}
+	MagicPing         = [4]byte{'P', 'I', 'N', 'G'}
+	MagicResume       = [4]byte{'R', 'S', 'M', 'E'}
+	MagicSACK         = [4]byte{'S', 'A', 'C', 'K'}
+	MagicParallelJoin = [4]byte{'P', 'J', 'I', 'N'}
+	MagicChunkSACK    = [4]byte{'C', 'S', 'A', 'K'}
+)
+
+// ParallelACK status codes (Server → Client após ParallelJoin).
+const (
+	ParallelStatusOK       byte = 0x00 // Join aceito
+	ParallelStatusFull     byte = 0x01 // Sessão não suporta mais streams
+	ParallelStatusNotFound byte = 0x02 // SessionID não encontrado
 )
 
 // ProtocolVersion é a versão atual do protocolo.
@@ -104,4 +113,26 @@ type SACK struct {
 type HealthResponse struct {
 	Status   byte
 	DiskFree uint64
+}
+
+// ParallelInit é enviado dentro do handshake para indicar suporte a streams paralelos.
+// Incluído como extensão opcional do Handshake (Client → Server).
+type ParallelInit struct {
+	MaxStreams uint8  // Número máximo de streams paralelos (1-8)
+	ChunkSize  uint32 // Tamanho de cada chunk em bytes
+}
+
+// ParallelJoin é enviado por conexões secundárias para se juntar a uma sessão existente.
+// Formato: Magic "PJIN" [4B] [Version 1B] [SessionID UTF-8 '\n'] [StreamIndex uint8 1B]
+type ParallelJoin struct {
+	SessionID   string
+	StreamIndex uint8
+}
+
+// ChunkSACK é o selective acknowledgment por stream (Server → Client).
+// Formato: Magic "CSAK" [4B] [StreamIndex uint8 1B] [ChunkSeq uint32 4B] [Offset uint64 8B]
+type ChunkSACK struct {
+	StreamIndex uint8
+	ChunkSeq    uint32
+	Offset      uint64
 }

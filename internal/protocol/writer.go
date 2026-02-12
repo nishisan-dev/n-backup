@@ -148,3 +148,63 @@ func WriteResumeACK(w io.Writer, status byte, lastOffset uint64) error {
 	}
 	return nil
 }
+
+// WriteParallelInit escreve a extensão ParallelInit no handshake (Client → Server).
+// Formato: [MaxStreams uint8 1B] [ChunkSize uint32 4B]
+func WriteParallelInit(w io.Writer, maxStreams uint8, chunkSize uint32) error {
+	if _, err := w.Write([]byte{maxStreams}); err != nil {
+		return fmt.Errorf("writing parallel init max streams: %w", err)
+	}
+	if err := binary.Write(w, binary.BigEndian, chunkSize); err != nil {
+		return fmt.Errorf("writing parallel init chunk size: %w", err)
+	}
+	return nil
+}
+
+// WriteParallelJoin escreve o frame ParallelJoin (Client → Server, conexão secundária).
+// Formato: [Magic "PJIN" 4B] [Version 1B] [SessionID UTF-8 '\n'] [StreamIndex uint8 1B]
+func WriteParallelJoin(w io.Writer, sessionID string, streamIndex uint8) error {
+	if _, err := w.Write(MagicParallelJoin[:]); err != nil {
+		return fmt.Errorf("writing parallel join magic: %w", err)
+	}
+	if _, err := w.Write([]byte{ProtocolVersion}); err != nil {
+		return fmt.Errorf("writing parallel join version: %w", err)
+	}
+	if _, err := w.Write([]byte(sessionID)); err != nil {
+		return fmt.Errorf("writing parallel join session id: %w", err)
+	}
+	if _, err := w.Write([]byte{'\n'}); err != nil {
+		return fmt.Errorf("writing parallel join delimiter: %w", err)
+	}
+	if _, err := w.Write([]byte{streamIndex}); err != nil {
+		return fmt.Errorf("writing parallel join stream index: %w", err)
+	}
+	return nil
+}
+
+// WriteParallelACK escreve a resposta ao ParallelJoin (Server → Client).
+// Formato: [Status 1B]
+func WriteParallelACK(w io.Writer, status byte) error {
+	if _, err := w.Write([]byte{status}); err != nil {
+		return fmt.Errorf("writing parallel ack: %w", err)
+	}
+	return nil
+}
+
+// WriteChunkSACK escreve o frame ChunkSACK (Server → Client, por stream).
+// Formato: [Magic "CSAK" 4B] [StreamIndex uint8 1B] [ChunkSeq uint32 4B] [Offset uint64 8B]
+func WriteChunkSACK(w io.Writer, streamIndex uint8, chunkSeq uint32, offset uint64) error {
+	if _, err := w.Write(MagicChunkSACK[:]); err != nil {
+		return fmt.Errorf("writing chunk sack magic: %w", err)
+	}
+	if _, err := w.Write([]byte{streamIndex}); err != nil {
+		return fmt.Errorf("writing chunk sack stream index: %w", err)
+	}
+	if err := binary.Write(w, binary.BigEndian, chunkSeq); err != nil {
+		return fmt.Errorf("writing chunk sack chunk seq: %w", err)
+	}
+	if err := binary.Write(w, binary.BigEndian, offset); err != nil {
+		return fmt.Errorf("writing chunk sack offset: %w", err)
+	}
+	return nil
+}

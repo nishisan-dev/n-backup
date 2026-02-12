@@ -328,3 +328,139 @@ func TestResumeACK_RoundTrip(t *testing.T) {
 		t.Errorf("expected lastOffset %d, got %d", lastOffset, rACK.LastOffset)
 	}
 }
+
+func TestParallelInit_RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+
+	maxStreams := uint8(4)
+	chunkSize := uint32(262144) // 256KB
+
+	if err := WriteParallelInit(&buf, maxStreams, chunkSize); err != nil {
+		t.Fatalf("WriteParallelInit: %v", err)
+	}
+
+	pi, err := ReadParallelInit(&buf)
+	if err != nil {
+		t.Fatalf("ReadParallelInit: %v", err)
+	}
+
+	if pi.MaxStreams != maxStreams {
+		t.Errorf("expected maxStreams %d, got %d", maxStreams, pi.MaxStreams)
+	}
+	if pi.ChunkSize != chunkSize {
+		t.Errorf("expected chunkSize %d, got %d", chunkSize, pi.ChunkSize)
+	}
+}
+
+func TestParallelInit_FrameSize(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteParallelInit(&buf, 4, 262144); err != nil {
+		t.Fatalf("WriteParallelInit: %v", err)
+	}
+	// MaxStreams(1) + ChunkSize(4) = 5 bytes
+	if buf.Len() != 5 {
+		t.Errorf("expected ParallelInit size 5, got %d", buf.Len())
+	}
+}
+
+func TestParallelJoin_RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+
+	sessionID := "abc-123-def-456"
+	streamIndex := uint8(2)
+
+	if err := WriteParallelJoin(&buf, sessionID, streamIndex); err != nil {
+		t.Fatalf("WriteParallelJoin: %v", err)
+	}
+
+	// ReadParallelJoin espera que o magic já foi lido pelo dispatcher
+	var magic [4]byte
+	if _, err := buf.Read(magic[:]); err != nil {
+		t.Fatalf("reading magic: %v", err)
+	}
+	if magic != MagicParallelJoin {
+		t.Fatalf("expected magic PJIN, got %q", magic)
+	}
+
+	pj, err := ReadParallelJoin(&buf)
+	if err != nil {
+		t.Fatalf("ReadParallelJoin: %v", err)
+	}
+
+	if pj.SessionID != sessionID {
+		t.Errorf("expected sessionID %q, got %q", sessionID, pj.SessionID)
+	}
+	if pj.StreamIndex != streamIndex {
+		t.Errorf("expected streamIndex %d, got %d", streamIndex, pj.StreamIndex)
+	}
+}
+
+func TestChunkSACK_RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+
+	streamIndex := uint8(3)
+	chunkSeq := uint32(42)
+	offset := uint64(134217728) // 128MB
+
+	if err := WriteChunkSACK(&buf, streamIndex, chunkSeq, offset); err != nil {
+		t.Fatalf("WriteChunkSACK: %v", err)
+	}
+
+	cs, err := ReadChunkSACK(&buf)
+	if err != nil {
+		t.Fatalf("ReadChunkSACK: %v", err)
+	}
+
+	if cs.StreamIndex != streamIndex {
+		t.Errorf("expected streamIndex %d, got %d", streamIndex, cs.StreamIndex)
+	}
+	if cs.ChunkSeq != chunkSeq {
+		t.Errorf("expected chunkSeq %d, got %d", chunkSeq, cs.ChunkSeq)
+	}
+	if cs.Offset != offset {
+		t.Errorf("expected offset %d, got %d", offset, cs.Offset)
+	}
+}
+
+func TestChunkSACK_FrameSize(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteChunkSACK(&buf, 1, 10, 1024); err != nil {
+		t.Fatalf("WriteChunkSACK: %v", err)
+	}
+	// Magic(4) + StreamIndex(1) + ChunkSeq(4) + Offset(8) = 17 bytes
+	if buf.Len() != 17 {
+		t.Errorf("expected ChunkSACK size 17, got %d", buf.Len())
+	}
+}
+
+func TestChunkSACK_InvalidMagic(t *testing.T) {
+	var buf bytes.Buffer
+	buf.Write([]byte("XXXX")) // magic errado
+	buf.Write(make([]byte, 13))
+
+	_, err := ReadChunkSACK(&buf)
+	if err == nil {
+		t.Fatal("expected error for invalid chunk sack magic")
+	}
+}
+
+func TestParallelACK_RoundTrip(t *testing.T) {
+	statuses := []byte{ParallelStatusOK, ParallelStatusFull, ParallelStatusNotFound}
+
+	for _, status := range statuses {
+		var buf bytes.Buffer
+
+		if err := WriteParallelACK(&buf, status); err != nil {
+			t.Fatalf("WriteParallelACK: %v", err)
+		}
+
+		got, err := ReadParallelACK(&buf)
+		if err != nil {
+			t.Fatalf("ReadParallelACK: %v", err)
+		}
+
+		if got != status {
+			t.Errorf("expected status %d, got %d", status, got)
+		}
+	}
+}
