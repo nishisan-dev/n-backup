@@ -35,8 +35,8 @@ func WriteHandshake(w io.Writer, agentName, storageName string) error {
 }
 
 // WriteACK escreve o frame ACK (Server → Client).
-// Formato: [Status 1B] [Message UTF-8 (opt)] ['\n' 1B]
-func WriteACK(w io.Writer, status byte, message string) error {
+// Formato: [Status 1B] [Message UTF-8 (opt)] ['\n' 1B] [SessionID UTF-8 (opt)] ['\n' 1B]
+func WriteACK(w io.Writer, status byte, message string, sessionID string) error {
 	if _, err := w.Write([]byte{status}); err != nil {
 		return fmt.Errorf("writing ack status: %w", err)
 	}
@@ -47,6 +47,12 @@ func WriteACK(w io.Writer, status byte, message string) error {
 	}
 	if _, err := w.Write([]byte{'\n'}); err != nil {
 		return fmt.Errorf("writing ack delimiter: %w", err)
+	}
+	if _, err := w.Write([]byte(sessionID)); err != nil {
+		return fmt.Errorf("writing ack session id: %w", err)
+	}
+	if _, err := w.Write([]byte{'\n'}); err != nil {
+		return fmt.Errorf("writing ack session delimiter: %w", err)
 	}
 	return nil
 }
@@ -95,6 +101,50 @@ func WriteHealthResponse(w io.Writer, status byte, diskFree uint64) error {
 	}
 	if _, err := w.Write([]byte{'\n'}); err != nil {
 		return fmt.Errorf("writing health delimiter: %w", err)
+	}
+	return nil
+}
+
+// WriteResume escreve o frame RESUME (Client → Server).
+// Formato: [Magic "RSME" 4B] [Version 1B] [SessionID UTF-8] ['\n' 1B] [AgentName UTF-8] ['\n' 1B] [StorageName UTF-8] ['\n' 1B]
+func WriteResume(w io.Writer, sessionID, agentName, storageName string) error {
+	if _, err := w.Write(MagicResume[:]); err != nil {
+		return fmt.Errorf("writing resume magic: %w", err)
+	}
+	if _, err := w.Write([]byte{ProtocolVersion}); err != nil {
+		return fmt.Errorf("writing resume version: %w", err)
+	}
+	for _, field := range []string{sessionID, agentName, storageName} {
+		if _, err := w.Write([]byte(field)); err != nil {
+			return fmt.Errorf("writing resume field: %w", err)
+		}
+		if _, err := w.Write([]byte{'\n'}); err != nil {
+			return fmt.Errorf("writing resume delimiter: %w", err)
+		}
+	}
+	return nil
+}
+
+// WriteSACK escreve o frame SACK (Server → Client).
+// Formato: [Magic "SACK" 4B] [Offset uint64 8B]
+func WriteSACK(w io.Writer, offset uint64) error {
+	if _, err := w.Write(MagicSACK[:]); err != nil {
+		return fmt.Errorf("writing sack magic: %w", err)
+	}
+	if err := binary.Write(w, binary.BigEndian, offset); err != nil {
+		return fmt.Errorf("writing sack offset: %w", err)
+	}
+	return nil
+}
+
+// WriteResumeACK escreve o frame Resume ACK (Server → Client).
+// Formato: [Status 1B] [LastOffset uint64 8B]
+func WriteResumeACK(w io.Writer, status byte, lastOffset uint64) error {
+	if _, err := w.Write([]byte{status}); err != nil {
+		return fmt.Errorf("writing resume ack status: %w", err)
+	}
+	if err := binary.Write(w, binary.BigEndian, lastOffset); err != nil {
+		return fmt.Errorf("writing resume ack offset: %w", err)
 	}
 	return nil
 }

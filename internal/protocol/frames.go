@@ -13,6 +13,8 @@ var (
 	MagicHandshake = [4]byte{'N', 'B', 'K', 'P'}
 	MagicTrailer   = [4]byte{'D', 'O', 'N', 'E'}
 	MagicPing      = [4]byte{'P', 'I', 'N', 'G'}
+	MagicResume    = [4]byte{'R', 'S', 'M', 'E'}
+	MagicSACK      = [4]byte{'S', 'A', 'C', 'K'}
 )
 
 // ProtocolVersion é a versão atual do protocolo.
@@ -25,6 +27,12 @@ const (
 	StatusBusy            byte = 0x02 // Backup deste agent já em andamento
 	StatusReject          byte = 0x03 // Agent não autorizado
 	StatusStorageNotFound byte = 0x04 // Storage solicitado não existe
+)
+
+// Status codes para Resume ACK (Server → Client após Resume).
+const (
+	ResumeStatusOK       byte = 0x00 // Resume aceito, continuar do offset
+	ResumeStatusNotFound byte = 0x01 // Sessão não encontrada, reiniciar
 )
 
 // Status codes para Final ACK (Server → Client após Trailer).
@@ -58,8 +66,9 @@ type Handshake struct {
 
 // ACK representa a resposta do server ao handshake.
 type ACK struct {
-	Status  byte
-	Message string
+	Status    byte
+	Message   string
+	SessionID string // UUID da sessão (gerado pelo server)
 }
 
 // Trailer representa o frame de finalização enviado pelo client.
@@ -71,6 +80,24 @@ type Trailer struct {
 // FinalACK representa a resposta final do server após validação.
 type FinalACK struct {
 	Status byte
+}
+
+// Resume representa o frame de resume enviado pelo client.
+type Resume struct {
+	SessionID   string
+	AgentName   string
+	StorageName string
+}
+
+// ResumeACK representa a resposta do server ao resume.
+type ResumeACK struct {
+	Status     byte
+	LastOffset uint64
+}
+
+// SACK representa um selective acknowledgment do server (offset confirmado).
+type SACK struct {
+	Offset uint64
 }
 
 // HealthResponse representa a resposta do server ao health check.

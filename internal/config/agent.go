@@ -7,6 +7,8 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -20,6 +22,7 @@ type AgentConfig struct {
 	TLS     TLSClient     `yaml:"tls"`
 	Backups []BackupEntry `yaml:"backups"`
 	Retry   RetryInfo     `yaml:"retry"`
+	Resume  ResumeConfig  `yaml:"resume"`
 	Logging LoggingInfo   `yaml:"logging"`
 }
 
@@ -63,6 +66,12 @@ type RetryInfo struct {
 	MaxAttempts  int           `yaml:"max_attempts"`
 	InitialDelay time.Duration `yaml:"initial_delay"`
 	MaxDelay     time.Duration `yaml:"max_delay"`
+}
+
+// ResumeConfig contém configurações do ring buffer para resume.
+type ResumeConfig struct {
+	BufferSize    string `yaml:"buffer_size"` // ex: "256mb", "1gb"
+	BufferSizeRaw int64  `yaml:"-"`           // valor parseado em bytes
 }
 
 // LoggingInfo contém configurações de logging.
@@ -143,5 +152,55 @@ func (c *AgentConfig) validate() error {
 	if c.Logging.Format == "" {
 		c.Logging.Format = "json"
 	}
+
+	// Resume defaults
+	if c.Resume.BufferSize == "" {
+		c.Resume.BufferSize = "256mb"
+	}
+	parsed, err := ParseByteSize(c.Resume.BufferSize)
+	if err != nil {
+		return fmt.Errorf("resume.buffer_size: %w", err)
+	}
+	c.Resume.BufferSizeRaw = parsed
+
 	return nil
+}
+
+// ParseByteSize converte strings human-readable como "256mb", "1gb" para bytes.
+func ParseByteSize(s string) (int64, error) {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == "" {
+		return 0, fmt.Errorf("empty size string")
+	}
+
+	// Ordenado do sufixo mais longo para o mais curto
+	// para evitar que "mb" matche como "b"
+	type suffix struct {
+		s string
+		m int64
+	}
+	suffixes := []suffix{
+		{"gb", 1024 * 1024 * 1024},
+		{"mb", 1024 * 1024},
+		{"kb", 1024},
+		{"b", 1},
+	}
+
+	for _, sfx := range suffixes {
+		if strings.HasSuffix(s, sfx.s) {
+			numStr := strings.TrimSuffix(s, sfx.s)
+			num, err := strconv.ParseInt(numStr, 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid number %q: %w", numStr, err)
+			}
+			return num * sfx.m, nil
+		}
+	}
+
+	// Tenta interpretar como número puro (bytes)
+	num, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("unknown size format %q", s)
+	}
+	return num, nil
 }

@@ -7,6 +7,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -81,7 +82,7 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 
 	if versionBuf[0] != protocol.ProtocolVersion {
 		logger.Error("unsupported protocol version", "version", versionBuf[0])
-		protocol.WriteACK(conn, protocol.StatusReject, "unsupported protocol version")
+		protocol.WriteACK(conn, protocol.StatusReject, "unsupported protocol version", "")
 		return
 	}
 
@@ -106,7 +107,7 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	storageInfo, ok := h.cfg.GetStorage(storageName)
 	if !ok {
 		logger.Warn("storage not found")
-		protocol.WriteACK(conn, protocol.StatusStorageNotFound, fmt.Sprintf("storage %q not found", storageName))
+		protocol.WriteACK(conn, protocol.StatusStorageNotFound, fmt.Sprintf("storage %q not found", storageName), "")
 		return
 	}
 
@@ -114,13 +115,17 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	lockKey := agentName + ":" + storageName
 	if _, loaded := h.locks.LoadOrStore(lockKey, true); loaded {
 		logger.Warn("backup already in progress for agent")
-		protocol.WriteACK(conn, protocol.StatusBusy, "backup already in progress")
+		protocol.WriteACK(conn, protocol.StatusBusy, "backup already in progress", "")
 		return
 	}
 	defer h.locks.Delete(lockKey)
 
+	// Gera sessionID
+	sessionID := generateSessionID()
+	logger = logger.With("session", sessionID)
+
 	// ACK GO
-	if err := protocol.WriteACK(conn, protocol.StatusGo, ""); err != nil {
+	if err := protocol.WriteACK(conn, protocol.StatusGo, "", sessionID); err != nil {
 		logger.Error("writing ACK", "error", err)
 		return
 	}
@@ -280,4 +285,14 @@ func hashFile(path string) ([32]byte, error) {
 	var checksum [32]byte
 	copy(checksum[:], h.Sum(nil))
 	return checksum, nil
+}
+
+// generateSessionID gera um UUID v4 simples para identificar sessões de backup.
+func generateSessionID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant RFC 4122
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }

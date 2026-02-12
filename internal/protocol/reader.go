@@ -67,12 +67,19 @@ func ReadACK(r io.Reader) (*ACK, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading ack message: %w", err)
 	}
-	// Remove o delimitador '\n'
 	msg = msg[:len(msg)-1]
 
+	// Lê sessionID até '\n'
+	sessionID, err := br.ReadString('\n')
+	if err != nil {
+		return nil, fmt.Errorf("reading ack session id: %w", err)
+	}
+	sessionID = sessionID[:len(sessionID)-1]
+
 	return &ACK{
-		Status:  status[0],
-		Message: msg,
+		Status:    status[0],
+		Message:   msg,
+		SessionID: sessionID,
 	}, nil
 }
 
@@ -147,5 +154,80 @@ func ReadHealthResponse(r io.Reader) (*HealthResponse, error) {
 	return &HealthResponse{
 		Status:   status[0],
 		DiskFree: diskFree,
+	}, nil
+}
+
+// ReadResume lê o frame RESUME (Client → Server).
+// O magic "RSME" já foi lido pelo dispatcher; lê version + sessionID + agentName + storageName.
+func ReadResume(r io.Reader) (*Resume, error) {
+	// Lê version
+	var version [1]byte
+	if _, err := io.ReadFull(r, version[:]); err != nil {
+		return nil, fmt.Errorf("reading resume version: %w", err)
+	}
+	if version[0] != ProtocolVersion {
+		return nil, ErrInvalidVersion
+	}
+
+	br := bufio.NewReader(r)
+
+	sessionID, err := br.ReadString('\n')
+	if err != nil {
+		return nil, fmt.Errorf("reading resume session id: %w", err)
+	}
+	sessionID = sessionID[:len(sessionID)-1]
+
+	agentName, err := br.ReadString('\n')
+	if err != nil {
+		return nil, fmt.Errorf("reading resume agent name: %w", err)
+	}
+	agentName = agentName[:len(agentName)-1]
+
+	storageName, err := br.ReadString('\n')
+	if err != nil {
+		return nil, fmt.Errorf("reading resume storage name: %w", err)
+	}
+	storageName = storageName[:len(storageName)-1]
+
+	return &Resume{
+		SessionID:   sessionID,
+		AgentName:   agentName,
+		StorageName: storageName,
+	}, nil
+}
+
+// ReadSACK lê o frame SACK (Server → Client).
+func ReadSACK(r io.Reader) (*SACK, error) {
+	var magic [4]byte
+	if _, err := io.ReadFull(r, magic[:]); err != nil {
+		return nil, fmt.Errorf("reading sack magic: %w", err)
+	}
+	if magic != MagicSACK {
+		return nil, ErrInvalidMagic
+	}
+
+	var offset uint64
+	if err := binary.Read(r, binary.BigEndian, &offset); err != nil {
+		return nil, fmt.Errorf("reading sack offset: %w", err)
+	}
+
+	return &SACK{Offset: offset}, nil
+}
+
+// ReadResumeACK lê o frame Resume ACK (Server → Client).
+func ReadResumeACK(r io.Reader) (*ResumeACK, error) {
+	var status [1]byte
+	if _, err := io.ReadFull(r, status[:]); err != nil {
+		return nil, fmt.Errorf("reading resume ack status: %w", err)
+	}
+
+	var lastOffset uint64
+	if err := binary.Read(r, binary.BigEndian, &lastOffset); err != nil {
+		return nil, fmt.Errorf("reading resume ack offset: %w", err)
+	}
+
+	return &ResumeACK{
+		Status:     status[0],
+		LastOffset: lastOffset,
 	}, nil
 }

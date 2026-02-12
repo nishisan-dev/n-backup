@@ -37,21 +37,22 @@ func TestHandshake_RoundTrip(t *testing.T) {
 
 func TestACK_RoundTrip(t *testing.T) {
 	tests := []struct {
-		name    string
-		status  byte
-		message string
+		name      string
+		status    byte
+		message   string
+		sessionID string
 	}{
-		{"GO with empty message", StatusGo, ""},
-		{"FULL with message", StatusFull, "disk is full"},
-		{"BUSY with message", StatusBusy, "backup in progress"},
-		{"REJECT with message", StatusReject, "agent not authorized"},
+		{"GO with session", StatusGo, "", "abc-123"},
+		{"FULL with message", StatusFull, "disk is full", ""},
+		{"BUSY with message", StatusBusy, "backup in progress", ""},
+		{"REJECT with message", StatusReject, "agent not authorized", ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
 
-			if err := WriteACK(&buf, tt.status, tt.message); err != nil {
+			if err := WriteACK(&buf, tt.status, tt.message, tt.sessionID); err != nil {
 				t.Fatalf("WriteACK: %v", err)
 			}
 
@@ -65,6 +66,9 @@ func TestACK_RoundTrip(t *testing.T) {
 			}
 			if ack.Message != tt.message {
 				t.Errorf("expected message %q, got %q", tt.message, ack.Message)
+			}
+			if ack.SessionID != tt.sessionID {
+				t.Errorf("expected sessionID %q, got %q", tt.sessionID, ack.SessionID)
 			}
 		})
 	}
@@ -243,5 +247,84 @@ func TestTrailer_FrameSize(t *testing.T) {
 	expected := 4 + 32 + 8
 	if buf.Len() != expected {
 		t.Errorf("expected trailer size %d, got %d", expected, buf.Len())
+	}
+}
+
+func TestResume_RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+
+	sessionID := "abc-123-def"
+	agentName := "test-agent"
+	storageName := "my-storage"
+
+	if err := WriteResume(&buf, sessionID, agentName, storageName); err != nil {
+		t.Fatalf("WriteResume: %v", err)
+	}
+
+	// ReadResume espera que o magic já foi lido pelo dispatcher
+	// Lê e valida o magic manualmente
+	var magic [4]byte
+	if _, err := buf.Read(magic[:]); err != nil {
+		t.Fatalf("reading magic: %v", err)
+	}
+	if magic != MagicResume {
+		t.Fatalf("expected magic RSME, got %q", magic)
+	}
+
+	resume, err := ReadResume(&buf)
+	if err != nil {
+		t.Fatalf("ReadResume: %v", err)
+	}
+
+	if resume.SessionID != sessionID {
+		t.Errorf("expected sessionID %q, got %q", sessionID, resume.SessionID)
+	}
+	if resume.AgentName != agentName {
+		t.Errorf("expected agentName %q, got %q", agentName, resume.AgentName)
+	}
+	if resume.StorageName != storageName {
+		t.Errorf("expected storageName %q, got %q", storageName, resume.StorageName)
+	}
+}
+
+func TestSACK_RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+
+	offset := uint64(67108864) // 64MB
+
+	if err := WriteSACK(&buf, offset); err != nil {
+		t.Fatalf("WriteSACK: %v", err)
+	}
+
+	sack, err := ReadSACK(&buf)
+	if err != nil {
+		t.Fatalf("ReadSACK: %v", err)
+	}
+
+	if sack.Offset != offset {
+		t.Errorf("expected offset %d, got %d", offset, sack.Offset)
+	}
+}
+
+func TestResumeACK_RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+
+	status := ResumeStatusOK
+	lastOffset := uint64(419430400) // 400MB
+
+	if err := WriteResumeACK(&buf, status, lastOffset); err != nil {
+		t.Fatalf("WriteResumeACK: %v", err)
+	}
+
+	rACK, err := ReadResumeACK(&buf)
+	if err != nil {
+		t.Fatalf("ReadResumeACK: %v", err)
+	}
+
+	if rACK.Status != status {
+		t.Errorf("expected status %d, got %d", status, rACK.Status)
+	}
+	if rACK.LastOffset != lastOffset {
+		t.Errorf("expected lastOffset %d, got %d", lastOffset, rACK.LastOffset)
 	}
 }
