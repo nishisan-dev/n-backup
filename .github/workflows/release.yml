@@ -19,9 +19,11 @@ jobs:
           - goos: linux
             goarch: amd64
             suffix: linux-amd64
+            debarch: amd64
           - goos: linux
             goarch: arm64
             suffix: linux-arm64
+            debarch: arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -39,7 +41,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: |
-          VERSION=${GITHUB_REF_NAME}
+          VERSION=${GITHUB_REF_NAME#v}
           LDFLAGS="-s -w -X main.version=${VERSION}"
 
           mkdir -p dist
@@ -47,16 +49,28 @@ jobs:
           go build -ldflags "${LDFLAGS}" -o dist/nbackup-agent-${{ matrix.suffix }} ./cmd/nbackup-agent
           go build -ldflags "${LDFLAGS}" -o dist/nbackup-server-${{ matrix.suffix }} ./cmd/nbackup-server
 
+      - name: Build .deb packages
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          chmod +x packaging/build-deb.sh
+          bash packaging/build-deb.sh "${VERSION}" "${{ matrix.debarch }}"
+
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum * > checksums-${{ matrix.suffix }}.txt
+          sha256sum nbackup-agent-${{ matrix.suffix }} nbackup-server-${{ matrix.suffix }} > checksums-${{ matrix.suffix }}.txt
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: binaries-${{ matrix.suffix }}
-          path: dist/
+          name: release-${{ matrix.suffix }}
+          path: |
+            dist/nbackup-agent-${{ matrix.suffix }}
+            dist/nbackup-server-${{ matrix.suffix }}
+            dist/nbackup-agent_*_${{ matrix.debarch }}.deb
+            dist/nbackup-server_*_${{ matrix.debarch }}.deb
+            dist/checksums-${{ matrix.suffix }}.txt
+            dist/checksums-deb-${{ matrix.debarch }}.txt
 
   publish:
     name: Publish Release
