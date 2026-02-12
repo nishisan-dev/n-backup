@@ -1,3 +1,7 @@
+// Copyright (c) 2025 Nishisan. All rights reserved.
+// Use of this source code is governed by the N-Backup License (Non-Commercial Evaluation)
+// that can be found in the LICENSE file.
+
 // Package pki fornece funções para configuração de TLS com mTLS
 // (Mutual TLS) para o protocolo NBackup.
 package pki

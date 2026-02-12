@@ -1,3 +1,7 @@
+// Copyright (c) 2025 Nishisan. All rights reserved.
+// Use of this source code is governed by the N-Backup License (Non-Commercial Evaluation)
+// that can be found in the LICENSE file.
+
 // Package protocol implementa o protocolo binário NBackup para comunicação
 // entre agent e server sobre TCP+TLS.
 package protocol
