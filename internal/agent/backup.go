@@ -358,7 +358,8 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 
 	// Inicia sender e ACK reader para stream 0
 	dispatcher.StartSender(0)
-	dispatcher.StartACKReader(0)
+	// Nao iniciar ACK reader no stream 0: este mesmo conn e usado para FinalACK.
+	// Um reader concorrente pode consumir o byte do FinalACK e causar EOF espurio.
 
 	// Inicia auto-scaler
 	scalerCtx, scalerCancel := context.WithCancel(ctx)
