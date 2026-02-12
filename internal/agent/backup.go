@@ -59,6 +59,21 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 	}
 
 	logger = logger.With("session", sessionID)
+
+	// Rota paralela: envia ParallelInit e delega para RunParallelBackup
+	if entry.Parallels > 0 {
+		logger.Info("handshake successful, starting parallel pipeline", "maxStreams", entry.Parallels)
+
+		// Envia extensão ParallelInit na conexão primária
+		chunkSize := uint32(cfg.Resume.BufferSizeRaw)
+		if err := protocol.WriteParallelInit(conn, uint8(entry.Parallels), chunkSize); err != nil {
+			conn.Close()
+			return fmt.Errorf("writing ParallelInit: %w", err)
+		}
+
+		return runParallelBackup(ctx, cfg, entry, conn, sessionID, tlsCfg, logger, progress)
+	}
+
 	logger.Info("handshake successful, starting resumable pipeline")
 
 	// Ring buffer para backpressure e resume
@@ -319,6 +334,105 @@ func dialWithContext(ctx context.Context, address string, tlsCfg *tls.Config) (*
 	tlsConn.SetDeadline(time.Time{})
 
 	return tlsConn, nil
+}
+
+// runParallelBackup executa o pipeline de backup com streams paralelos.
+// O stream 0 já está conectado (conn). Streams adicionais são abertos pelo auto-scaler.
+func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, conn net.Conn, sessionID string, tlsCfg *tls.Config, logger *slog.Logger, progress *ProgressReporter) error {
+	defer conn.Close()
+
+	// Cria dispatcher com stream primário
+	dispatcher := NewDispatcher(DispatcherConfig{
+		MaxStreams:  entry.Parallels,
+		BufferSize:  cfg.Resume.BufferSizeRaw,
+		ChunkSize:   int(cfg.Resume.BufferSizeRaw), // chunk = buffer_size
+		SessionID:   sessionID,
+		ServerAddr:  cfg.Server.Address,
+		TLSConfig:   tlsCfg,
+		AgentName:   cfg.Agent.Name,
+		StorageName: entry.Storage,
+		Logger:      logger,
+		PrimaryConn: conn,
+	})
+	defer dispatcher.Close()
+
+	// Inicia sender e ACK reader para stream 0
+	dispatcher.StartSender(0)
+	dispatcher.StartACKReader(0)
+
+	// Inicia auto-scaler
+	scalerCtx, scalerCancel := context.WithCancel(ctx)
+	defer scalerCancel()
+
+	scaler := NewAutoScaler(AutoScalerConfig{
+		Dispatcher: dispatcher,
+		Logger:     logger,
+	})
+	go scaler.Run(scalerCtx)
+
+	// Pipeline: scanner → tar.gz → dispatcher (produtor)
+	sources := make([]string, len(entry.Sources))
+	for i, s := range entry.Sources {
+		sources[i] = s.Path
+	}
+	scanner := NewScanner(sources, entry.Exclude)
+
+	var producerResult *StreamResult
+	var producerErr error
+	producerDone := make(chan struct{})
+
+	go func() {
+		defer close(producerDone)
+		producerResult, producerErr = Stream(ctx, scanner, dispatcher, progress)
+		dispatcher.Close() // sinaliza EOF para todos os senders
+	}()
+
+	// Espera todos os senders terminarem
+	if err := dispatcher.WaitAllSenders(); err != nil {
+		scalerCancel()
+		<-producerDone
+		return fmt.Errorf("parallel sender error: %w", err)
+	}
+
+	// Espera produtor terminar
+	<-producerDone
+	scalerCancel()
+
+	if producerErr != nil {
+		return fmt.Errorf("parallel pipeline error: %w", producerErr)
+	}
+
+	// Envia trailer pela conexão primária (stream 0)
+	logger.Info("parallel data transfer complete",
+		"bytes", producerResult.Size,
+		"checksum", fmt.Sprintf("%x", producerResult.Checksum),
+		"streams", dispatcher.ActiveStreams(),
+	)
+
+	if err := protocol.WriteTrailer(conn, producerResult.Checksum, producerResult.Size); err != nil {
+		return fmt.Errorf("writing trailer: %w", err)
+	}
+
+	// Lê Final ACK
+	finalACK, err := protocol.ReadFinalACK(conn)
+	if err != nil {
+		return fmt.Errorf("reading final ACK: %w", err)
+	}
+
+	switch finalACK.Status {
+	case protocol.FinalStatusOK:
+		logger.Info("parallel backup completed successfully",
+			"bytes", producerResult.Size,
+			"streams", entry.Parallels,
+		)
+		return nil
+	case protocol.FinalStatusChecksumMismatch:
+		return fmt.Errorf("server reported checksum mismatch")
+	case protocol.FinalStatusWriteError:
+		return fmt.Errorf("server reported write error")
+	default:
+		return fmt.Errorf("server returned unknown status: %d", finalACK.Status)
+	}
 }
 
 // teeWriter é um io.Writer que escreve em ambos os destinos.
