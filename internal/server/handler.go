@@ -41,6 +41,11 @@ type Handler struct {
 	logger   *slog.Logger
 	locks    *sync.Map // Mapa de locks por "agent:storage"
 	sessions *sync.Map // Mapa de sessões parciais por sessionID
+
+	// Métricas observáveis pelo stats reporter
+	TrafficIn   atomic.Int64 // bytes recebidos da rede (acumulado desde último reset)
+	DiskWrite   atomic.Int64 // bytes escritos em disco (acumulado desde último reset)
+	ActiveConns atomic.Int32 // conexões ativas no momento
 }
 
 // NewHandler cria um novo Handler.
@@ -53,8 +58,51 @@ func NewHandler(cfg *config.ServerConfig, logger *slog.Logger, locks *sync.Map, 
 	}
 }
 
+// StartStatsReporter imprime métricas do server a cada 15 segundos:
+// conexões ativas, traffic in (MB/s), disk write (MB/s), sessões abertas.
+func (h *Handler) StartStatsReporter(ctx context.Context) {
+	const interval = 15 * time.Second
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Swap-and-reset: lê o acumulado e zera
+			trafficIn := h.TrafficIn.Swap(0)
+			diskWrite := h.DiskWrite.Swap(0)
+			conns := h.ActiveConns.Load()
+
+			// Conta sessões abertas (parciais + paralelas)
+			var sessionCount int
+			h.sessions.Range(func(_, _ interface{}) bool {
+				sessionCount++
+				return true
+			})
+
+			// Calcula taxas em MB/s
+			secs := interval.Seconds()
+			trafficMBps := float64(trafficIn) / secs / (1024 * 1024)
+			diskMBps := float64(diskWrite) / secs / (1024 * 1024)
+
+			h.logger.Info("server stats",
+				"conns", conns,
+				"sessions", sessionCount,
+				"traffic_in_MBps", fmt.Sprintf("%.2f", trafficMBps),
+				"disk_write_MBps", fmt.Sprintf("%.2f", diskMBps),
+				"traffic_in_total_MB", fmt.Sprintf("%.1f", float64(trafficIn)/(1024*1024)),
+				"disk_write_total_MB", fmt.Sprintf("%.1f", float64(diskWrite)/(1024*1024)),
+			)
+		}
+	}
+}
+
 // HandleConnection processa uma conexão individual de backup.
 func (h *Handler) HandleConnection(ctx context.Context, conn net.Conn) {
+	h.ActiveConns.Add(1)
+	defer h.ActiveConns.Add(-1)
 	defer conn.Close()
 
 	logger := h.logger.With("remote", conn.RemoteAddr().String())
@@ -331,6 +379,8 @@ func (h *Handler) receiveWithSACK(ctx context.Context, reader io.Reader, sackWri
 			}
 			bytesReceived += int64(n)
 			session.BytesWritten += int64(n)
+			h.TrafficIn.Add(int64(n))
+			h.DiskWrite.Add(int64(n))
 
 			// Envia SACK a cada sackInterval bytes
 			if bytesReceived-lastSACK >= sackInterval {
@@ -542,7 +592,7 @@ type ParallelSession struct {
 	MaxStreams  uint8
 	ChunkSize   uint32
 	StreamWg    sync.WaitGroup // barreira para todos os streams secundários
-	Done        chan struct{}   // sinaliza conclusão
+	Done        chan struct{}  // sinaliza conclusão
 	CreatedAt   time.Time
 }
 
@@ -650,6 +700,8 @@ func (h *Handler) receiveParallelStream(ctx context.Context, reader io.Reader, s
 		}
 
 		bytesReceived += n
+		h.TrafficIn.Add(n)
+		h.DiskWrite.Add(n)
 
 		// Registra no manifest
 		session.Assembler.RegisterChunk(ChunkMeta{
