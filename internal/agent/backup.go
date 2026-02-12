@@ -413,6 +413,14 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 		return fmt.Errorf("writing trailer: %w", err)
 	}
 
+	// Sinaliza EOF para o server (TLS close_notify) — server lê até EOF,
+	// extrai trailer dos últimos 44 bytes. Sem isso, server bloqueia em Read().
+	if tlsConn, ok := conn.(*tls.Conn); ok {
+		if err := tlsConn.CloseWrite(); err != nil {
+			return fmt.Errorf("closing write side: %w", err)
+		}
+	}
+
 	// Lê Final ACK
 	finalACK, err := protocol.ReadFinalACK(conn)
 	if err != nil {
