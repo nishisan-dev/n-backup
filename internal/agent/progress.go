@@ -26,18 +26,20 @@ type ProgressReporter struct {
 	totalBytes   int64
 	totalObjects int64
 
-	startTime time.Time
-	done      chan struct{}
+	startTime      time.Time
+	warmupDuration time.Duration // período sem exibir speed/ETA
+	done           chan struct{}
 }
 
 // NewProgressReporter cria um reporter e inicia o ticker de renderização.
 func NewProgressReporter(name string, totalBytes, totalObjects int64) *ProgressReporter {
 	p := &ProgressReporter{
-		name:         name,
-		totalBytes:   totalBytes,
-		totalObjects: totalObjects,
-		startTime:    time.Now(),
-		done:         make(chan struct{}),
+		name:           name,
+		totalBytes:     totalBytes,
+		totalObjects:   totalObjects,
+		startTime:      time.Now(),
+		warmupDuration: 3 * time.Second,
+		done:           make(chan struct{}),
 	}
 	go p.renderLoop()
 	return p
@@ -85,11 +87,12 @@ func (p *ProgressReporter) render(final bool) {
 	retries := p.retries.Load()
 	elapsed := time.Since(p.startTime)
 
-	// Velocidade
+	// Velocidade e ETA só após warm-up
 	elapsedSec := elapsed.Seconds()
+	warmedUp := elapsed >= p.warmupDuration
 	var speed float64
 	var objsPerSec float64
-	if elapsedSec > 0.1 {
+	if warmedUp && elapsedSec > 0.1 {
 		speed = float64(bytes) / elapsedSec
 		objsPerSec = float64(objects) / elapsedSec
 	}
@@ -136,13 +139,23 @@ func (p *ProgressReporter) render(final bool) {
 
 	// Formata bytes e velocidade
 	bytesStr := formatBytes(bytes)
-	speedStr := formatBytes(int64(speed)) + "/s"
 
-	line := fmt.Sprintf("\r[%s] %s  %s  │  %s  │  %s objs (%s/s)  │  %s  │  ETA %s%s",
-		p.name, bar, bytesStr, speedStr,
-		formatNumber(objects), formatNumber(int64(objsPerSec)),
-		elapsedStr, eta, retriesStr,
-	)
+	var line string
+	if !warmedUp && !final {
+		// Warm-up: exibe apenas barra + bytes + objetos + elapsed (sem speed/ETA)
+		line = fmt.Sprintf("\r[%s] %s  %s  │  %s objs  │  %s  │  warming up...",
+			p.name, bar, bytesStr,
+			formatNumber(objects),
+			elapsedStr,
+		)
+	} else {
+		speedStr := formatBytes(int64(speed)) + "/s"
+		line = fmt.Sprintf("\r[%s] %s  %s  │  %s  │  %s objs (%s/s)  │  %s  │  ETA %s%s",
+			p.name, bar, bytesStr, speedStr,
+			formatNumber(objects), formatNumber(int64(objsPerSec)),
+			elapsedStr, eta, retriesStr,
+		)
+	}
 
 	// Pad com espaços para limpar restos de linha anterior
 	if len(line) < 120 {
