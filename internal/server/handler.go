@@ -664,10 +664,10 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	pSession.StreamWg.Wait()
 	logger.Info("all parallel streams complete")
 
-	// Monta o arquivo final na ordem global
-	assembledPath, totalBytes, err := assembler.Assemble()
+	// Finaliza o assembler (flush + close)
+	assembledPath, totalBytes, err := assembler.Finalize()
 	if err != nil {
-		logger.Error("assembling chunks", "error", err)
+		logger.Error("finalizing assembly", "error", err)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
 		return
 	}
@@ -679,7 +679,8 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 
 // receiveParallelStream recebe dados de um stream paralelo usando ChunkHeader framing.
 // Cada chunk é precedido por um ChunkHeader (8B: GlobalSeq uint32 + Length uint32).
-// Cada chunk é escrito em seu próprio arquivo, permitindo reconstrução por GlobalSeq.
+// Os dados são escritos incrementalmente no assembler, que decide se escreve direto
+// no arquivo final (in-order) ou bufferiza temporariamente (out-of-order).
 // O Trailer é enviado como o último chunk (dentro de ChunkHeader framing).
 // O stream termina com EOF (CloseWrite do agent) ou io.EOF no reader.
 func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, reader io.Reader, sackWriter io.Writer, streamIndex uint8, session *ParallelSession, logger *slog.Logger) (int64, error) {
@@ -699,31 +700,14 @@ func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, read
 			return bytesReceived, fmt.Errorf("reading chunk header from stream %d: %w", streamIndex, err)
 		}
 
-		// Cria arquivo para este chunk específico
-		chunkFile, chunkPath, err := session.Assembler.ChunkFileForSeq(hdr.GlobalSeq)
-		if err != nil {
-			return bytesReceived, fmt.Errorf("creating chunk file seq %d: %w", hdr.GlobalSeq, err)
+		// Escreve incrementalmente no assembler
+		if err := session.Assembler.WriteChunk(hdr.GlobalSeq, io.LimitReader(reader, int64(hdr.Length)), int64(hdr.Length)); err != nil {
+			return bytesReceived, fmt.Errorf("writing chunk seq %d to assembler: %w", hdr.GlobalSeq, err)
 		}
 
-		// Lê exatamente Length bytes do stream
-		n, err := io.CopyN(chunkFile, reader, int64(hdr.Length))
-		chunkFile.Close()
-
-		if err != nil {
-			return bytesReceived, fmt.Errorf("reading chunk data seq %d: %w", hdr.GlobalSeq, err)
-		}
-
-		bytesReceived += n
-		h.TrafficIn.Add(n)
-		h.DiskWrite.Add(n)
-
-		// Registra no manifest
-		session.Assembler.RegisterChunk(ChunkMeta{
-			StreamIndex: streamIndex,
-			GlobalSeq:   hdr.GlobalSeq,
-			FilePath:    chunkPath,
-			Length:      n,
-		})
+		bytesReceived += int64(hdr.Length)
+		h.TrafficIn.Add(int64(hdr.Length))
+		h.DiskWrite.Add(int64(hdr.Length))
 
 		// Envia ChunkSACK
 		localChunkSeq++

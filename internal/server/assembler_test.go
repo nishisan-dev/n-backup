@@ -5,6 +5,7 @@
 package server
 
 import (
+	"bytes"
 	"io"
 	"log/slog"
 	"os"
@@ -12,83 +13,28 @@ import (
 	"testing"
 )
 
-func TestChunkAssembler_AssembleSingleStream(t *testing.T) {
+func TestChunkAssembler_WriteChunk_InOrder(t *testing.T) {
 	tmpDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	ca, err := NewChunkAssembler("test-session-1", tmpDir, logger)
+	ca, err := NewChunkAssembler("test-inorder", tmpDir, logger)
 	if err != nil {
 		t.Fatalf("NewChunkAssembler: %v", err)
 	}
 	defer ca.Cleanup()
 
-	// Escreve chunk com GlobalSeq 0
-	f, path, err := ca.ChunkFileForSeq(0)
+	// Escreve 3 chunks in-order
+	chunks := []string{"AAAA", "BBBB", "CCCC"}
+	for i, data := range chunks {
+		r := bytes.NewReader([]byte(data))
+		if err := ca.WriteChunk(uint32(i), r, int64(len(data))); err != nil {
+			t.Fatalf("WriteChunk(%d): %v", i, err)
+		}
+	}
+
+	resultPath, totalBytes, err := ca.Finalize()
 	if err != nil {
-		t.Fatalf("ChunkFileForSeq(0): %v", err)
-	}
-	data := []byte("hello world from stream 0")
-	if _, err := f.Write(data); err != nil {
-		t.Fatalf("writing chunk: %v", err)
-	}
-	f.Close()
-
-	ca.RegisterChunk(ChunkMeta{StreamIndex: 0, GlobalSeq: 0, FilePath: path, Length: int64(len(data))})
-
-	// Monta
-	resultPath, totalBytes, err := ca.Assemble()
-	if err != nil {
-		t.Fatalf("Assemble: %v", err)
-	}
-	defer os.Remove(resultPath)
-
-	if totalBytes != int64(len(data)) {
-		t.Errorf("expected totalBytes=%d, got %d", len(data), totalBytes)
-	}
-
-	// Verifica conteúdo
-	content, err := os.ReadFile(resultPath)
-	if err != nil {
-		t.Fatalf("reading assembled file: %v", err)
-	}
-	if string(content) != string(data) {
-		t.Errorf("expected %q, got %q", data, content)
-	}
-}
-
-func TestChunkAssembler_AssembleMultiStream_GlobalOrder(t *testing.T) {
-	tmpDir := t.TempDir()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	ca, err := NewChunkAssembler("test-session-2", tmpDir, logger)
-	if err != nil {
-		t.Fatalf("NewChunkAssembler: %v", err)
-	}
-	defer ca.Cleanup()
-
-	// Simula round-robin: chunk0→stream0, chunk1→stream1, chunk2→stream0
-	// GlobalSeq 0: "AAAA" enviado pelo stream 0
-	f0, p0, _ := ca.ChunkFileForSeq(0)
-	f0.Write([]byte("AAAA"))
-	f0.Close()
-	ca.RegisterChunk(ChunkMeta{StreamIndex: 0, GlobalSeq: 0, FilePath: p0, Length: 4})
-
-	// GlobalSeq 1: "BBBB" enviado pelo stream 1
-	f1, p1, _ := ca.ChunkFileForSeq(1)
-	f1.Write([]byte("BBBB"))
-	f1.Close()
-	ca.RegisterChunk(ChunkMeta{StreamIndex: 1, GlobalSeq: 1, FilePath: p1, Length: 4})
-
-	// GlobalSeq 2: "CCCC" enviado pelo stream 0
-	f2, p2, _ := ca.ChunkFileForSeq(2)
-	f2.Write([]byte("CCCC"))
-	f2.Close()
-	ca.RegisterChunk(ChunkMeta{StreamIndex: 0, GlobalSeq: 2, FilePath: p2, Length: 4})
-
-	// Monta — deve reconstruir na ordem GlobalSeq: AAAA BBBB CCCC
-	resultPath, totalBytes, err := ca.Assemble()
-	if err != nil {
-		t.Fatalf("Assemble: %v", err)
+		t.Fatalf("Finalize: %v", err)
 	}
 	defer os.Remove(resultPath)
 
@@ -107,37 +53,37 @@ func TestChunkAssembler_AssembleMultiStream_GlobalOrder(t *testing.T) {
 	}
 }
 
-func TestChunkAssembler_AssembleOutOfOrder(t *testing.T) {
+func TestChunkAssembler_WriteChunk_OutOfOrder(t *testing.T) {
 	tmpDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	ca, err := NewChunkAssembler("test-session-ooo", tmpDir, logger)
+	ca, err := NewChunkAssembler("test-ooo", tmpDir, logger)
 	if err != nil {
 		t.Fatalf("NewChunkAssembler: %v", err)
 	}
 	defer ca.Cleanup()
 
-	// Registra chunks fora de ordem para verificar que Assemble reordena por GlobalSeq
-	f2, p2, _ := ca.ChunkFileForSeq(2)
-	f2.Write([]byte("CCCC"))
-	f2.Close()
-	ca.RegisterChunk(ChunkMeta{StreamIndex: 1, GlobalSeq: 2, FilePath: p2, Length: 4})
+	// Chunks chegam fora de ordem: 2, 0, 1
+	if err := ca.WriteChunk(2, bytes.NewReader([]byte("CCCC")), 4); err != nil {
+		t.Fatalf("WriteChunk(2): %v", err)
+	}
+	if err := ca.WriteChunk(0, bytes.NewReader([]byte("AAAA")), 4); err != nil {
+		t.Fatalf("WriteChunk(0): %v", err)
+	}
+	// Ao escrever chunk 1, os chunks 1 e 2 devem ser flushed
+	if err := ca.WriteChunk(1, bytes.NewReader([]byte("BBBB")), 4); err != nil {
+		t.Fatalf("WriteChunk(1): %v", err)
+	}
 
-	f0, p0, _ := ca.ChunkFileForSeq(0)
-	f0.Write([]byte("AAAA"))
-	f0.Close()
-	ca.RegisterChunk(ChunkMeta{StreamIndex: 0, GlobalSeq: 0, FilePath: p0, Length: 4})
-
-	f1, p1, _ := ca.ChunkFileForSeq(1)
-	f1.Write([]byte("BBBB"))
-	f1.Close()
-	ca.RegisterChunk(ChunkMeta{StreamIndex: 0, GlobalSeq: 1, FilePath: p1, Length: 4})
-
-	resultPath, _, err := ca.Assemble()
+	resultPath, totalBytes, err := ca.Finalize()
 	if err != nil {
-		t.Fatalf("Assemble: %v", err)
+		t.Fatalf("Finalize: %v", err)
 	}
 	defer os.Remove(resultPath)
+
+	if totalBytes != 12 {
+		t.Errorf("expected totalBytes=12, got %d", totalBytes)
+	}
 
 	content, err := os.ReadFile(resultPath)
 	if err != nil {
@@ -150,20 +96,64 @@ func TestChunkAssembler_AssembleOutOfOrder(t *testing.T) {
 	}
 }
 
+func TestChunkAssembler_WriteChunk_MultiStream_RoundRobin(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	ca, err := NewChunkAssembler("test-rr", tmpDir, logger)
+	if err != nil {
+		t.Fatalf("NewChunkAssembler: %v", err)
+	}
+	defer ca.Cleanup()
+
+	// Simula round-robin: stream 0 recebe seq 0,2,4; stream 1 recebe seq 1,3,5
+	// Mas chegam intercalados: 0, 1, 2, 3, 4, 5 → todos in-order
+	for i := 0; i < 6; i++ {
+		data := []byte{byte('A' + i), byte('A' + i)}
+		if err := ca.WriteChunk(uint32(i), bytes.NewReader(data), 2); err != nil {
+			t.Fatalf("WriteChunk(%d): %v", i, err)
+		}
+	}
+
+	resultPath, totalBytes, err := ca.Finalize()
+	if err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	defer os.Remove(resultPath)
+
+	if totalBytes != 12 {
+		t.Errorf("expected totalBytes=12, got %d", totalBytes)
+	}
+
+	content, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("reading assembled file: %v", err)
+	}
+	expected := "AABBCCDDEEFF"
+	if string(content) != expected {
+		t.Errorf("expected %q, got %q", expected, content)
+	}
+}
+
 func TestChunkAssembler_Cleanup(t *testing.T) {
 	tmpDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	ca, err := NewChunkAssembler("test-session-3", tmpDir, logger)
+	ca, err := NewChunkAssembler("test-cleanup", tmpDir, logger)
 	if err != nil {
 		t.Fatalf("NewChunkAssembler: %v", err)
 	}
 
+	// Escreve um chunk out-of-order para criar o chunkDir
+	if err := ca.WriteChunk(1, bytes.NewReader([]byte("XX")), 2); err != nil {
+		t.Fatalf("WriteChunk(1): %v", err)
+	}
+
 	chunkDir := ca.ChunkDir()
 
-	// Verifica que o diretório foi criado
+	// Verifica que o diretório de chunks foi criado (lazy creation)
 	if _, err := os.Stat(chunkDir); os.IsNotExist(err) {
-		t.Fatal("chunk dir should exist before cleanup")
+		t.Fatal("chunk dir should exist after out-of-order write")
 	}
 
 	// Cleanup
@@ -171,7 +161,7 @@ func TestChunkAssembler_Cleanup(t *testing.T) {
 		t.Fatalf("Cleanup: %v", err)
 	}
 
-	// Verifica que o diretório foi removido
+	// Verifica que o diretório de chunks foi removido
 	if _, err := os.Stat(chunkDir); !os.IsNotExist(err) {
 		t.Fatal("chunk dir should not exist after cleanup")
 	}
@@ -190,5 +180,38 @@ func TestChunkAssembler_ChunkDir(t *testing.T) {
 	expected := filepath.Join(tmpDir, "chunks_my-session")
 	if ca.ChunkDir() != expected {
 		t.Errorf("expected chunkDir=%q, got %q", expected, ca.ChunkDir())
+	}
+}
+
+func TestChunkAssembler_LazyChunkDir_NotCreatedForInOrder(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	ca, err := NewChunkAssembler("test-lazy", tmpDir, logger)
+	if err != nil {
+		t.Fatalf("NewChunkAssembler: %v", err)
+	}
+	defer ca.Cleanup()
+
+	// Escreve chunks in-order — o chunkDir NÃO deve ser criado
+	for i := 0; i < 5; i++ {
+		if err := ca.WriteChunk(uint32(i), bytes.NewReader([]byte("XX")), 2); err != nil {
+			t.Fatalf("WriteChunk(%d): %v", i, err)
+		}
+	}
+
+	chunkDir := ca.ChunkDir()
+	if _, err := os.Stat(chunkDir); !os.IsNotExist(err) {
+		t.Fatal("chunk dir should NOT exist for in-order-only writes")
+	}
+
+	resultPath, totalBytes, err := ca.Finalize()
+	if err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	defer os.Remove(resultPath)
+
+	if totalBytes != 10 {
+		t.Errorf("expected totalBytes=10, got %d", totalBytes)
 	}
 }
