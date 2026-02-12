@@ -30,7 +30,7 @@ func RunDaemon(cfg *config.AgentConfig, logger *slog.Logger) error {
 	)
 
 	backupFn := func(ctx context.Context) error {
-		return RunAllBackups(ctx, cfg, logger)
+		return RunAllBackups(ctx, cfg, false, logger)
 	}
 
 	sched, err := NewScheduler(cfg.Daemon.Schedule, logger, backupFn)
@@ -56,20 +56,51 @@ func RunDaemon(cfg *config.AgentConfig, logger *slog.Logger) error {
 }
 
 // RunAllBackups executa todos os blocos de backup sequencialmente com retry.
-func RunAllBackups(ctx context.Context, cfg *config.AgentConfig, logger *slog.Logger) error {
+// Se showProgress for true, exibe barra de progresso no terminal.
+func RunAllBackups(ctx context.Context, cfg *config.AgentConfig, showProgress bool, logger *slog.Logger) error {
 	var firstErr error
 
 	for _, entry := range cfg.Backups {
 		entryLogger := logger.With("backup", entry.Name, "storage", entry.Storage)
 		entryLogger.Info("starting backup entry")
 
-		err := RunBackupWithRetry(ctx, cfg, entry, entryLogger)
+		var progress *ProgressReporter
+		if showProgress {
+			sources := make([]string, len(entry.Sources))
+			for i, s := range entry.Sources {
+				sources[i] = s.Path
+			}
+			scanner := NewScanner(sources, entry.Exclude)
+			stats, err := scanner.PreScan(ctx)
+			if err != nil {
+				entryLogger.Warn("pre-scan failed, progress bar will estimate", "error", err)
+				stats = &ScanStats{}
+			}
+			entryLogger.Info("pre-scan complete",
+				"files", stats.TotalObjects,
+				"raw_bytes", stats.TotalBytes,
+			)
+			// totalBytes é estimativa crú (raw, pré-compressão)
+			// O gzip tipicamente compacta ~30-60%, então usamos ~50% como estimate
+			estimatedCompressed := stats.TotalBytes / 2
+			if estimatedCompressed == 0 {
+				estimatedCompressed = stats.TotalBytes
+			}
+			progress = NewProgressReporter(entry.Name, estimatedCompressed, stats.TotalObjects)
+		}
+
+		err := RunBackupWithRetry(ctx, cfg, entry, entryLogger, progress)
+
+		if progress != nil {
+			progress.Stop()
+		}
+
 		if err != nil {
 			entryLogger.Error("backup entry failed", "error", err)
 			if firstErr == nil {
 				firstErr = fmt.Errorf("backup %q failed: %w", entry.Name, err)
 			}
-			continue // Continua com os próximos backups mesmo se um falhar
+			continue
 		}
 
 		entryLogger.Info("backup entry completed successfully")
@@ -79,11 +110,14 @@ func RunAllBackups(ctx context.Context, cfg *config.AgentConfig, logger *slog.Lo
 }
 
 // RunBackupWithRetry executa um backup entry com retry usando exponential backoff.
-func RunBackupWithRetry(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, logger *slog.Logger) error {
+func RunBackupWithRetry(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, logger *slog.Logger, progress *ProgressReporter) error {
 	var lastErr error
 
 	for attempt := 0; attempt < cfg.Retry.MaxAttempts; attempt++ {
 		if attempt > 0 {
+			if progress != nil {
+				progress.AddRetry()
+			}
 			delay := calculateBackoff(attempt, cfg.Retry.InitialDelay, cfg.Retry.MaxDelay)
 			logger.Info("retrying backup",
 				"attempt", attempt+1,
@@ -97,7 +131,7 @@ func RunBackupWithRetry(ctx context.Context, cfg *config.AgentConfig, entry conf
 			}
 		}
 
-		err := RunBackup(ctx, cfg, entry, logger)
+		err := RunBackup(ctx, cfg, entry, logger, progress)
 		if err == nil {
 			return nil
 		}

@@ -8,6 +8,7 @@
 |------|---------|-----------|
 | Daemon | `nbackup-agent --config agent.yaml` | Executa como daemon, backups automáticos via cron |
 | Once | `nbackup-agent --config agent.yaml --once` | Executa um backup e encerra |
+| Once + Progress | `nbackup-agent --config agent.yaml --once --progress` | Backup manual com barra de progresso |
 | Health | `nbackup-agent health <addr>` | Verifica status do server |
 
 ### nbackup-server
@@ -59,6 +60,37 @@ nbackup-agent --config /etc/nbackup/agent.yaml --once
 - Testes iniciais de conectividade
 - Backups ad-hoc antes de manutenção
 - Execução via crontab externo
+
+### Progress Bar (`--progress`)
+
+Para acompanhar o progresso visualmente:
+
+```bash
+nbackup-agent --config /etc/nbackup/agent.yaml --once --progress
+```
+
+Output no terminal:
+
+```
+[app] ████████████░░░░░░░░░░░░░░░░  42.3 MB  │  12.8 MB/s  │  1,247 objs (831/s)  │  0:03  │  ETA 0:07
+```
+
+| Campo | Descrição |
+|-------|-----------|
+| `[nome]` | Nome do backup entry em execução |
+| Barra | Progresso proporcional (estimativa baseada em compressão ~50%) |
+| Bytes | Total compactado enviado ao server |
+| MB/s | Velocidade de transferência |
+| objs (n/s) | Objetos processados e taxa por segundo |
+| Elapsed | Tempo decorrido desde o início |
+| ETA | Tempo estimado restante |
+| retries | Mostrado somente se houve tentativas de reconexão |
+
+> [!NOTE]
+> O ETA é calculado com base na velocidade média observada. A estimativa de total considera ~50% de compressão gzip sobre o tamanho raw dos arquivos.
+
+> [!TIP]
+> A flag `--progress` só funciona com `--once`. No modo daemon os logs são suficientes.
 
 ---
 

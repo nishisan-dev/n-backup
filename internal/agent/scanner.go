@@ -137,3 +137,49 @@ func (s *Scanner) isExcluded(relPath string, isDir bool) bool {
 	}
 	return false
 }
+
+// ScanStats contém o resultado de um pré-scan rápido (sem I/O de leitura).
+type ScanStats struct {
+	TotalBytes   int64
+	TotalObjects int64
+}
+
+// PreScan faz um walk rápido para contar bytes e objetos elegíveis.
+// Usado para calcular ETA e barra de progresso proporcional.
+func (s *Scanner) PreScan(ctx context.Context) (*ScanStats, error) {
+	stats := &ScanStats{}
+	for _, src := range s.sources {
+		src = filepath.Clean(src)
+		err := filepath.WalkDir(src, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			relPath := strings.TrimPrefix(path, "/")
+			if s.isExcluded(relPath, d.IsDir()) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+
+			stats.TotalObjects++
+			if d.Type().IsRegular() {
+				info, err := d.Info()
+				if err == nil {
+					stats.TotalBytes += info.Size()
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return stats, nil
+}

@@ -25,14 +25,15 @@ type StreamResult struct {
 // Stream executa o pipeline de streaming zero-copy:
 // Scanner → tar.Writer → gzip.Writer → io.Writer (conexão de rede).
 // O SHA-256 é calculado inline sobre o stream gzip compactado.
+// Se progress não for nil, alimenta contadores de bytes e objetos.
 // Retorna o checksum e total de bytes escritos no destino.
-func Stream(ctx context.Context, scanner *Scanner, dest io.Writer) (*StreamResult, error) {
+func Stream(ctx context.Context, scanner *Scanner, dest io.Writer, progress *ProgressReporter) (*StreamResult, error) {
 	// Buffer de escrita para reduzir syscalls na conexão TLS
 	bufDest := bufio.NewWriterSize(dest, 256*1024) // 256KB
 
 	// Cria o hash inline
 	hasher := sha256.New()
-	counter := &countWriter{w: io.MultiWriter(bufDest, hasher)}
+	counter := &countWriter{w: io.MultiWriter(bufDest, hasher), progress: progress}
 
 	// Pipeline: tar → gzip → buffer → (dest + hasher)
 	gzWriter, err := gzip.NewWriterLevel(counter, gzip.BestSpeed)
@@ -51,7 +52,13 @@ func Stream(ctx context.Context, scanner *Scanner, dest io.Writer) (*StreamResul
 		default:
 		}
 
-		return addToTar(tw, entry)
+		if err := addToTar(tw, entry); err != nil {
+			return err
+		}
+		if progress != nil {
+			progress.AddObject()
+		}
+		return nil
 	})
 
 	if scanErr != nil {
@@ -146,15 +153,19 @@ func addToTar(tw *tar.Writer, entry FileEntry) error {
 	return nil
 }
 
-// countWriter conta os bytes escritos.
+// countWriter conta os bytes escritos e opcionalmente alimenta o progress reporter.
 type countWriter struct {
-	w io.Writer
-	n uint64
+	w        io.Writer
+	n        uint64
+	progress *ProgressReporter
 }
 
 func (cw *countWriter) Write(p []byte) (int, error) {
 	n, err := cw.w.Write(p)
 	cw.n += uint64(n)
+	if cw.progress != nil {
+		cw.progress.AddBytes(int64(n))
+	}
 	return n, err
 }
 

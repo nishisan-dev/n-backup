@@ -35,7 +35,7 @@ const resumeBackoff = 2 * time.Second
 //
 // Se a conexão cair, o sender reconecta, envia RESUME,
 // e continua de onde parou (se o offset ainda estiver no buffer).
-func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, logger *slog.Logger) error {
+func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, logger *slog.Logger, progress *ProgressReporter) error {
 	logger = logger.With("backup", entry.Name, "storage", entry.Storage)
 	logger.Info("starting backup session", "server", cfg.Server.Address)
 
@@ -77,7 +77,7 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 
 	go func() {
 		defer close(producerDone)
-		producerResult, producerErr = Stream(ctx, scanner, rb)
+		producerResult, producerErr = Stream(ctx, scanner, rb, progress)
 		rb.Close() // sinaliza EOF para o sender
 	}()
 

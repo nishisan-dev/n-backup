@@ -24,6 +24,7 @@ func main() {
 
 	configPath := flag.String("config", "/etc/nbackup/agent.yaml", "path to agent config file")
 	once := flag.Bool("once", false, "run backup once and exit (no daemon)")
+	showProgress := flag.Bool("progress", false, "show progress bar (only with --once)")
 	flag.Parse()
 
 	cfg, err := config.LoadAgentConfig(*configPath)
@@ -36,7 +37,7 @@ func main() {
 
 	if *once {
 		// Execução única — roda todos os backups sequencialmente
-		if err := agent.RunAllBackups(context.Background(), cfg, logger); err != nil {
+		if err := agent.RunAllBackups(context.Background(), cfg, *showProgress, logger); err != nil {
 			logger.Error("backup failed", "error", err)
 			os.Exit(1)
 		}
