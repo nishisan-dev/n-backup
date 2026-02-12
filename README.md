@@ -11,7 +11,7 @@ Sistema de backup high-performance client-server escrito em Go. Realiza streamin
 
 ## Arquitetura
 
-![Arquitetura StreamGuard](https://uml.nishisan.dev/proxy?src=https://raw.githubusercontent.com/nishisan-dev/n-backup/main/docs/diagrams/architecture.puml)
+![Arquitetura StreamGuard](https://uml.nishisan.dev/proxy?src=https://raw.githubusercontent.com/nishisan-dev/n-backup/refs/heads/main/docs/diagrams/architecture.puml)
 
 ## Componentes
 
