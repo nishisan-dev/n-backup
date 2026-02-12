@@ -21,10 +21,11 @@ func RunDaemon(cfg *config.AgentConfig, logger *slog.Logger) error {
 	logger.Info("starting daemon",
 		"agent", cfg.Agent.Name,
 		"schedule", cfg.Daemon.Schedule,
+		"backups", len(cfg.Backups),
 	)
 
 	backupFn := func(ctx context.Context) error {
-		return RunBackupWithRetry(ctx, cfg, logger)
+		return RunAllBackups(ctx, cfg, logger)
 	}
 
 	sched, err := NewScheduler(cfg.Daemon.Schedule, logger, backupFn)
@@ -49,8 +50,31 @@ func RunDaemon(cfg *config.AgentConfig, logger *slog.Logger) error {
 	return nil
 }
 
-// RunBackupWithRetry executa o backup com retry usando exponential backoff.
-func RunBackupWithRetry(ctx context.Context, cfg *config.AgentConfig, logger *slog.Logger) error {
+// RunAllBackups executa todos os blocos de backup sequencialmente com retry.
+func RunAllBackups(ctx context.Context, cfg *config.AgentConfig, logger *slog.Logger) error {
+	var firstErr error
+
+	for _, entry := range cfg.Backups {
+		entryLogger := logger.With("backup", entry.Name, "storage", entry.Storage)
+		entryLogger.Info("starting backup entry")
+
+		err := RunBackupWithRetry(ctx, cfg, entry, entryLogger)
+		if err != nil {
+			entryLogger.Error("backup entry failed", "error", err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("backup %q failed: %w", entry.Name, err)
+			}
+			continue // Continua com os próximos backups mesmo se um falhar
+		}
+
+		entryLogger.Info("backup entry completed successfully")
+	}
+
+	return firstErr
+}
+
+// RunBackupWithRetry executa um backup entry com retry usando exponential backoff.
+func RunBackupWithRetry(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, logger *slog.Logger) error {
 	var lastErr error
 
 	for attempt := 0; attempt < cfg.Retry.MaxAttempts; attempt++ {
@@ -68,7 +92,7 @@ func RunBackupWithRetry(ctx context.Context, cfg *config.AgentConfig, logger *sl
 			}
 		}
 
-		err := RunBackup(ctx, cfg, logger)
+		err := RunBackup(ctx, cfg, entry, logger)
 		if err == nil {
 			return nil
 		}

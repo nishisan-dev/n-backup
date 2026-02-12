@@ -18,7 +18,7 @@ import (
 type Handler struct {
 	cfg    *config.ServerConfig
 	logger *slog.Logger
-	locks  *sync.Map // Mapa de locks por agent name
+	locks  *sync.Map // Mapa de locks por "agent:storage"
 }
 
 // NewHandler cria um novo Handler.
@@ -67,7 +67,7 @@ func (h *Handler) handleHealthCheck(conn net.Conn, logger *slog.Logger) {
 
 // handleBackup processa uma sessão de backup completa.
 func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.Logger) {
-	// O magic "NBKP" já foi lido; ler restante do handshake (version + agent name)
+	// O magic "NBKP" já foi lido; ler restante do handshake (version + agent name + storage name)
 	versionBuf := make([]byte, 1)
 	if _, err := io.ReadFull(conn, versionBuf); err != nil {
 		logger.Error("reading protocol version", "error", err)
@@ -81,30 +81,38 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	}
 
 	// Lê agent name até '\n'
-	var agentNameBuf []byte
-	oneByte := make([]byte, 1)
-	for {
-		if _, err := io.ReadFull(conn, oneByte); err != nil {
-			logger.Error("reading agent name", "error", err)
-			return
-		}
-		if oneByte[0] == '\n' {
-			break
-		}
-		agentNameBuf = append(agentNameBuf, oneByte[0])
+	agentName, err := readUntilNewline(conn)
+	if err != nil {
+		logger.Error("reading agent name", "error", err)
+		return
 	}
-	agentName := string(agentNameBuf)
 
-	logger = logger.With("agent", agentName)
+	// Lê storage name até '\n'
+	storageName, err := readUntilNewline(conn)
+	if err != nil {
+		logger.Error("reading storage name", "error", err)
+		return
+	}
+
+	logger = logger.With("agent", agentName, "storage", storageName)
 	logger.Info("backup handshake received")
 
-	// Lock: apenas um backup por agent
-	if _, loaded := h.locks.LoadOrStore(agentName, true); loaded {
+	// Busca storage nomeado
+	storageInfo, ok := h.cfg.GetStorage(storageName)
+	if !ok {
+		logger.Warn("storage not found")
+		protocol.WriteACK(conn, protocol.StatusStorageNotFound, fmt.Sprintf("storage %q not found", storageName))
+		return
+	}
+
+	// Lock: por agent:storage (permite backups simultâneos de storages diferentes do mesmo agent)
+	lockKey := agentName + ":" + storageName
+	if _, loaded := h.locks.LoadOrStore(lockKey, true); loaded {
 		logger.Warn("backup already in progress for agent")
 		protocol.WriteACK(conn, protocol.StatusBusy, "backup already in progress")
 		return
 	}
-	defer h.locks.Delete(agentName)
+	defer h.locks.Delete(lockKey)
 
 	// ACK GO
 	if err := protocol.WriteACK(conn, protocol.StatusGo, ""); err != nil {
@@ -113,7 +121,7 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	}
 
 	// Prepara escrita atômica
-	writer, err := NewAtomicWriter(h.cfg.Storage.BaseDir, agentName)
+	writer, err := NewAtomicWriter(storageInfo.BaseDir, agentName)
 	if err != nil {
 		logger.Error("creating atomic writer", "error", err)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
@@ -127,9 +135,7 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 		return
 	}
 
-	// Stream: conn → arquivo .tmp + hasher (inline)
-	// O io.Copy vai consumir tudo até EOF, incluindo o trailer.
-	// O trailer tem tamanho fixo: "DONE"(4) + SHA256(32) + uint64(8) = 44 bytes.
+	// Stream: conn → arquivo .tmp
 	bytesReceived, err := io.Copy(tmpFile, conn)
 	tmpFile.Close()
 	if err != nil {
@@ -192,7 +198,7 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	}
 
 	// Rotação
-	if err := Rotate(writer.AgentDir(), h.cfg.Storage.MaxBackups); err != nil {
+	if err := Rotate(writer.AgentDir(), storageInfo.MaxBackups); err != nil {
 		logger.Warn("rotation failed", "error", err)
 	}
 
@@ -203,6 +209,22 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	)
 
 	protocol.WriteFinalACK(conn, protocol.FinalStatusOK)
+}
+
+// readUntilNewline lê bytes até encontrar '\n', retornando a string sem o delimitador.
+func readUntilNewline(conn net.Conn) (string, error) {
+	var buf []byte
+	oneByte := make([]byte, 1)
+	for {
+		if _, err := io.ReadFull(conn, oneByte); err != nil {
+			return "", err
+		}
+		if oneByte[0] == '\n' {
+			break
+		}
+		buf = append(buf, oneByte[0])
+	}
+	return string(buf), nil
 }
 
 // readTrailerFromFile lê os últimos trailerSize bytes do arquivo e parseia como Trailer.

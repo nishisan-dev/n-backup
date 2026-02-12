@@ -9,10 +9,10 @@ import (
 
 // ServerConfig representa a configuração completa do nbackup-server.
 type ServerConfig struct {
-	Server  ServerListen `yaml:"server"`
-	TLS     TLSServer    `yaml:"tls"`
-	Storage StorageInfo  `yaml:"storage"`
-	Logging LoggingInfo  `yaml:"logging"`
+	Server   ServerListen           `yaml:"server"`
+	TLS      TLSServer              `yaml:"tls"`
+	Storages map[string]StorageInfo `yaml:"storages"`
+	Logging  LoggingInfo            `yaml:"logging"`
 }
 
 // ServerListen contém o endereço de escuta do server.
@@ -27,10 +27,16 @@ type TLSServer struct {
 	ServerKey  string `yaml:"server_key"`
 }
 
-// StorageInfo contém configurações de armazenamento e rotação.
+// StorageInfo contém configurações de armazenamento e rotação de um storage nomeado.
 type StorageInfo struct {
 	BaseDir    string `yaml:"base_dir"`
 	MaxBackups int    `yaml:"max_backups"`
+}
+
+// GetStorage retorna o StorageInfo pelo nome ou false se não existir.
+func (c *ServerConfig) GetStorage(name string) (StorageInfo, bool) {
+	s, ok := c.Storages[name]
+	return s, ok
 }
 
 // LoadServerConfig lê e valida o arquivo YAML de configuração do server.
@@ -65,11 +71,17 @@ func (c *ServerConfig) validate() error {
 	if c.TLS.ServerKey == "" {
 		return fmt.Errorf("tls.server_key is required")
 	}
-	if c.Storage.BaseDir == "" {
-		return fmt.Errorf("storage.base_dir is required")
+	if len(c.Storages) == 0 {
+		return fmt.Errorf("storages must have at least one entry")
 	}
-	if c.Storage.MaxBackups < 1 {
-		c.Storage.MaxBackups = 5
+	for name, s := range c.Storages {
+		if s.BaseDir == "" {
+			return fmt.Errorf("storages.%s.base_dir is required", name)
+		}
+		if s.MaxBackups < 1 {
+			s.MaxBackups = 5
+			c.Storages[name] = s
+		}
 	}
 	if c.Logging.Level == "" {
 		c.Logging.Level = "info"

@@ -15,17 +15,23 @@ tls:
   client_cert: /etc/nbackup/agent.pem
   client_key: /etc/nbackup/agent-key.pem
 
-backup:
-  sources:
-    - path: /app/scripts
-    - path: /home
-    - path: /etc
-  exclude:
-    - "*/access-logs/"
-    - "*.log"
-    - "*/tmp/sess*"
-    - "node_modules/**"
-    - ".git/**"
+backups:
+  - name: "app"
+    storage: "scripts"             # Nome do storage no server
+    sources:
+      - path: /app/scripts
+    exclude:
+      - "*.log"
+
+  - name: "home"
+    storage: "home-dirs"
+    sources:
+      - path: /home
+      - path: /etc
+    exclude:
+      - ".git/**"
+      - "node_modules/**"
+      - "*/tmp/sess*"
 
 retry:
   max_attempts: 5

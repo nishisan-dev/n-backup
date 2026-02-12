@@ -9,8 +9,9 @@ import (
 func TestHandshake_RoundTrip(t *testing.T) {
 	var buf bytes.Buffer
 	agentName := "web-server-01"
+	storageName := "scripts"
 
-	if err := WriteHandshake(&buf, agentName); err != nil {
+	if err := WriteHandshake(&buf, agentName, storageName); err != nil {
 		t.Fatalf("WriteHandshake: %v", err)
 	}
 
@@ -24,6 +25,9 @@ func TestHandshake_RoundTrip(t *testing.T) {
 	}
 	if hs.AgentName != agentName {
 		t.Errorf("expected agent name %q, got %q", agentName, hs.AgentName)
+	}
+	if hs.StorageName != storageName {
+		t.Errorf("expected storage name %q, got %q", storageName, hs.StorageName)
 	}
 }
 
@@ -140,9 +144,10 @@ func TestHealthCheck_RoundTrip(t *testing.T) {
 
 func TestHandshake_InvalidMagic(t *testing.T) {
 	var buf bytes.Buffer
-	buf.Write([]byte("XXXX"))         // magic errado
-	buf.WriteByte(ProtocolVersion)    // version
-	buf.Write([]byte("agent-name\n")) // name
+	buf.Write([]byte("XXXX")) // magic errado
+	buf.WriteByte(ProtocolVersion)
+	buf.Write([]byte("agent-name\n"))
+	buf.Write([]byte("storage-name\n"))
 
 	_, err := ReadHandshake(&buf)
 	if err == nil {
@@ -155,6 +160,7 @@ func TestHandshake_InvalidVersion(t *testing.T) {
 	buf.Write(MagicHandshake[:])
 	buf.WriteByte(0xFF) // versão inválida
 	buf.Write([]byte("agent-name\n"))
+	buf.Write([]byte("storage-name\n"))
 
 	_, err := ReadHandshake(&buf)
 	if err == nil {
@@ -205,16 +211,17 @@ func TestTrailer_Truncated(t *testing.T) {
 }
 
 func TestHandshake_FrameSize(t *testing.T) {
-	// Verifica que o overhead é mínimo conforme a spec (~60 bytes por sessão)
+	// Verifica que o overhead é mínimo conforme a spec
 	var buf bytes.Buffer
 	agentName := "web-server-01"
+	storageName := "scripts"
 
-	if err := WriteHandshake(&buf, agentName); err != nil {
+	if err := WriteHandshake(&buf, agentName, storageName); err != nil {
 		t.Fatalf("WriteHandshake: %v", err)
 	}
 
-	// Magic(4) + Version(1) + AgentName(14) + Delimiter(1) = 20 bytes
-	expected := 4 + 1 + len(agentName) + 1
+	// Magic(4) + Version(1) + AgentName(14) + Delimiter(1) + StorageName(7) + Delimiter(1) = 28 bytes
+	expected := 4 + 1 + len(agentName) + 1 + len(storageName) + 1
 	if buf.Len() != expected {
 		t.Errorf("expected handshake size %d, got %d", expected, buf.Len())
 	}

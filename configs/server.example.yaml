@@ -9,9 +9,14 @@ tls:
   server_cert: /etc/nbackup/server.pem
   server_key: /etc/nbackup/server-key.pem
 
-storage:
-  base_dir: /var/backups/nbackup
-  max_backups: 5                   # Manter no máximo N backups por agent
+storages:
+  scripts:
+    base_dir: /var/backups/scripts
+    max_backups: 5
+
+  home-dirs:
+    base_dir: /var/backups/home
+    max_backups: 10
 
 logging:
   level: info                      # debug, info, warn, error

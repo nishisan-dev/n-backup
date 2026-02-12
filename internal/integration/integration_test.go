@@ -29,22 +29,20 @@ import (
 	"github.com/nishisan-dev/n-backup/internal/server"
 )
 
+const testStorageName = "e2e-storage"
+
 // TestEndToEnd_FullBackupSession testa o fluxo completo:
-// Agent conecta → Handshake → Stream tar.gz → Trailer → Server valida checksum → Commit → Rotação
+// Agent conecta → Handshake (com storage) → Stream tar.gz → Trailer → Server valida → Commit → Rotação
 func TestEndToEnd_FullBackupSession(t *testing.T) {
-	// Setup PKI
 	pkiDir := t.TempDir()
 	pki := generatePKI(t, pkiDir)
 
-	// Setup storage
 	storageDir := t.TempDir()
 	agentName := "test-agent-e2e"
 
-	// Inicia server
 	serverCfg := &config.ServerConfig{
-		Storage: config.StorageInfo{
-			BaseDir:    storageDir,
-			MaxBackups: 3,
+		Storages: map[string]config.StorageInfo{
+			testStorageName: {BaseDir: storageDir, MaxBackups: 3},
 		},
 		Logging: config.LoggingInfo{Level: "debug", Format: "text"},
 	}
@@ -72,15 +70,12 @@ func TestEndToEnd_FullBackupSession(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Server em goroutine
 	logger := testLogger()
 	go server.RunWithListener(ctx, ln, serverCfg, logger)
 
-	// Prepara dados de teste
 	sourceDir := t.TempDir()
 	createTestFiles(t, sourceDir)
 
-	// --- Client flow ---
 	clientTLS, err := tls.LoadX509KeyPair(pki.clientCertPath, pki.clientKeyPath)
 	if err != nil {
 		t.Fatalf("loading client cert: %v", err)
@@ -99,8 +94,8 @@ func TestEndToEnd_FullBackupSession(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// 1. Handshake
-	if err := protocol.WriteHandshake(conn, agentName); err != nil {
+	// 1. Handshake com storage name
+	if err := protocol.WriteHandshake(conn, agentName, testStorageName); err != nil {
 		t.Fatalf("WriteHandshake: %v", err)
 	}
 
@@ -121,7 +116,6 @@ func TestEndToEnd_FullBackupSession(t *testing.T) {
 	gzW, _ := gzip.NewWriterLevel(multiW, gzip.BestSpeed)
 	tw := tar.NewWriter(gzW)
 
-	// Walk source dir → tar
 	filepath.WalkDir(sourceDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -149,7 +143,6 @@ func TestEndToEnd_FullBackupSession(t *testing.T) {
 	copy(checksum[:], hasher.Sum(nil))
 	size := uint64(streamBuf.Len())
 
-	// Envia stream + trailer
 	if _, err := conn.Write(streamBuf.Bytes()); err != nil {
 		t.Fatalf("writing stream: %v", err)
 	}
@@ -158,10 +151,9 @@ func TestEndToEnd_FullBackupSession(t *testing.T) {
 		t.Fatalf("WriteTrailer: %v", err)
 	}
 
-	// Fecha escrita (half-close) para o server receber EOF
 	conn.CloseWrite()
 
-	// 3. Lê Final ACK
+	// 3. Final ACK
 	finalACK, err := protocol.ReadFinalACK(conn)
 	if err != nil {
 		t.Fatalf("ReadFinalACK: %v", err)
@@ -171,7 +163,7 @@ func TestEndToEnd_FullBackupSession(t *testing.T) {
 		t.Fatalf("expected FinalStatusOK, got %d", finalACK.Status)
 	}
 
-	// 4. Verifica que o backup foi gravado
+	// 4. Verifica backup gravado
 	agentDir := filepath.Join(storageDir, agentName)
 	entries, err := os.ReadDir(agentDir)
 	if err != nil {
@@ -189,18 +181,19 @@ func TestEndToEnd_FullBackupSession(t *testing.T) {
 		t.Fatalf("expected 1 backup, got %d: %v", len(backupFiles), backupFiles)
 	}
 
-	// 5. Verifica que o tar.gz é válido e contém os arquivos
 	backupPath := filepath.Join(agentDir, backupFiles[0])
 	verifyTarGz(t, backupPath, sourceDir)
 }
 
-// TestEndToEnd_HealthCheck testa o fluxo de health check.
-func TestEndToEnd_HealthCheck(t *testing.T) {
+// TestEndToEnd_StorageNotFound testa que o server rejeita storage inexistente.
+func TestEndToEnd_StorageNotFound(t *testing.T) {
 	pkiDir := t.TempDir()
 	pki := generatePKI(t, pkiDir)
 
 	serverCfg := &config.ServerConfig{
-		Storage: config.StorageInfo{BaseDir: t.TempDir(), MaxBackups: 3},
+		Storages: map[string]config.StorageInfo{
+			"existing": {BaseDir: t.TempDir(), MaxBackups: 3},
+		},
 		Logging: config.LoggingInfo{Level: "debug", Format: "text"},
 	}
 
@@ -235,7 +228,64 @@ func TestEndToEnd_HealthCheck(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// PING
+	// Envia handshake com storage que não existe
+	if err := protocol.WriteHandshake(conn, "some-agent", "nonexistent-storage"); err != nil {
+		t.Fatalf("WriteHandshake: %v", err)
+	}
+
+	ack, err := protocol.ReadACK(conn)
+	if err != nil {
+		t.Fatalf("ReadACK: %v", err)
+	}
+
+	if ack.Status != protocol.StatusStorageNotFound {
+		t.Errorf("expected StatusStorageNotFound, got %d: %s", ack.Status, ack.Message)
+	}
+}
+
+// TestEndToEnd_HealthCheck testa o fluxo de health check.
+func TestEndToEnd_HealthCheck(t *testing.T) {
+	pkiDir := t.TempDir()
+	pki := generatePKI(t, pkiDir)
+
+	serverCfg := &config.ServerConfig{
+		Storages: map[string]config.StorageInfo{
+			"default": {BaseDir: t.TempDir(), MaxBackups: 3},
+		},
+		Logging: config.LoggingInfo{Level: "debug", Format: "text"},
+	}
+
+	serverTLS, _ := tls.LoadX509KeyPair(pki.serverCertPath, pki.serverKeyPath)
+	caPool := loadCAPool(t, pki.caCertPath)
+
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{serverTLS},
+		ClientCAs:    caPool,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+	})
+	if err != nil {
+		t.Fatalf("TLS listen: %v", err)
+	}
+	defer ln.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	go server.RunWithListener(ctx, ln, serverCfg, testLogger())
+
+	clientTLS, _ := tls.LoadX509KeyPair(pki.clientCertPath, pki.clientKeyPath)
+	conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{clientTLS},
+		RootCAs:      caPool,
+		ServerName:   "localhost",
+	})
+	if err != nil {
+		t.Fatalf("TLS dial: %v", err)
+	}
+	defer conn.Close()
+
 	if err := protocol.WritePing(conn); err != nil {
 		t.Fatalf("WritePing: %v", err)
 	}
@@ -250,7 +300,7 @@ func TestEndToEnd_HealthCheck(t *testing.T) {
 	}
 }
 
-// TestEndToEnd_BusyLock testa que o server rejeita backup duplicado do mesmo agent.
+// TestEndToEnd_BusyLock testa que o server rejeita backup duplicado do mesmo agent:storage.
 func TestEndToEnd_BusyLock(t *testing.T) {
 	pkiDir := t.TempDir()
 	pki := generatePKI(t, pkiDir)
@@ -258,7 +308,9 @@ func TestEndToEnd_BusyLock(t *testing.T) {
 	agentName := "busy-agent"
 
 	serverCfg := &config.ServerConfig{
-		Storage: config.StorageInfo{BaseDir: storageDir, MaxBackups: 3},
+		Storages: map[string]config.StorageInfo{
+			testStorageName: {BaseDir: storageDir, MaxBackups: 3},
+		},
 		Logging: config.LoggingInfo{Level: "debug", Format: "text"},
 	}
 
@@ -294,14 +346,14 @@ func TestEndToEnd_BusyLock(t *testing.T) {
 	}
 	defer conn1.Close()
 
-	protocol.WriteHandshake(conn1, agentName)
+	protocol.WriteHandshake(conn1, agentName, testStorageName)
 	ack1, _ := protocol.ReadACK(conn1)
 	if ack1.Status != protocol.StatusGo {
 		t.Fatalf("expected GO for conn1, got %d", ack1.Status)
 	}
 
 	// Segunda conexão: deve receber BUSY
-	time.Sleep(100 * time.Millisecond) // garante que o server processou o lock
+	time.Sleep(100 * time.Millisecond)
 
 	conn2, err := tls.Dial("tcp", ln.Addr().String(), clientTLSCfg)
 	if err != nil {
@@ -309,7 +361,7 @@ func TestEndToEnd_BusyLock(t *testing.T) {
 	}
 	defer conn2.Close()
 
-	protocol.WriteHandshake(conn2, agentName)
+	protocol.WriteHandshake(conn2, agentName, testStorageName)
 	ack2, err := protocol.ReadACK(conn2)
 	if err != nil {
 		t.Fatalf("ReadACK conn2: %v", err)
@@ -326,13 +378,11 @@ func TestEndToEnd_Rotation(t *testing.T) {
 	agentDir := filepath.Join(storageDir, "rotation-agent")
 	os.MkdirAll(agentDir, 0755)
 
-	// Cria 5 backups existentes
 	for i := 1; i <= 5; i++ {
 		name := fmt.Sprintf("2026-02-%02dT02-00-00.tar.gz", i)
 		os.WriteFile(filepath.Join(agentDir, name), []byte("data"), 0644)
 	}
 
-	// Rotação com max 3
 	if err := server.Rotate(agentDir, 3); err != nil {
 		t.Fatalf("Rotate: %v", err)
 	}
@@ -376,7 +426,6 @@ func generatePKI(t *testing.T, dir string) *pkiPaths {
 	caCertPath := filepath.Join(dir, "ca.pem")
 	writePEMFile(t, caCertPath, "CERTIFICATE", caCertDER)
 
-	// Server cert
 	serverKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	serverTemplate := &x509.Certificate{
 		SerialNumber: big.NewInt(2),
@@ -394,7 +443,6 @@ func generatePKI(t *testing.T, dir string) *pkiPaths {
 	serverKeyPath := filepath.Join(dir, "server-key.pem")
 	writeECKeyPEM(t, serverKeyPath, serverKey)
 
-	// Client cert
 	clientKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	clientTemplate := &x509.Certificate{
 		SerialNumber: big.NewInt(3),
@@ -481,7 +529,6 @@ func verifyTarGz(t *testing.T, backupPath, sourceDir string) {
 		t.Fatal("backup tar.gz contains no files")
 	}
 
-	// Verifica que pelo menos file1.txt está no archive
 	found := false
 	for _, f := range files {
 		if strings.Contains(f, "file1.txt") {

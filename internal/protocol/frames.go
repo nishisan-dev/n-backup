@@ -16,10 +16,11 @@ const ProtocolVersion byte = 0x01
 
 // Status codes para ACK (Server → Client após Handshake).
 const (
-	StatusGo     byte = 0x00 // Pronto para receber
-	StatusFull   byte = 0x01 // Disco cheio no destino
-	StatusBusy   byte = 0x02 // Backup deste agent já em andamento
-	StatusReject byte = 0x03 // Agent não autorizado
+	StatusGo              byte = 0x00 // Pronto para receber
+	StatusFull            byte = 0x01 // Disco cheio no destino
+	StatusBusy            byte = 0x02 // Backup deste agent já em andamento
+	StatusReject          byte = 0x03 // Agent não autorizado
+	StatusStorageNotFound byte = 0x04 // Storage solicitado não existe
 )
 
 // Status codes para Final ACK (Server → Client após Trailer).
@@ -46,8 +47,9 @@ var (
 
 // Handshake representa o frame de handshake enviado pelo client.
 type Handshake struct {
-	Version   byte
-	AgentName string
+	Version     byte
+	AgentName   string
+	StorageName string
 }
 
 // ACK representa a resposta do server ao handshake.

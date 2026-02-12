@@ -10,13 +10,13 @@ import (
 
 // AgentConfig representa a configuração completa do nbackup-agent.
 type AgentConfig struct {
-	Agent   AgentInfo   `yaml:"agent"`
-	Daemon  DaemonInfo  `yaml:"daemon"`
-	Server  ServerAddr  `yaml:"server"`
-	TLS     TLSClient   `yaml:"tls"`
-	Backup  BackupInfo  `yaml:"backup"`
-	Retry   RetryInfo   `yaml:"retry"`
-	Logging LoggingInfo `yaml:"logging"`
+	Agent   AgentInfo     `yaml:"agent"`
+	Daemon  DaemonInfo    `yaml:"daemon"`
+	Server  ServerAddr    `yaml:"server"`
+	TLS     TLSClient     `yaml:"tls"`
+	Backups []BackupEntry `yaml:"backups"`
+	Retry   RetryInfo     `yaml:"retry"`
+	Logging LoggingInfo   `yaml:"logging"`
 }
 
 // AgentInfo identifica o agent.
@@ -41,15 +41,17 @@ type TLSClient struct {
 	ClientKey  string `yaml:"client_key"`
 }
 
+// BackupEntry representa um bloco de backup nomeado com storage de destino.
+type BackupEntry struct {
+	Name    string         `yaml:"name"`    // Identificador local do backup
+	Storage string         `yaml:"storage"` // Nome do storage no server
+	Sources []BackupSource `yaml:"sources"`
+	Exclude []string       `yaml:"exclude"`
+}
+
 // BackupSource representa um diretório de origem para backup.
 type BackupSource struct {
 	Path string `yaml:"path"`
-}
-
-// BackupInfo contém as fontes e filtros de backup.
-type BackupInfo struct {
-	Sources []BackupSource `yaml:"sources"`
-	Exclude []string       `yaml:"exclude"`
 }
 
 // RetryInfo contém configurações de retry com exponential backoff.
@@ -103,12 +105,23 @@ func (c *AgentConfig) validate() error {
 	if c.TLS.ClientKey == "" {
 		return fmt.Errorf("tls.client_key is required")
 	}
-	if len(c.Backup.Sources) == 0 {
-		return fmt.Errorf("backup.sources must have at least one entry")
+	if len(c.Backups) == 0 {
+		return fmt.Errorf("backups must have at least one entry")
 	}
-	for i, src := range c.Backup.Sources {
-		if src.Path == "" {
-			return fmt.Errorf("backup.sources[%d].path is required", i)
+	for i, b := range c.Backups {
+		if b.Name == "" {
+			return fmt.Errorf("backups[%d].name is required", i)
+		}
+		if b.Storage == "" {
+			return fmt.Errorf("backups[%d].storage is required", i)
+		}
+		if len(b.Sources) == 0 {
+			return fmt.Errorf("backups[%d].sources must have at least one entry", i)
+		}
+		for j, src := range b.Sources {
+			if src.Path == "" {
+				return fmt.Errorf("backups[%d].sources[%d].path is required", i, j)
+			}
 		}
 	}
 	if c.Retry.MaxAttempts <= 0 {

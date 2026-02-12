@@ -31,8 +31,8 @@ func main() {
 	logger := logging.NewLogger(cfg.Logging.Level, cfg.Logging.Format)
 
 	if *once {
-		// Execução única
-		if err := agent.RunBackupWithRetry(context.Background(), cfg, logger); err != nil {
+		// Execução única — roda todos os backups sequencialmente
+		if err := agent.RunAllBackups(context.Background(), cfg, logger); err != nil {
 			logger.Error("backup failed", "error", err)
 			os.Exit(1)
 		}

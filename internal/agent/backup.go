@@ -13,12 +13,13 @@ import (
 	"github.com/nishisan-dev/n-backup/internal/protocol"
 )
 
-// RunBackup executa uma sessão completa de backup:
+// RunBackup executa uma sessão completa de backup para um BackupEntry:
 // 1. Conecta ao server via mTLS
-// 2. Envia handshake e recebe ACK
+// 2. Envia handshake (agent name + storage name) e recebe ACK
 // 3. Faz streaming dos dados (tar.gz)
 // 4. Envia trailer com checksum e recebe Final ACK
-func RunBackup(ctx context.Context, cfg *config.AgentConfig, logger *slog.Logger) error {
+func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, logger *slog.Logger) error {
+	logger = logger.With("backup", entry.Name, "storage", entry.Storage)
 	logger.Info("starting backup session", "server", cfg.Server.Address)
 
 	// Configura TLS
@@ -37,7 +38,7 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, logger *slog.Logger
 	logger.Info("connected to server", "address", cfg.Server.Address)
 
 	// Fase 1: Handshake
-	if err := protocol.WriteHandshake(conn, cfg.Agent.Name); err != nil {
+	if err := protocol.WriteHandshake(conn, cfg.Agent.Name, entry.Storage); err != nil {
 		return fmt.Errorf("writing handshake: %w", err)
 	}
 
@@ -53,12 +54,12 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, logger *slog.Logger
 	logger.Info("handshake successful, starting data transfer")
 
 	// Fase 2: Stream dados
-	sources := make([]string, len(cfg.Backup.Sources))
-	for i, s := range cfg.Backup.Sources {
+	sources := make([]string, len(entry.Sources))
+	for i, s := range entry.Sources {
 		sources[i] = s.Path
 	}
 
-	scanner := NewScanner(sources, cfg.Backup.Exclude)
+	scanner := NewScanner(sources, entry.Exclude)
 	result, err := Stream(ctx, scanner, conn)
 	if err != nil {
 		return fmt.Errorf("streaming data: %w", err)

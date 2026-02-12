@@ -33,12 +33,19 @@ func ReadHandshake(r io.Reader) (*Handshake, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading agent name: %w", err)
 	}
-	// Remove o delimitador '\n'
 	name = name[:len(name)-1]
 
+	// Lê storage name até '\n'
+	storageName, err := br.ReadString('\n')
+	if err != nil {
+		return nil, fmt.Errorf("reading storage name: %w", err)
+	}
+	storageName = storageName[:len(storageName)-1]
+
 	return &Handshake{
-		Version:   version[0],
-		AgentName: name,
+		Version:     version[0],
+		AgentName:   name,
+		StorageName: storageName,
 	}, nil
 }
 

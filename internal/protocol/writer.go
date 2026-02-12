@@ -7,8 +7,8 @@ import (
 )
 
 // WriteHandshake escreve o frame de handshake (Client → Server).
-// Formato: [Magic 4B] [Version 1B] [AgentName UTF-8] ['\n' 1B]
-func WriteHandshake(w io.Writer, agentName string) error {
+// Formato: [Magic 4B] [Version 1B] [AgentName UTF-8] ['\n' 1B] [StorageName UTF-8] ['\n' 1B]
+func WriteHandshake(w io.Writer, agentName, storageName string) error {
 	if _, err := w.Write(MagicHandshake[:]); err != nil {
 		return fmt.Errorf("writing handshake magic: %w", err)
 	}
@@ -19,7 +19,13 @@ func WriteHandshake(w io.Writer, agentName string) error {
 		return fmt.Errorf("writing agent name: %w", err)
 	}
 	if _, err := w.Write([]byte{'\n'}); err != nil {
-		return fmt.Errorf("writing handshake delimiter: %w", err)
+		return fmt.Errorf("writing agent name delimiter: %w", err)
+	}
+	if _, err := w.Write([]byte(storageName)); err != nil {
+		return fmt.Errorf("writing storage name: %w", err)
+	}
+	if _, err := w.Write([]byte{'\n'}); err != nil {
+		return fmt.Errorf("writing storage name delimiter: %w", err)
 	}
 	return nil
 }

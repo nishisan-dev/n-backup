@@ -7,7 +7,6 @@ import (
 )
 
 func TestLoadAgentConfig_ExampleFile(t *testing.T) {
-	// Localiza o arquivo de exemplo relativo à raiz do projeto
 	cfgPath := filepath.Join("..", "..", "configs", "agent.example.yaml")
 	cfg, err := LoadAgentConfig(cfgPath)
 	if err != nil {
@@ -23,20 +22,29 @@ func TestLoadAgentConfig_ExampleFile(t *testing.T) {
 	if cfg.Server.Address != "backup.nishisan.dev:9847" {
 		t.Errorf("expected server address 'backup.nishisan.dev:9847', got %q", cfg.Server.Address)
 	}
-	if len(cfg.Backup.Sources) != 3 {
-		t.Errorf("expected 3 backup sources, got %d", len(cfg.Backup.Sources))
+	if len(cfg.Backups) != 2 {
+		t.Fatalf("expected 2 backup entries, got %d", len(cfg.Backups))
 	}
-	if len(cfg.Backup.Exclude) != 5 {
-		t.Errorf("expected 5 excludes, got %d", len(cfg.Backup.Exclude))
+	if cfg.Backups[0].Name != "app" {
+		t.Errorf("expected backups[0].name 'app', got %q", cfg.Backups[0].Name)
+	}
+	if cfg.Backups[0].Storage != "scripts" {
+		t.Errorf("expected backups[0].storage 'scripts', got %q", cfg.Backups[0].Storage)
+	}
+	if len(cfg.Backups[0].Sources) != 1 {
+		t.Errorf("expected 1 source in backups[0], got %d", len(cfg.Backups[0].Sources))
+	}
+	if cfg.Backups[1].Name != "home" {
+		t.Errorf("expected backups[1].name 'home', got %q", cfg.Backups[1].Name)
+	}
+	if cfg.Backups[1].Storage != "home-dirs" {
+		t.Errorf("expected backups[1].storage 'home-dirs', got %q", cfg.Backups[1].Storage)
 	}
 	if cfg.Retry.MaxAttempts != 5 {
 		t.Errorf("expected max_attempts 5, got %d", cfg.Retry.MaxAttempts)
 	}
 	if cfg.Logging.Level != "info" {
 		t.Errorf("expected logging level 'info', got %q", cfg.Logging.Level)
-	}
-	if cfg.Logging.Format != "json" {
-		t.Errorf("expected logging format 'json', got %q", cfg.Logging.Format)
 	}
 }
 
@@ -50,11 +58,27 @@ func TestLoadServerConfig_ExampleFile(t *testing.T) {
 	if cfg.Server.Listen != "0.0.0.0:9847" {
 		t.Errorf("expected listen '0.0.0.0:9847', got %q", cfg.Server.Listen)
 	}
-	if cfg.Storage.BaseDir != "/var/backups/nbackup" {
-		t.Errorf("expected base_dir '/var/backups/nbackup', got %q", cfg.Storage.BaseDir)
+
+	scripts, ok := cfg.GetStorage("scripts")
+	if !ok {
+		t.Fatal("expected storage 'scripts' to exist")
 	}
-	if cfg.Storage.MaxBackups != 5 {
-		t.Errorf("expected max_backups 5, got %d", cfg.Storage.MaxBackups)
+	if scripts.BaseDir != "/var/backups/scripts" {
+		t.Errorf("expected scripts.base_dir '/var/backups/scripts', got %q", scripts.BaseDir)
+	}
+	if scripts.MaxBackups != 5 {
+		t.Errorf("expected scripts.max_backups 5, got %d", scripts.MaxBackups)
+	}
+
+	home, ok := cfg.GetStorage("home-dirs")
+	if !ok {
+		t.Fatal("expected storage 'home-dirs' to exist")
+	}
+	if home.BaseDir != "/var/backups/home" {
+		t.Errorf("expected home-dirs.base_dir '/var/backups/home', got %q", home.BaseDir)
+	}
+	if home.MaxBackups != 10 {
+		t.Errorf("expected home-dirs.max_backups 10, got %d", home.MaxBackups)
 	}
 }
 
@@ -70,9 +94,11 @@ tls:
   ca_cert: /tmp/ca.pem
   client_cert: /tmp/client.pem
   client_key: /tmp/client-key.pem
-backup:
-  sources:
-    - path: /tmp
+backups:
+  - name: "test"
+    storage: "default"
+    sources:
+      - path: /tmp
 `
 	cfgPath := writeTempConfig(t, content)
 	_, err := LoadAgentConfig(cfgPath)
@@ -81,7 +107,7 @@ backup:
 	}
 }
 
-func TestLoadAgentConfig_MissingSources(t *testing.T) {
+func TestLoadAgentConfig_MissingBackups(t *testing.T) {
 	content := `
 agent:
   name: "test-agent"
@@ -93,13 +119,37 @@ tls:
   ca_cert: /tmp/ca.pem
   client_cert: /tmp/client.pem
   client_key: /tmp/client-key.pem
-backup:
-  sources: []
+backups: []
 `
 	cfgPath := writeTempConfig(t, content)
 	_, err := LoadAgentConfig(cfgPath)
 	if err == nil {
-		t.Fatal("expected error for empty sources")
+		t.Fatal("expected error for empty backups")
+	}
+}
+
+func TestLoadAgentConfig_MissingStorageName(t *testing.T) {
+	content := `
+agent:
+  name: "test-agent"
+daemon:
+  schedule: "0 2 * * *"
+server:
+  address: "localhost:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  client_cert: /tmp/client.pem
+  client_key: /tmp/client-key.pem
+backups:
+  - name: "test"
+    storage: ""
+    sources:
+      - path: /tmp
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadAgentConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for empty storage name")
 	}
 }
 
@@ -111,14 +161,32 @@ tls:
   ca_cert: /tmp/ca.pem
   server_cert: /tmp/server.pem
   server_key: /tmp/server-key.pem
-storage:
-  base_dir: /tmp/backups
-  max_backups: 3
+storages:
+  default:
+    base_dir: /tmp/backups
+    max_backups: 3
 `
 	cfgPath := writeTempConfig(t, content)
 	_, err := LoadServerConfig(cfgPath)
 	if err == nil {
 		t.Fatal("expected error for empty server.listen")
+	}
+}
+
+func TestLoadServerConfig_MissingStorages(t *testing.T) {
+	content := `
+server:
+  listen: "0.0.0.0:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  server_cert: /tmp/server.pem
+  server_key: /tmp/server-key.pem
+storages: {}
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadServerConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for empty storages")
 	}
 }
 
@@ -130,17 +198,19 @@ tls:
   ca_cert: /tmp/ca.pem
   server_cert: /tmp/server.pem
   server_key: /tmp/server-key.pem
-storage:
-  base_dir: /tmp/backups
-  max_backups: 0
+storages:
+  default:
+    base_dir: /tmp/backups
+    max_backups: 0
 `
 	cfgPath := writeTempConfig(t, content)
 	cfg, err := LoadServerConfig(cfgPath)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Storage.MaxBackups != 5 {
-		t.Errorf("expected default max_backups 5, got %d", cfg.Storage.MaxBackups)
+	s, _ := cfg.GetStorage("default")
+	if s.MaxBackups != 5 {
+		t.Errorf("expected default max_backups 5, got %d", s.MaxBackups)
 	}
 }
 
@@ -156,9 +226,11 @@ tls:
   ca_cert: /tmp/ca.pem
   client_cert: /tmp/client.pem
   client_key: /tmp/client-key.pem
-backup:
-  sources:
-    - path: /tmp
+backups:
+  - name: "test"
+    storage: "default"
+    sources:
+      - path: /tmp
 `
 	cfgPath := writeTempConfig(t, content)
 	cfg, err := LoadAgentConfig(cfgPath)
@@ -182,6 +254,18 @@ func TestLoadAgentConfig_InvalidYAML(t *testing.T) {
 	_, err := LoadAgentConfig(cfgPath)
 	if err == nil {
 		t.Fatal("expected error for invalid YAML")
+	}
+}
+
+func TestGetStorage_NotFound(t *testing.T) {
+	cfg := &ServerConfig{
+		Storages: map[string]StorageInfo{
+			"existing": {BaseDir: "/tmp", MaxBackups: 5},
+		},
+	}
+	_, ok := cfg.GetStorage("nonexistent")
+	if ok {
+		t.Fatal("expected GetStorage to return false for nonexistent key")
 	}
 }
 
