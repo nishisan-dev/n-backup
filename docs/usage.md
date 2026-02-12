@@ -86,18 +86,23 @@ Respostas possíveis:
 
 ## Backup: O que Acontece
 
-O fluxo completo de um backup é:
+Cada backup entry na configuração é executado sequencialmente. Para cada entry:
 
 ```
 1. Agent conecta ao Server via TLS 1.3 (mTLS)
-2. Handshake de protocolo (nome do agent, versão)
-3. Server responde ACK (GO / BUSY / REJECT)
-4. Agent faz streaming: scan → tar → gzip → rede
-5. Agent envia trailer com SHA-256 e tamanho
-6. Server valida checksum, faz commit atômico (.tmp → rename)
-7. Server executa rotação (remove backups excedentes)
-8. Server envia Final ACK (OK / CHECKSUM_MISMATCH / WRITE_ERROR)
+2. Handshake: agent name + storage name + versão do protocolo
+3. Server busca o storage nomeado no mapa de storages
+4. Server responde ACK (GO / BUSY / REJECT / STORAGE_NOT_FOUND)
+5. Agent faz streaming: scan → tar → gzip → rede
+6. Agent envia trailer com SHA-256 e tamanho
+7. Server valida checksum, faz commit atômico (.tmp → rename)
+8. Server executa rotação no storage correspondente
+9. Server envia Final ACK (OK / CHECKSUM_MISMATCH / WRITE_ERROR)
 ```
+
+### Modelo N:N
+
+Um agent pode ter múltiplos backup entries, cada um direcionado a um storage diferente no server. O lock é por `agent:storage`, permitindo backups simultâneos de storages diferentes.
 
 ### Fluxo de Dados (zero-copy)
 
@@ -109,35 +114,29 @@ O SHA-256 é calculado **inline** (sem releitura), sem arquivos temporários na 
 
 ---
 
-## Configuração de Sources e Excludes
+## Configuração de Backups (Agent)
 
-### Sources
-
-Lista de diretórios a serem incluídos no backup:
+Cada backup entry define quais diretórios incluir e para qual storage do server enviar:
 
 ```yaml
-backup:
-  sources:
-    - path: /app/scripts
-    - path: /home
-    - path: /etc
+backups:
+  - name: app               # Nome lógico do backup
+    storage: scripts         # Storage nomeado no server
+    sources:
+      - path: /app/scripts
+    exclude:
+      - "*.log"
+
+  - name: home
+    storage: home-dirs
+    sources:
+      - path: /home
+    exclude:
+      - ".git/**"
+      - "node_modules/**"
 ```
 
 Cada source gera entradas no tar com **caminhos relativos** baseados no próprio diretório.
-
-### Excludes (Glob Patterns)
-
-Padrões glob para excluir arquivos e diretórios:
-
-```yaml
-backup:
-  exclude:
-    - "*.log"              # Todos os arquivos .log
-    - ".git/**"            # Diretório .git recursivo
-    - "node_modules/**"    # Dependências Node.js
-    - "*/tmp/sess*"        # Sessões temporárias
-    - "*/access-logs/"     # Diretório access-logs
-```
 
 ---
 
@@ -166,17 +165,22 @@ O delay cresce exponencialmente:
 
 ## Rotação Automática (Server)
 
-O server mantém no máximo `max_backups` por agent. Os mais antigos são removidos automaticamente após cada backup bem-sucedido.
+Cada storage nomeado mantém no máximo `max_backups` por agent. Os mais antigos são removidos automaticamente após cada backup bem-sucedido.
 
 ```yaml
-storage:
-  max_backups: 5
+storages:
+  scripts:
+    base_dir: /var/backups/scripts
+    max_backups: 5
+  home-dirs:
+    base_dir: /var/backups/home
+    max_backups: 10
 ```
 
-Exemplo com `max_backups: 3`:
+Exemplo com `max_backups: 3` no storage `scripts`:
 
 ```diff
-  /var/backups/nbackup/web-server-01/
+  /var/backups/scripts/web-server-01/
 - 2026-02-08T02-00-00.tar.gz   ← removido
 - 2026-02-09T02-00-00.tar.gz   ← removido
   2026-02-10T02-00-00.tar.gz
@@ -230,7 +234,8 @@ Exemplo de log JSON do agent:
 |---------|---------------|---------|
 | `connection refused` | Server não está rodando ou porta errada | Verificar `systemctl status nbackup-server` |
 | `tls: bad certificate` | Certificado do agent não assinado pela CA | Regenerar cert com a mesma CA |
-| `server rejected: status=2` | Backup já em andamento para este agent | Aguardar conclusão do backup anterior |
+| `server rejected: status=2` | Backup já em andamento (agent:storage) | Aguardar conclusão do backup anterior |
 | `server rejected: status=1` | Disco cheio no server | Liberar espaço ou ajustar `max_backups` |
+| `storage not found` | Nome do storage não existe no server | Verificar `storages:` no server.yaml |
 | `checksum mismatch` | Corrupção de dados na rede | O backup é descartado; será retentado |
 | `all N attempts failed` | Server persistentemente indisponível | Verificar conectividade e logs do server |

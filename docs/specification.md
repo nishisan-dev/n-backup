@@ -70,17 +70,17 @@ Client                                     Server
   │──── TLS 1.3 Handshake (mTLS) ──────────▶│
   │◀─── TLS Established ──────────────────── │
   │                                          │
-  │──── HANDSHAKE (agent_name, version) ───▶ │
-  │◀─── ACK/NACK (status) ──────────────── │
+  │──── HANDSHAKE (agent, storage, ver) ──▶ │
+  │◀─── ACK/NACK (status) ────────────── │
   │                                          │
-  │──── DATA STREAM (tar.gz bytes) ────────▶ │  ← bulk transfer
+  │──── DATA STREAM (tar.gz bytes) ───────▶ │  ← bulk transfer
   │     ... streaming contínuo ...           │
-  │──── EOF ───────────────────────────────▶ │
+  │──── EOF ─────────────────────────────▶ │
   │                                          │
-  │──── TRAILER (SHA-256, size) ───────────▶ │
-  │◀─── FINAL ACK (status) ──────────────── │
+  │──── TRAILER (SHA-256, size) ─────────▶ │
+  │◀─── FINAL ACK (status) ───────────── │
   │                                          │
-  │──── Conexão encerrada ─────────────────▶ │
+  │──── Conexão encerrada ──────────────▶ │
 ```
 
 ### 3.2 Frames
@@ -88,15 +88,16 @@ Client                                     Server
 #### Handshake (Client → Server)
 
 ```
-┌──────────┬──────┬──────────────────┬───────┐
-│ "NBKP"   │ Ver  │ AgentName (UTF8) │ '\n'  │
-│ 4 bytes  │ 1B   │ variável         │ 1B    │
-└──────────┴──────┴──────────────────┴───────┘
+┌──────────┬──────┬──────────────────┬───────┬───────────────────┬───────┐
+│ "NBKP"   │ Ver  │ AgentName (UTF8) │ '\n'  │ StorageName (UTF8) │ '\n'  │
+│ 4 bytes  │ 1B   │ variável         │ 1B    │ variável           │ 1B    │
+└──────────┴──────┴──────────────────┴───────┴───────────────────┴───────┘
 ```
 
 - **Magic**: `0x4E 0x42 0x4B 0x50` ("NBKP")
 - **Ver**: Versão do protocolo (`0x01`)
-- **AgentName**: Identificador UTF-8, delimitado por `\n`
+- **AgentName**: Identificador UTF-8 do agent, delimitado por `\n`
+- **StorageName**: Nome do storage de destino no server, delimitado por `\n`
 
 #### ACK (Server → Client)
 
@@ -111,8 +112,9 @@ Client                                     Server
 |---|---|---|
 | GO | `0x00` | Pronto para receber |
 | FULL | `0x01` | Disco cheio no destino |
-| BUSY | `0x02` | Backup deste agent já em andamento |
+| BUSY | `0x02` | Backup deste agent:storage já em andamento |
 | REJECT | `0x03` | Agent não autorizado |
+| STORAGE_NOT_FOUND | `0x04` | Storage nomeado não existe no server |
 
 #### Data Stream (Client → Server)
 

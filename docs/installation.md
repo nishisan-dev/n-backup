@@ -123,7 +123,7 @@ openssl x509 -req -sha256 -in ${AGENT_NAME}.csr \
 ### 3.1. Server
 
 ```bash
-sudo mkdir -p /etc/nbackup /var/backups/nbackup
+sudo mkdir -p /etc/nbackup /var/backups/scripts /var/backups/home
 sudo cp configs/server.example.yaml /etc/nbackup/server.yaml
 ```
 
@@ -138,9 +138,14 @@ tls:
   server_cert: /etc/nbackup/server.pem
   server_key: /etc/nbackup/server-key.pem
 
-storage:
-  base_dir: /var/backups/nbackup
-  max_backups: 5
+# Named storages — cada storage tem seu próprio diretório e rotação
+storages:
+  scripts:
+    base_dir: /var/backups/scripts
+    max_backups: 5
+  home-dirs:
+    base_dir: /var/backups/home
+    max_backups: 10
 
 logging:
   level: info
@@ -171,15 +176,22 @@ tls:
   client_cert: /etc/nbackup/agent.pem
   client_key: /etc/nbackup/agent-key.pem
 
-backup:
-  sources:
-    - path: /app/scripts
-    - path: /home
-    - path: /etc
-  exclude:
-    - "*.log"
-    - ".git/**"
-    - "node_modules/**"
+# Cada entry é um backup independente, direcionado a um storage nomeado no server
+backups:
+  - name: app
+    storage: scripts           # Nome do storage no server
+    sources:
+      - path: /app/scripts
+    exclude:
+      - "*.log"
+
+  - name: home
+    storage: home-dirs
+    sources:
+      - path: /home
+    exclude:
+      - ".git/**"
+      - "node_modules/**"
 
 retry:
   max_attempts: 5
@@ -277,18 +289,21 @@ nbackup-agent --config /etc/nbackup/agent.yaml --once
 
 ## 7. Estrutura de Storage (Server)
 
-Após receber backups, o diretório de storage terá:
+Cada storage nomeado tem seu próprio diretório base. Dentro dele, os backups são organizados por agent:
 
 ```
-/var/backups/nbackup/
+/var/backups/scripts/              ← storage "scripts"
 ├── web-server-01/
 │   ├── 2026-02-10T02-00-00.tar.gz
-│   ├── 2026-02-11T02-00-00.tar.gz
-│   └── 2026-02-12T02-00-00.tar.gz    ← mais recente
-├── db-server-01/
+│   └── 2026-02-12T02-00-00.tar.gz
+└── web-server-02/
+    └── 2026-02-12T02-00-00.tar.gz
+
+/var/backups/home/                 ← storage "home-dirs"
+├── web-server-01/
 │   ├── 2026-02-10T02-00-00.tar.gz
 │   └── 2026-02-11T02-00-00.tar.gz
 └── ...
 ```
 
-Os backups mais antigos são removidos automaticamente pela rotação (`max_backups`).
+Cada storage tem sua própria configuração de `max_backups` para rotação independente.
