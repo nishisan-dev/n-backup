@@ -22,9 +22,9 @@ type ProgressReporter struct {
 	objectsDone  atomic.Int64
 	retries      atomic.Int32
 
-	// Totais estimados (do pré-scan)
-	totalBytes   int64
-	totalObjects int64
+	// Totais estimados (do pré-scan) — atômicos pois PreScan roda em background
+	totalBytes   atomic.Int64
+	totalObjects atomic.Int64
 
 	startTime      time.Time
 	warmupDuration time.Duration // período sem exibir speed/ETA
@@ -35,12 +35,12 @@ type ProgressReporter struct {
 func NewProgressReporter(name string, totalBytes, totalObjects int64) *ProgressReporter {
 	p := &ProgressReporter{
 		name:           name,
-		totalBytes:     totalBytes,
-		totalObjects:   totalObjects,
 		startTime:      time.Now(),
 		warmupDuration: 3 * time.Second,
 		done:           make(chan struct{}),
 	}
+	p.totalBytes.Store(totalBytes)
+	p.totalObjects.Store(totalObjects)
 	go p.renderLoop()
 	return p
 }
@@ -58,6 +58,12 @@ func (p *ProgressReporter) AddObject() {
 // AddRetry registra uma tentativa de retry/resume.
 func (p *ProgressReporter) AddRetry() {
 	p.retries.Add(1)
+}
+
+// SetTotals atualiza os totais estimados (chamado quando PreScan termina em background).
+func (p *ProgressReporter) SetTotals(totalBytes, totalObjects int64) {
+	p.totalBytes.Store(totalBytes)
+	p.totalObjects.Store(totalObjects)
 }
 
 // Stop para o ticker e imprime a linha final.
@@ -85,6 +91,8 @@ func (p *ProgressReporter) render(final bool) {
 	bytes := p.bytesWritten.Load()
 	objects := p.objectsDone.Load()
 	retries := p.retries.Load()
+	totalBytes := p.totalBytes.Load()
+	totalObjects := p.totalObjects.Load()
 	elapsed := time.Since(p.startTime)
 
 	// Velocidade e ETA só após warm-up
@@ -101,8 +109,8 @@ func (p *ProgressReporter) render(final bool) {
 	barWidth := 30
 	var bar string
 	var pct float64
-	if p.totalBytes > 0 {
-		pct = float64(bytes) / float64(p.totalBytes)
+	if totalBytes > 0 {
+		pct = float64(bytes) / float64(totalBytes)
 		if pct > 1.0 {
 			pct = 1.0 // compressão pode levar a menos bytes que raw
 		}
@@ -119,8 +127,8 @@ func (p *ProgressReporter) render(final bool) {
 
 	// ETA
 	eta := "∞"
-	if p.totalBytes > 0 && speed > 0 && bytes > 0 {
-		remaining := float64(p.totalBytes) - float64(bytes)
+	if totalBytes > 0 && speed > 0 && bytes > 0 {
+		remaining := float64(totalBytes) - float64(bytes)
 		if remaining < 0 {
 			remaining = 0
 		}
@@ -145,14 +153,14 @@ func (p *ProgressReporter) render(final bool) {
 		// Warm-up: exibe apenas barra + bytes + objetos + elapsed (sem speed/ETA)
 		line = fmt.Sprintf("\r[%s] %s  %s  │  %s objs  │  %s  │  warming up...",
 			p.name, bar, bytesStr,
-			formatNumber(objects),
+			fmtObjs(objects, totalObjects),
 			elapsedStr,
 		)
 	} else {
 		speedStr := formatBytes(int64(speed)) + "/s"
 		line = fmt.Sprintf("\r[%s] %s  %s  │  %s  │  %s objs (%s/s)  │  %s  │  ETA %s%s",
 			p.name, bar, bytesStr, speedStr,
-			formatNumber(objects), formatNumber(int64(objsPerSec)),
+			fmtObjs(objects, totalObjects), formatNumber(int64(objsPerSec)),
 			elapsedStr, eta, retriesStr,
 		)
 	}
@@ -210,4 +218,12 @@ func formatNumber(n int64) string {
 		result = append(result, byte(c))
 	}
 	return string(result)
+}
+
+// fmtObjs formata contagem de objetos, incluindo total quando disponível.
+func fmtObjs(current, total int64) string {
+	if total > 0 {
+		return fmt.Sprintf("%s/%s", formatNumber(current), formatNumber(total))
+	}
+	return formatNumber(current)
 }

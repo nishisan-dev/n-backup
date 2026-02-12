@@ -46,7 +46,9 @@ func (w *AtomicWriter) TempFile() (*os.File, string, error) {
 
 // Commit renomeia o arquivo temporário para o nome final com timestamp.
 func (w *AtomicWriter) Commit(tmpPath string) (string, error) {
-	timestamp := time.Now().UTC().Format("2006-01-02T15-04-05")
+	timestamp := time.Now().UTC().Format("2006-01-02T15-04-05.000")
+	// Substitui ponto decimal por traço para portabilidade em FS
+	timestamp = strings.ReplaceAll(timestamp, ".", "-")
 	finalName := fmt.Sprintf("%s.tar.gz", timestamp)
 	finalPath := filepath.Join(w.agentDir, finalName)
 

@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"net"
@@ -70,23 +71,26 @@ func RunAllBackups(ctx context.Context, cfg *config.AgentConfig, showProgress bo
 			for i, s := range entry.Sources {
 				sources[i] = s.Path
 			}
-			scanner := NewScanner(sources, entry.Exclude)
-			stats, err := scanner.PreScan(ctx)
-			if err != nil {
-				entryLogger.Warn("pre-scan failed, progress bar will estimate", "error", err)
-				stats = &ScanStats{}
-			}
-			entryLogger.Info("pre-scan complete",
-				"files", stats.TotalObjects,
-				"raw_bytes", stats.TotalBytes,
-			)
-			// totalBytes é estimativa crú (raw, pré-compressão)
-			// O gzip tipicamente compacta ~30-60%, então usamos ~50% como estimate
-			estimatedCompressed := stats.TotalBytes / 2
-			if estimatedCompressed == 0 {
-				estimatedCompressed = stats.TotalBytes
-			}
-			progress = NewProgressReporter(entry.Name, estimatedCompressed, stats.TotalObjects)
+			// Inicia reporter imediatamente em modo spinner (totais=0)
+			progress = NewProgressReporter(entry.Name, 0, 0)
+			// PreScan em background — atualiza totais quando terminar
+			go func() {
+				scanner := NewScanner(sources, entry.Exclude)
+				stats, err := scanner.PreScan(ctx)
+				if err != nil {
+					entryLogger.Warn("pre-scan failed, progress bar will estimate", "error", err)
+					return
+				}
+				entryLogger.Info("pre-scan complete",
+					"files", stats.TotalObjects,
+					"raw_bytes", stats.TotalBytes,
+				)
+				estimatedCompressed := stats.TotalBytes / 2
+				if estimatedCompressed == 0 {
+					estimatedCompressed = stats.TotalBytes
+				}
+				progress.SetTotals(estimatedCompressed, stats.TotalObjects)
+			}()
 		}
 
 		err := RunBackupWithRetry(ctx, cfg, entry, entryLogger, progress)
@@ -185,7 +189,7 @@ func RunHealthCheck(address string, cfg *config.AgentConfig, logger *slog.Logger
 
 	// Lê resposta (status 1B + diskFree 8B + '\n' 1B = 10B)
 	buf := make([]byte, 10)
-	n, err := conn.Read(buf)
+	n, err := io.ReadFull(conn, buf)
 	if err != nil {
 		return fmt.Errorf("reading health response: %w", err)
 	}
