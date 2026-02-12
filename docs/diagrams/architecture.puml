@@ -1,0 +1,71 @@
+@startuml architecture
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam componentStyle rectangle
+skinparam defaultFontName Inter
+
+title NBackup — Arquitetura Geral
+
+package "Origem (Agent - Daemon)" as agent {
+  [Scheduler\n(Cron Expression)] as scheduler
+  [Scanner\n(fs.WalkDir + Glob)] as scanner
+  [tar.Writer] as tar
+  [gzip.Writer] as gzip
+  [SHA-256\n(io.TeeReader)] as hash_client
+  [TLS Client\n(mTLS)] as tls_client
+  [Config Loader\n(YAML)] as config
+  [Logger\n(slog JSON)] as logger_a
+  [Retry Engine\n(Exp. Backoff)] as retry
+
+  config --> scheduler
+  config --> scanner
+  scheduler --> scanner : trigger
+  scanner --> tar : files
+  tar --> gzip : io.Pipe
+  gzip --> hash_client : io.TeeReader
+  hash_client --> tls_client : stream
+  retry --> tls_client : reconnect
+}
+
+cloud "Rede\n(TCP + TLS 1.3)" as network
+
+package "Destino (Server)" as server {
+  [TLS Server\n(mTLS)] as tls_server
+  [Protocol Handler\n(Handshake/ACK)] as proto
+  [SHA-256\n(io.MultiWriter)] as hash_server
+  [Storage Writer\n(.tmp → rename)] as storage
+  [Rotation Manager\n(max_backups)] as rotation
+  [Config Loader\n(YAML)] as config_s
+  [Logger\n(slog JSON)] as logger_s
+
+  tls_server --> proto : conexão aceita
+  proto --> hash_server : data stream
+  hash_server --> storage : io.Copy
+  storage --> rotation : após checksum OK
+  config_s --> rotation
+  config_s --> tls_server
+}
+
+tls_client --> network
+network --> tls_server
+
+note right of network
+  Protocolo binário customizado
+  ~60 bytes overhead por sessão
+  Payload: tar.gz stream raw
+end note
+
+note bottom of storage
+  Escrita atômica:
+  1. Grava em .tmp
+  2. Valida SHA-256
+  3. Rename atômico
+  4. Rotação (remove antigos)
+end note
+
+note bottom of scanner
+  Respeita regras de
+  include/exclude (glob)
+  do arquivo YAML
+end note
+@enduml

@@ -1,0 +1,37 @@
+# NBackup Agent — Exemplo de Configuração
+# Copie para /etc/nbackup/agent.yaml e ajuste os valores.
+
+agent:
+  name: "web-server-01"
+
+daemon:
+  schedule: "0 2 * * *"            # Cron expression (diário às 02h)
+
+server:
+  address: "backup.nishisan.dev:9847"
+
+tls:
+  ca_cert: /etc/nbackup/ca.pem
+  client_cert: /etc/nbackup/agent.pem
+  client_key: /etc/nbackup/agent-key.pem
+
+backup:
+  sources:
+    - path: /app/scripts
+    - path: /home
+    - path: /etc
+  exclude:
+    - "*/access-logs/"
+    - "*.log"
+    - "*/tmp/sess*"
+    - "node_modules/**"
+    - ".git/**"
+
+retry:
+  max_attempts: 5
+  initial_delay: 1s
+  max_delay: 5m
+
+logging:
+  level: info                      # debug, info, warn, error
+  format: json                     # json, text

@@ -1,0 +1,18 @@
+# NBackup Server — Exemplo de Configuração
+# Copie para /etc/nbackup/server.yaml e ajuste os valores.
+
+server:
+  listen: "0.0.0.0:9847"
+
+tls:
+  ca_cert: /etc/nbackup/ca.pem
+  server_cert: /etc/nbackup/server.pem
+  server_key: /etc/nbackup/server-key.pem
+
+storage:
+  base_dir: /var/backups/nbackup
+  max_backups: 5                   # Manter no máximo N backups por agent
+
+logging:
+  level: info                      # debug, info, warn, error
+  format: json                     # json, text
