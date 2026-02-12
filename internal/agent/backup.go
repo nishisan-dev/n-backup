@@ -32,6 +32,13 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 		return fmt.Errorf("configuring TLS: %w", err)
 	}
 
+	// Extrai hostname para ServerName (necessário para validação TLS)
+	host, _, err := net.SplitHostPort(cfg.Server.Address)
+	if err != nil {
+		host = cfg.Server.Address // fallback se não tiver porta
+	}
+	tlsCfg.ServerName = host
+
 	// Conecta ao server
 	conn, err := dialWithContext(ctx, cfg.Server.Address, tlsCfg)
 	if err != nil {

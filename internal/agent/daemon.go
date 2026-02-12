@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -126,6 +127,13 @@ func RunHealthCheck(address string, cfg *config.AgentConfig, logger *slog.Logger
 	if err != nil {
 		return err
 	}
+
+	// Extrai hostname para ServerName
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		host = address
+	}
+	tlsCfg.ServerName = host
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
