@@ -50,6 +50,12 @@ func TestLoadAgentConfig_ExampleFile(t *testing.T) {
 	if cfg.Logging.Level != "info" {
 		t.Errorf("expected logging level 'info', got %q", cfg.Logging.Level)
 	}
+	if cfg.Backups[0].Parallels != 0 {
+		t.Errorf("expected backups[0].parallels 0, got %d", cfg.Backups[0].Parallels)
+	}
+	if cfg.Backups[1].Parallels != 4 {
+		t.Errorf("expected backups[1].parallels 4, got %d", cfg.Backups[1].Parallels)
+	}
 }
 
 func TestLoadServerConfig_ExampleFile(t *testing.T) {
@@ -154,6 +160,61 @@ backups:
 	_, err := LoadAgentConfig(cfgPath)
 	if err == nil {
 		t.Fatal("expected error for empty storage name")
+	}
+}
+
+func TestLoadAgentConfig_ParallelsOutOfRange(t *testing.T) {
+	content := `
+agent:
+  name: "test-agent"
+daemon:
+  schedule: "0 2 * * *"
+server:
+  address: "localhost:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  client_cert: /tmp/client.pem
+  client_key: /tmp/client-key.pem
+backups:
+  - name: "test"
+    storage: "default"
+    parallels: 9
+    sources:
+      - path: /tmp
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadAgentConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for parallels > 8")
+	}
+}
+
+func TestLoadAgentConfig_ParallelsValid(t *testing.T) {
+	content := `
+agent:
+  name: "test-agent"
+daemon:
+  schedule: "0 2 * * *"
+server:
+  address: "localhost:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  client_cert: /tmp/client.pem
+  client_key: /tmp/client-key.pem
+backups:
+  - name: "test"
+    storage: "default"
+    parallels: 4
+    sources:
+      - path: /tmp
+`
+	cfgPath := writeTempConfig(t, content)
+	cfg, err := LoadAgentConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Backups[0].Parallels != 4 {
+		t.Errorf("expected parallels 4, got %d", cfg.Backups[0].Parallels)
 	}
 }
 

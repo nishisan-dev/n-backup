@@ -18,6 +18,7 @@ tls:
 backups:
   - name: "app"
     storage: "scripts"             # Nome do storage no server
+    parallels: 0                   # 0=single stream, 1-8=max streams paralelos
     sources:
       - path: /app/scripts
     exclude:
@@ -25,6 +26,7 @@ backups:
 
   - name: "home"
     storage: "home-dirs"
+    parallels: 4                   # 4 streams paralelos
     sources:
       - path: /home
       - path: /etc

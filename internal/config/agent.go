@@ -50,10 +50,11 @@ type TLSClient struct {
 
 // BackupEntry representa um bloco de backup nomeado com storage de destino.
 type BackupEntry struct {
-	Name    string         `yaml:"name"`    // Identificador local do backup
-	Storage string         `yaml:"storage"` // Nome do storage no server
-	Sources []BackupSource `yaml:"sources"`
-	Exclude []string       `yaml:"exclude"`
+	Name      string         `yaml:"name"`    // Identificador local do backup
+	Storage   string         `yaml:"storage"` // Nome do storage no server
+	Sources   []BackupSource `yaml:"sources"`
+	Exclude   []string       `yaml:"exclude"`
+	Parallels int            `yaml:"parallels"` // 0=desabilitado (single stream), 1-8=máx streams paralelos
 }
 
 // BackupSource representa um diretório de origem para backup.
@@ -135,6 +136,9 @@ func (c *AgentConfig) validate() error {
 			if src.Path == "" {
 				return fmt.Errorf("backups[%d].sources[%d].path is required", i, j)
 			}
+		}
+		if b.Parallels < 0 || b.Parallels > 8 {
+			return fmt.Errorf("backups[%d].parallels must be between 0 and 8, got %d", i, b.Parallels)
 		}
 	}
 	if c.Retry.MaxAttempts <= 0 {
