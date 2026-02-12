@@ -136,3 +136,11 @@ type ChunkSACK struct {
 	ChunkSeq    uint32
 	Offset      uint64
 }
+
+// ChunkHeader precede cada chunk no stream paralelo (Client → Server).
+// Permite ao server reconstruir a ordem global dos chunks.
+// Formato: [GlobalSeq uint32 4B] [Length uint32 4B]
+type ChunkHeader struct {
+	GlobalSeq uint32 // sequência global do chunk (0, 1, 2, ...)
+	Length    uint32 // tamanho dos dados que seguem
+}

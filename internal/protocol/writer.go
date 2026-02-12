@@ -208,3 +208,15 @@ func WriteChunkSACK(w io.Writer, streamIndex uint8, chunkSeq uint32, offset uint
 	}
 	return nil
 }
+
+// WriteChunkHeader escreve o header de chunk paralelo (Client → Server).
+// Formato: [GlobalSeq uint32 4B] [Length uint32 4B]
+func WriteChunkHeader(w io.Writer, globalSeq, length uint32) error {
+	if err := binary.Write(w, binary.BigEndian, globalSeq); err != nil {
+		return fmt.Errorf("writing chunk header seq: %w", err)
+	}
+	if err := binary.Write(w, binary.BigEndian, length); err != nil {
+		return fmt.Errorf("writing chunk header length: %w", err)
+	}
+	return nil
+}

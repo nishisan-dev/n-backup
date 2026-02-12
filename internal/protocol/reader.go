@@ -324,3 +324,20 @@ func ReadChunkSACK(r io.Reader) (*ChunkSACK, error) {
 		Offset:      offset,
 	}, nil
 }
+
+// ReadChunkHeader lê o header de chunk paralelo (Client → Server).
+// Formato: [GlobalSeq uint32 4B] [Length uint32 4B]
+func ReadChunkHeader(r io.Reader) (*ChunkHeader, error) {
+	var globalSeq uint32
+	if err := binary.Read(r, binary.BigEndian, &globalSeq); err != nil {
+		return nil, fmt.Errorf("reading chunk header seq: %w", err)
+	}
+	var length uint32
+	if err := binary.Read(r, binary.BigEndian, &length); err != nil {
+		return nil, fmt.Errorf("reading chunk header length: %w", err)
+	}
+	return &ChunkHeader{
+		GlobalSeq: globalSeq,
+		Length:    length,
+	}, nil
+}

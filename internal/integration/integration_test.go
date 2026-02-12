@@ -518,13 +518,33 @@ func TestEndToEnd_ParallelBackupSession(t *testing.T) {
 	copy(checksum[:], hasher.Sum(nil))
 	size := uint64(streamBuf.Len())
 
-	if _, err := conn.Write(streamBuf.Bytes()); err != nil {
-		t.Fatalf("writing stream: %v", err)
+	// Escreve dados com ChunkHeader framing (como o Dispatcher faz)
+	chunkSize := 256 * 1024
+	rawData := streamBuf.Bytes()
+	var globalSeq uint32
+	for off := 0; off < len(rawData); {
+		end := off + chunkSize
+		if end > len(rawData) {
+			end = len(rawData)
+		}
+		chunk := rawData[off:end]
+
+		// Escreve ChunkHeader: [GlobalSeq uint32] [Length uint32]
+		if err := protocol.WriteChunkHeader(conn, globalSeq, uint32(len(chunk))); err != nil {
+			t.Fatalf("WriteChunkHeader seq %d: %v", globalSeq, err)
+		}
+		if _, err := conn.Write(chunk); err != nil {
+			t.Fatalf("writing chunk data seq %d: %v", globalSeq, err)
+		}
+		globalSeq++
+		off = end
 	}
 
-	if err := protocol.WriteTrailer(conn, checksum, size); err != nil {
-		t.Fatalf("WriteTrailer: %v", err)
-	}
+	// Escreve Trailer envolto em ChunkHeader (fica nos últimos 44B do arquivo montado)
+	var trailerBuf bytes.Buffer
+	protocol.WriteTrailer(&trailerBuf, checksum, size)
+	protocol.WriteChunkHeader(conn, globalSeq, uint32(trailerBuf.Len()))
+	conn.Write(trailerBuf.Bytes())
 
 	conn.CloseWrite()
 

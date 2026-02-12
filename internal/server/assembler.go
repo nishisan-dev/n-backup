@@ -17,14 +17,14 @@ import (
 // ChunkMeta contém metadados de um chunk recebido.
 type ChunkMeta struct {
 	StreamIndex uint8
-	ChunkSeq    uint32
-	Offset      uint64
+	GlobalSeq   uint32 // sequência global para reconstrução
+	FilePath    string // caminho do arquivo de chunk no disco
 	Length      int64
 }
 
 // ChunkAssembler gerencia chunks de streams paralelos por sessão.
-// Cada stream escreve em um chunk file separado.
-// Ao final, concatena todos na ordem de ChunkSeq para produzir o arquivo final.
+// Cada chunk é escrito em um arquivo separado com nome baseado no GlobalSeq.
+// Ao final, concatena todos na ordem de GlobalSeq para produzir o arquivo final.
 type ChunkAssembler struct {
 	sessionID string
 	baseDir   string // diretório do agent
@@ -50,15 +50,14 @@ func NewChunkAssembler(sessionID, agentDir string, logger *slog.Logger) (*ChunkA
 	}, nil
 }
 
-// ChunkFile retorna o arquivo para escrita do chunk de um stream específico.
-// O arquivo é criado se não existir, ou aberto para append se já existir.
-func (ca *ChunkAssembler) ChunkFile(streamIndex uint8) (*os.File, string, error) {
-	name := fmt.Sprintf("chunk_%d.tmp", streamIndex)
+// ChunkFileForSeq retorna o arquivo para escrita de um chunk com sequência global.
+func (ca *ChunkAssembler) ChunkFileForSeq(globalSeq uint32) (*os.File, string, error) {
+	name := fmt.Sprintf("chunk_%010d.tmp", globalSeq)
 	path := filepath.Join(ca.chunkDir, name)
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	f, err := os.Create(path)
 	if err != nil {
-		return nil, "", fmt.Errorf("opening chunk file for stream %d: %w", streamIndex, err)
+		return nil, "", fmt.Errorf("creating chunk file for seq %d: %w", globalSeq, err)
 	}
 	return f, path, nil
 }
@@ -70,19 +69,16 @@ func (ca *ChunkAssembler) RegisterChunk(meta ChunkMeta) {
 	ca.manifest = append(ca.manifest, meta)
 }
 
-// Assemble concatena todos os chunk files na ordem de ChunkSeq,
+// Assemble concatena todos os chunk files na ordem de GlobalSeq,
 // produzindo um único arquivo .tmp que pode ser validado e commitado.
 // Retorna o path do arquivo montado.
 func (ca *ChunkAssembler) Assemble() (string, int64, error) {
 	ca.mu.Lock()
 	defer ca.mu.Unlock()
 
-	// Ordena por stream index (cada stream produz dados sequenciais)
+	// Ordena por GlobalSeq — garante ordem original dos dados
 	sort.Slice(ca.manifest, func(i, j int) bool {
-		if ca.manifest[i].StreamIndex != ca.manifest[j].StreamIndex {
-			return ca.manifest[i].StreamIndex < ca.manifest[j].StreamIndex
-		}
-		return ca.manifest[i].ChunkSeq < ca.manifest[j].ChunkSeq
+		return ca.manifest[i].GlobalSeq < ca.manifest[j].GlobalSeq
 	})
 
 	// Cria arquivo final
@@ -95,39 +91,26 @@ func (ca *ChunkAssembler) Assemble() (string, int64, error) {
 
 	var totalBytes int64
 
-	// Lê e lista chunk files por stream index (0, 1, 2, ...)
-	// Cada chunk file contém dados sequenciais de um stream
-	entries, err := os.ReadDir(ca.chunkDir)
-	if err != nil {
-		return "", 0, fmt.Errorf("reading chunk directory: %w", err)
-	}
-
-	// Ordena para garantir concatenação na ordem correta
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Name() < entries[j].Name()
-	})
-
-	for _, entry := range entries {
-		chunkPath := filepath.Join(ca.chunkDir, entry.Name())
-		chunkFile, err := os.Open(chunkPath)
+	for _, meta := range ca.manifest {
+		chunkFile, err := os.Open(meta.FilePath)
 		if err != nil {
-			return "", 0, fmt.Errorf("opening chunk %s: %w", entry.Name(), err)
+			return "", 0, fmt.Errorf("opening chunk seq %d: %w", meta.GlobalSeq, err)
 		}
 
 		n, err := io.Copy(outFile, chunkFile)
 		chunkFile.Close()
 		if err != nil {
-			return "", 0, fmt.Errorf("copying chunk %s: %w", entry.Name(), err)
+			return "", 0, fmt.Errorf("copying chunk seq %d: %w", meta.GlobalSeq, err)
 		}
 
 		totalBytes += n
-		ca.logger.Debug("assembled chunk", "file", entry.Name(), "bytes", n)
+		ca.logger.Debug("assembled chunk", "globalSeq", meta.GlobalSeq, "stream", meta.StreamIndex, "bytes", n)
 	}
 
 	ca.logger.Info("assembly complete",
 		"session", ca.sessionID,
 		"totalBytes", totalBytes,
-		"chunks", len(entries),
+		"chunks", len(ca.manifest),
 	)
 
 	return outPath, totalBytes, nil

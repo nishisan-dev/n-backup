@@ -25,6 +25,7 @@ type Dispatcher struct {
 	activeCount int32 // atomic
 	chunkSize   int
 	nextStream  int
+	globalSeq   uint32 // sequência global de chunks para reconstrução no server
 	sessionID   string
 	serverAddr  string
 	tlsCfg      *tls.Config
@@ -100,7 +101,8 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 }
 
 // Write implementa io.Writer. Distribui chunks em round-robin pelos streams ativos.
-// Se um chunk é menor que chunkSize, ainda é enviado (último chunk do stream).
+// Cada chunk é precedido por um ChunkHeader (GlobalSeq + Length) no ring buffer,
+// permitindo ao server reconstruir a ordem global dos chunks.
 func (d *Dispatcher) Write(p []byte) (int, error) {
 	written := 0
 	active := int(atomic.LoadInt32(&d.activeCount))
@@ -116,12 +118,30 @@ func (d *Dispatcher) Write(p []byte) (int, error) {
 		// Seleciona stream em round-robin (apenas ativos)
 		d.mu.Lock()
 		streamIdx := d.nextStream % active
+		seq := d.globalSeq
+		d.globalSeq++
 		d.nextStream++
 		d.mu.Unlock()
 
 		stream := d.streams[streamIdx]
 
-		// Escreve no ring buffer do stream selecionado
+		// Escreve ChunkHeader (8 bytes) no ring buffer antes dos dados
+		hdr := make([]byte, 8)
+		hdr[0] = byte(seq >> 24)
+		hdr[1] = byte(seq >> 16)
+		hdr[2] = byte(seq >> 8)
+		hdr[3] = byte(seq)
+		l := uint32(chunk)
+		hdr[4] = byte(l >> 24)
+		hdr[5] = byte(l >> 16)
+		hdr[6] = byte(l >> 8)
+		hdr[7] = byte(l)
+
+		if _, err := stream.rb.Write(hdr); err != nil {
+			return written, fmt.Errorf("writing chunk header to stream %d ring buffer: %w", streamIdx, err)
+		}
+
+		// Escreve os dados do chunk no ring buffer
 		n, err := stream.rb.Write(p[written : written+chunk])
 		if err != nil {
 			return written, fmt.Errorf("writing to stream %d ring buffer: %w", streamIdx, err)

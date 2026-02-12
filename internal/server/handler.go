@@ -541,7 +541,8 @@ type ParallelSession struct {
 	StreamConns sync.Map // streamIndex (uint8) → net.Conn
 	MaxStreams  uint8
 	ChunkSize   uint32
-	Done        chan struct{} // sinaliza conclusão
+	StreamWg    sync.WaitGroup // barreira para todos os streams secundários
+	Done        chan struct{}   // sinaliza conclusão
 	CreatedAt   time.Time
 }
 
@@ -586,19 +587,9 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	h.sessions.Store(sessionID, pSession)
 	defer h.sessions.Delete(sessionID)
 
-	// Abre chunk file para stream 0 e recebe dados
-	chunkFile, _, err := assembler.ChunkFile(0)
-	if err != nil {
-		logger.Error("opening chunk file for stream 0", "error", err)
-		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
-		return
-	}
-
 	// Recebe dados do stream 0 com io.Discard para sackWriter
 	// Stream 0 compartilha conn com trailer/FinalACK, então não envia ChunkSACKs
-	// O agent envia CloseWrite() após o trailer, causando EOF aqui.
-	bytesReceived, err := h.receiveParallelStream(ctx, br, io.Discard, chunkFile, 0, pSession, logger)
-	chunkFile.Close()
+	bytesReceived, err := h.receiveParallelStream(ctx, br, io.Discard, 0, pSession, logger)
 
 	if err != nil {
 		logger.Error("receiving parallel stream 0", "error", err, "bytes", bytesReceived)
@@ -608,7 +599,11 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 
 	logger.Info("stream 0 data received", "bytes", bytesReceived)
 
-	// Monta o arquivo final
+	// Espera todos os streams secundários terminarem
+	pSession.StreamWg.Wait()
+	logger.Info("all parallel streams complete")
+
+	// Monta o arquivo final na ordem global
 	assembledPath, totalBytes, err := assembler.Assemble()
 	if err != nil {
 		logger.Error("assembling chunks", "error", err)
@@ -621,62 +616,57 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	h.validateAndCommit(conn, writer, assembledPath, totalBytes, storageInfo, logger)
 }
 
-// receiveParallelStream recebe dados de um stream paralelo e envia ChunkSACKs.
-func (h *Handler) receiveParallelStream(ctx context.Context, reader io.Reader, sackWriter io.Writer, chunkFile *os.File, streamIndex uint8, session *ParallelSession, logger *slog.Logger) (int64, error) {
-	bufReader := bufio.NewReaderSize(reader, 256*1024)
-	bufWriter := bufio.NewWriterSize(chunkFile, 256*1024)
-
+// receiveParallelStream recebe dados de um stream paralelo usando ChunkHeader framing.
+// Cada chunk é precedido por um ChunkHeader (8B: GlobalSeq uint32 + Length uint32).
+// Cada chunk é escrito em seu próprio arquivo, permitindo reconstrução por GlobalSeq.
+// O Trailer é enviado como o último chunk (dentro de ChunkHeader framing).
+// O stream termina com EOF (CloseWrite do agent) ou io.EOF no reader.
+func (h *Handler) receiveParallelStream(ctx context.Context, reader io.Reader, sackWriter io.Writer, streamIndex uint8, session *ParallelSession, logger *slog.Logger) (int64, error) {
 	var bytesReceived int64
-	var chunkSeq uint32
+	var localChunkSeq uint32
 
-	buf := make([]byte, 256*1024)
 	for {
-		n, readErr := bufReader.Read(buf)
-		if n > 0 {
-			if _, wErr := bufWriter.Write(buf[:n]); wErr != nil {
-				bufWriter.Flush()
-				return bytesReceived, fmt.Errorf("writing chunk: %w", wErr)
-			}
-			bytesReceived += int64(n)
-
-			// Envia ChunkSACK a cada chunk processado
-			if bytesReceived-int64(chunkSeq)*int64(session.ChunkSize) >= int64(session.ChunkSize) {
-				if fErr := bufWriter.Flush(); fErr != nil {
-					return bytesReceived, fmt.Errorf("flushing before chunk sack: %w", fErr)
-				}
-				chunkSeq++
-				if sErr := protocol.WriteChunkSACK(sackWriter, streamIndex, chunkSeq, uint64(bytesReceived)); sErr != nil {
-					logger.Warn("failed to send ChunkSACK", "error", sErr, "stream", streamIndex, "seq", chunkSeq)
-				} else {
-					logger.Debug("ChunkSACK sent", "stream", streamIndex, "seq", chunkSeq, "offset", bytesReceived)
-				}
-			}
-
-			// Registra chunk no manifest
-			session.Assembler.RegisterChunk(ChunkMeta{
-				StreamIndex: streamIndex,
-				ChunkSeq:    chunkSeq,
-				Offset:      uint64(bytesReceived),
-				Length:      int64(n),
-			})
-		}
-
-		if readErr != nil {
-			if readErr == io.EOF {
+		// Lê ChunkHeader (8 bytes: GlobalSeq + Length)
+		hdr, err := protocol.ReadChunkHeader(reader)
+		if err != nil {
+			if err == io.EOF || err.Error() == "reading chunk header seq: EOF" {
 				break
 			}
-			bufWriter.Flush()
-			return bytesReceived, fmt.Errorf("reading from stream %d: %w", streamIndex, readErr)
+			return bytesReceived, fmt.Errorf("reading chunk header from stream %d: %w", streamIndex, err)
+		}
+
+		// Cria arquivo para este chunk específico
+		chunkFile, chunkPath, err := session.Assembler.ChunkFileForSeq(hdr.GlobalSeq)
+		if err != nil {
+			return bytesReceived, fmt.Errorf("creating chunk file seq %d: %w", hdr.GlobalSeq, err)
+		}
+
+		// Lê exatamente Length bytes do stream
+		n, err := io.CopyN(chunkFile, reader, int64(hdr.Length))
+		chunkFile.Close()
+
+		if err != nil {
+			return bytesReceived, fmt.Errorf("reading chunk data seq %d: %w", hdr.GlobalSeq, err)
+		}
+
+		bytesReceived += n
+
+		// Registra no manifest
+		session.Assembler.RegisterChunk(ChunkMeta{
+			StreamIndex: streamIndex,
+			GlobalSeq:   hdr.GlobalSeq,
+			FilePath:    chunkPath,
+			Length:      n,
+		})
+
+		// Envia ChunkSACK
+		localChunkSeq++
+		if sErr := protocol.WriteChunkSACK(sackWriter, streamIndex, localChunkSeq, uint64(bytesReceived)); sErr != nil {
+			logger.Warn("failed to send ChunkSACK", "error", sErr, "stream", streamIndex, "seq", localChunkSeq)
+		} else {
+			logger.Debug("ChunkSACK sent", "stream", streamIndex, "globalSeq", hdr.GlobalSeq, "offset", bytesReceived)
 		}
 	}
-
-	if err := bufWriter.Flush(); err != nil {
-		return bytesReceived, fmt.Errorf("final flush stream %d: %w", streamIndex, err)
-	}
-
-	// Envia ChunkSACK final
-	chunkSeq++
-	protocol.WriteChunkSACK(sackWriter, streamIndex, chunkSeq, uint64(bytesReceived))
 
 	return bytesReceived, nil
 }
@@ -724,16 +714,12 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 	// Registra conexão do stream
 	pSession.StreamConns.Store(pj.StreamIndex, conn)
 
-	// Abre chunk file para este stream
-	chunkFile, _, err := pSession.Assembler.ChunkFile(pj.StreamIndex)
-	if err != nil {
-		logger.Error("opening chunk file", "error", err)
-		return
-	}
+	// Adiciona ao WaitGroup antes de receber dados
+	pSession.StreamWg.Add(1)
 
-	// Recebe dados do stream
-	bytesReceived, err := h.receiveParallelStream(ctx, conn, conn, chunkFile, pj.StreamIndex, pSession, logger)
-	chunkFile.Close()
+	// Recebe dados do stream com ChunkHeader framing
+	bytesReceived, err := h.receiveParallelStream(ctx, conn, conn, pj.StreamIndex, pSession, logger)
+	pSession.StreamWg.Done()
 
 	if err != nil {
 		logger.Error("receiving parallel stream", "error", err, "bytes", bytesReceived)

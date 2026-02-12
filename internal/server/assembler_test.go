@@ -22,10 +22,10 @@ func TestChunkAssembler_AssembleSingleStream(t *testing.T) {
 	}
 	defer ca.Cleanup()
 
-	// Escreve dados no chunk file do stream 0
-	f, _, err := ca.ChunkFile(0)
+	// Escreve chunk com GlobalSeq 0
+	f, path, err := ca.ChunkFileForSeq(0)
 	if err != nil {
-		t.Fatalf("ChunkFile(0): %v", err)
+		t.Fatalf("ChunkFileForSeq(0): %v", err)
 	}
 	data := []byte("hello world from stream 0")
 	if _, err := f.Write(data); err != nil {
@@ -33,21 +33,21 @@ func TestChunkAssembler_AssembleSingleStream(t *testing.T) {
 	}
 	f.Close()
 
-	ca.RegisterChunk(ChunkMeta{StreamIndex: 0, ChunkSeq: 1, Offset: uint64(len(data)), Length: int64(len(data))})
+	ca.RegisterChunk(ChunkMeta{StreamIndex: 0, GlobalSeq: 0, FilePath: path, Length: int64(len(data))})
 
 	// Monta
-	path, totalBytes, err := ca.Assemble()
+	resultPath, totalBytes, err := ca.Assemble()
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	defer os.Remove(path)
+	defer os.Remove(resultPath)
 
 	if totalBytes != int64(len(data)) {
 		t.Errorf("expected totalBytes=%d, got %d", len(data), totalBytes)
 	}
 
 	// Verifica conteúdo
-	content, err := os.ReadFile(path)
+	content, err := os.ReadFile(resultPath)
 	if err != nil {
 		t.Fatalf("reading assembled file: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestChunkAssembler_AssembleSingleStream(t *testing.T) {
 	}
 }
 
-func TestChunkAssembler_AssembleMultiStream(t *testing.T) {
+func TestChunkAssembler_AssembleMultiStream_GlobalOrder(t *testing.T) {
 	tmpDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -66,44 +66,84 @@ func TestChunkAssembler_AssembleMultiStream(t *testing.T) {
 	}
 	defer ca.Cleanup()
 
-	// Stream 0
-	f0, _, _ := ca.ChunkFile(0)
-	d0 := []byte("AAAA")
-	f0.Write(d0)
+	// Simula round-robin: chunk0→stream0, chunk1→stream1, chunk2→stream0
+	// GlobalSeq 0: "AAAA" enviado pelo stream 0
+	f0, p0, _ := ca.ChunkFileForSeq(0)
+	f0.Write([]byte("AAAA"))
 	f0.Close()
-	ca.RegisterChunk(ChunkMeta{StreamIndex: 0, ChunkSeq: 1, Offset: uint64(len(d0)), Length: int64(len(d0))})
+	ca.RegisterChunk(ChunkMeta{StreamIndex: 0, GlobalSeq: 0, FilePath: p0, Length: 4})
 
-	// Stream 1
-	f1, _, _ := ca.ChunkFile(1)
-	d1 := []byte("BBBB")
-	f1.Write(d1)
+	// GlobalSeq 1: "BBBB" enviado pelo stream 1
+	f1, p1, _ := ca.ChunkFileForSeq(1)
+	f1.Write([]byte("BBBB"))
 	f1.Close()
-	ca.RegisterChunk(ChunkMeta{StreamIndex: 1, ChunkSeq: 1, Offset: uint64(len(d1)), Length: int64(len(d1))})
+	ca.RegisterChunk(ChunkMeta{StreamIndex: 1, GlobalSeq: 1, FilePath: p1, Length: 4})
 
-	// Stream 2
-	f2, _, _ := ca.ChunkFile(2)
-	d2 := []byte("CCCC")
-	f2.Write(d2)
+	// GlobalSeq 2: "CCCC" enviado pelo stream 0
+	f2, p2, _ := ca.ChunkFileForSeq(2)
+	f2.Write([]byte("CCCC"))
 	f2.Close()
-	ca.RegisterChunk(ChunkMeta{StreamIndex: 2, ChunkSeq: 1, Offset: uint64(len(d2)), Length: int64(len(d2))})
+	ca.RegisterChunk(ChunkMeta{StreamIndex: 0, GlobalSeq: 2, FilePath: p2, Length: 4})
 
-	// Monta
-	path, totalBytes, err := ca.Assemble()
+	// Monta — deve reconstruir na ordem GlobalSeq: AAAA BBBB CCCC
+	resultPath, totalBytes, err := ca.Assemble()
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	defer os.Remove(path)
+	defer os.Remove(resultPath)
 
-	expectedTotal := int64(len(d0) + len(d1) + len(d2))
+	expectedTotal := int64(12)
 	if totalBytes != expectedTotal {
 		t.Errorf("expected totalBytes=%d, got %d", expectedTotal, totalBytes)
 	}
 
-	// Conteúdo deve ser chunk_0 + chunk_1 + chunk_2 (ordem alfabética do nome)
-	content, err := os.ReadFile(path)
+	content, err := os.ReadFile(resultPath)
 	if err != nil {
 		t.Fatalf("reading assembled file: %v", err)
 	}
+	expected := "AAAABBBBCCCC"
+	if string(content) != expected {
+		t.Errorf("expected %q, got %q", expected, content)
+	}
+}
+
+func TestChunkAssembler_AssembleOutOfOrder(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	ca, err := NewChunkAssembler("test-session-ooo", tmpDir, logger)
+	if err != nil {
+		t.Fatalf("NewChunkAssembler: %v", err)
+	}
+	defer ca.Cleanup()
+
+	// Registra chunks fora de ordem para verificar que Assemble reordena por GlobalSeq
+	f2, p2, _ := ca.ChunkFileForSeq(2)
+	f2.Write([]byte("CCCC"))
+	f2.Close()
+	ca.RegisterChunk(ChunkMeta{StreamIndex: 1, GlobalSeq: 2, FilePath: p2, Length: 4})
+
+	f0, p0, _ := ca.ChunkFileForSeq(0)
+	f0.Write([]byte("AAAA"))
+	f0.Close()
+	ca.RegisterChunk(ChunkMeta{StreamIndex: 0, GlobalSeq: 0, FilePath: p0, Length: 4})
+
+	f1, p1, _ := ca.ChunkFileForSeq(1)
+	f1.Write([]byte("BBBB"))
+	f1.Close()
+	ca.RegisterChunk(ChunkMeta{StreamIndex: 0, GlobalSeq: 1, FilePath: p1, Length: 4})
+
+	resultPath, _, err := ca.Assemble()
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	defer os.Remove(resultPath)
+
+	content, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("reading assembled file: %v", err)
+	}
+	// Deve estar na ordem GlobalSeq: AAAA BBBB CCCC
 	expected := "AAAABBBBCCCC"
 	if string(content) != expected {
 		t.Errorf("expected %q, got %q", expected, content)
