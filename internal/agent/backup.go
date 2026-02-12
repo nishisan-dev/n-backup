@@ -8,8 +8,10 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/nishisan-dev/n-backup/internal/config"
@@ -17,11 +19,22 @@ import (
 	"github.com/nishisan-dev/n-backup/internal/protocol"
 )
 
-// RunBackup executa uma sessão completa de backup para um BackupEntry:
-// 1. Conecta ao server via mTLS
-// 2. Envia handshake (agent name + storage name) e recebe ACK
-// 3. Faz streaming dos dados (tar.gz)
-// 4. Envia trailer com checksum e recebe Final ACK
+// maxResumeAttempts é o número máximo de tentativas de resume antes de reiniciar.
+const maxResumeAttempts = 5
+
+// resumeBackoff é o tempo inicial entre tentativas de resume.
+const resumeBackoff = 2 * time.Second
+
+// RunBackup executa uma sessão completa de backup com suporte a resume.
+//
+// Pipeline:
+//
+//	Scanner → tar.gz → RingBuffer (produtor)
+//	RingBuffer → conn (sender)
+//	conn → SACKs → RingBuffer.Advance (ACK reader)
+//
+// Se a conexão cair, o sender reconecta, envia RESUME,
+// e continua de onde parou (se o offset ainda estiver no buffer).
 func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, logger *slog.Logger) error {
 	logger = logger.With("backup", entry.Name, "storage", entry.Storage)
 	logger.Info("starting backup session", "server", cfg.Server.Address)
@@ -39,71 +52,247 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 	}
 	tlsCfg.ServerName = host
 
-	// Conecta ao server
-	conn, err := dialWithContext(ctx, cfg.Server.Address, tlsCfg)
+	// Conecta ao server e faz handshake
+	conn, sessionID, err := initialConnect(ctx, cfg, entry, tlsCfg, logger)
 	if err != nil {
-		return fmt.Errorf("connecting to server: %w", err)
-	}
-	defer conn.Close()
-
-	logger.Info("connected to server", "address", cfg.Server.Address)
-
-	// Fase 1: Handshake
-	if err := protocol.WriteHandshake(conn, cfg.Agent.Name, entry.Storage); err != nil {
-		return fmt.Errorf("writing handshake: %w", err)
+		return err
 	}
 
-	ack, err := protocol.ReadACK(conn)
-	if err != nil {
-		return fmt.Errorf("reading handshake ACK: %w", err)
-	}
+	logger = logger.With("session", sessionID)
+	logger.Info("handshake successful, starting resumable pipeline")
 
-	if ack.Status != protocol.StatusGo {
-		return fmt.Errorf("server rejected backup: status=%d message=%q", ack.Status, ack.Message)
-	}
+	// Ring buffer para backpressure e resume
+	rb := NewRingBuffer(cfg.Resume.BufferSizeRaw)
 
-	logger.Info("handshake successful, starting data transfer")
-
-	// Fase 2: Stream dados
+	// Pipeline: scanner → tar.gz → ring buffer (produtor)
 	sources := make([]string, len(entry.Sources))
 	for i, s := range entry.Sources {
 		sources[i] = s.Path
 	}
-
 	scanner := NewScanner(sources, entry.Exclude)
-	result, err := Stream(ctx, scanner, conn)
-	if err != nil {
-		return fmt.Errorf("streaming data: %w", err)
-	}
 
-	logger.Info("data transfer complete",
-		"bytes", result.Size,
-		"checksum", fmt.Sprintf("%x", result.Checksum),
-	)
+	var producerResult *StreamResult
+	var producerErr error
+	producerDone := make(chan struct{})
 
-	// Fase 3: Trailer
-	if err := protocol.WriteTrailer(conn, result.Checksum, result.Size); err != nil {
-		return fmt.Errorf("writing trailer: %w", err)
-	}
+	go func() {
+		defer close(producerDone)
+		producerResult, producerErr = Stream(ctx, scanner, rb)
+		rb.Close() // sinaliza EOF para o sender
+	}()
 
-	finalACK, err := protocol.ReadFinalACK(conn)
-	if err != nil {
-		return fmt.Errorf("reading final ACK: %w", err)
-	}
+	// Sender + ACK reader loop (com resume)
+	sendOffset := int64(0)
+	var sendMu sync.Mutex
 
-	switch finalACK.Status {
-	case protocol.FinalStatusOK:
-		logger.Info("backup completed successfully",
-			"bytes", result.Size,
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			// Backoff exponencial
+			delay := resumeBackoff * time.Duration(1<<(attempt-1))
+			if delay > 30*time.Second {
+				delay = 30 * time.Second
+			}
+			logger.Info("attempting resume", "attempt", attempt, "delay", delay)
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+
+			// Verifica se o offset ainda está no ring buffer
+			sendMu.Lock()
+			currentOffset := sendOffset
+			sendMu.Unlock()
+
+			if currentOffset > 0 && !rb.Contains(currentOffset) {
+				return fmt.Errorf("resume failed: offset %d no longer in ring buffer (tail=%d), restart required", currentOffset, rb.Tail())
+			}
+
+			// Reconecta e resume
+			var resumeErr error
+			conn, currentOffset, resumeErr = resumeConnect(ctx, cfg, entry, sessionID, tlsCfg, logger)
+			if resumeErr != nil {
+				logger.Warn("resume connect failed", "error", resumeErr)
+				if attempt >= maxResumeAttempts {
+					return fmt.Errorf("max resume attempts reached: %w", resumeErr)
+				}
+				continue
+			}
+
+			// Avança o offset de envio para o lastOffset do server
+			sendMu.Lock()
+			sendOffset = currentOffset
+			sendMu.Unlock()
+
+			// Avança o tail do ring buffer
+			rb.Advance(currentOffset)
+			logger.Info("resume accepted", "server_offset", currentOffset)
+			attempt = 0 // reset counter on successful resume
+		}
+
+		// Sender: lê do ring buffer e escreve na conn
+		senderErr := make(chan error, 1)
+		senderDone := make(chan struct{})
+
+		go func() {
+			defer close(senderDone)
+			buf := make([]byte, 256*1024)
+			for {
+				sendMu.Lock()
+				offset := sendOffset
+				sendMu.Unlock()
+
+				n, err := rb.ReadAt(offset, buf)
+				if err != nil {
+					if err == ErrBufferClosed {
+						senderErr <- nil
+						return
+					}
+					senderErr <- err
+					return
+				}
+
+				if _, err := conn.Write(buf[:n]); err != nil {
+					senderErr <- fmt.Errorf("writing to conn: %w", err)
+					return
+				}
+
+				sendMu.Lock()
+				sendOffset += int64(n)
+				sendMu.Unlock()
+			}
+		}()
+
+		// ACK reader: lê SACKs do server e avança o tail
+		ackDone := make(chan error, 1)
+
+		go func() {
+			for {
+				sack, err := protocol.ReadSACK(conn)
+				if err != nil {
+					ackDone <- err
+					return
+				}
+
+				rb.Advance(int64(sack.Offset))
+				logger.Debug("SACK received", "offset", sack.Offset)
+			}
+		}()
+
+		// Espera sender terminar ou falhar
+		select {
+		case <-ctx.Done():
+			conn.Close()
+			return ctx.Err()
+
+		case err := <-senderErr:
+			conn.Close()
+			if err != nil {
+				logger.Warn("sender failed, will attempt resume", "error", err)
+				continue // tenta resume
+			}
+			// Sender terminou sem erro = produtor terminou e ring buffer fechou
+		}
+
+		// Espera produtor terminar
+		<-producerDone
+		if producerErr != nil {
+			conn.Close()
+			return fmt.Errorf("pipeline error: %w", producerErr)
+		}
+
+		// Envia trailer (checksum + size)
+		logger.Info("data transfer complete",
+			"bytes", producerResult.Size,
+			"checksum", fmt.Sprintf("%x", producerResult.Checksum),
 		)
-		return nil
-	case protocol.FinalStatusChecksumMismatch:
-		return fmt.Errorf("server reported checksum mismatch")
-	case protocol.FinalStatusWriteError:
-		return fmt.Errorf("server reported write error")
-	default:
-		return fmt.Errorf("server returned unknown status: %d", finalACK.Status)
+
+		if err := protocol.WriteTrailer(conn, producerResult.Checksum, producerResult.Size); err != nil {
+			conn.Close()
+			return fmt.Errorf("writing trailer: %w", err)
+		}
+
+		// Lê Final ACK diretamente da conn (o ACK reader lerá erro e terminará)
+		finalACK, err := protocol.ReadFinalACK(conn)
+		if err != nil {
+			conn.Close()
+			return fmt.Errorf("reading final ACK: %w", err)
+		}
+
+		conn.Close()
+
+		switch finalACK.Status {
+		case protocol.FinalStatusOK:
+			logger.Info("backup completed successfully",
+				"bytes", producerResult.Size,
+			)
+			return nil
+		case protocol.FinalStatusChecksumMismatch:
+			return fmt.Errorf("server reported checksum mismatch")
+		case protocol.FinalStatusWriteError:
+			return fmt.Errorf("server reported write error")
+		default:
+			return fmt.Errorf("server returned unknown status: %d", finalACK.Status)
+		}
 	}
+}
+
+// initialConnect realiza a conexão inicial e handshake.
+func initialConnect(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, tlsCfg *tls.Config, logger *slog.Logger) (net.Conn, string, error) {
+	conn, err := dialWithContext(ctx, cfg.Server.Address, tlsCfg)
+	if err != nil {
+		return nil, "", fmt.Errorf("connecting to server: %w", err)
+	}
+
+	logger.Info("connected to server", "address", cfg.Server.Address)
+
+	// Handshake
+	if err := protocol.WriteHandshake(conn, cfg.Agent.Name, entry.Storage); err != nil {
+		conn.Close()
+		return nil, "", fmt.Errorf("writing handshake: %w", err)
+	}
+
+	ack, err := protocol.ReadACK(conn)
+	if err != nil {
+		conn.Close()
+		return nil, "", fmt.Errorf("reading handshake ACK: %w", err)
+	}
+
+	if ack.Status != protocol.StatusGo {
+		conn.Close()
+		return nil, "", fmt.Errorf("server rejected backup: status=%d message=%q", ack.Status, ack.Message)
+	}
+
+	return conn, ack.SessionID, nil
+}
+
+// resumeConnect reconecta e envia RESUME para o server.
+// Retorna a conexão e o lastOffset do server.
+func resumeConnect(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, sessionID string, tlsCfg *tls.Config, logger *slog.Logger) (net.Conn, int64, error) {
+	conn, err := dialWithContext(ctx, cfg.Server.Address, tlsCfg)
+	if err != nil {
+		return nil, 0, fmt.Errorf("reconnecting: %w", err)
+	}
+
+	// Envia RESUME
+	if err := protocol.WriteResume(conn, sessionID, cfg.Agent.Name, entry.Storage); err != nil {
+		conn.Close()
+		return nil, 0, fmt.Errorf("writing resume: %w", err)
+	}
+
+	rACK, err := protocol.ReadResumeACK(conn)
+	if err != nil {
+		conn.Close()
+		return nil, 0, fmt.Errorf("reading resume ACK: %w", err)
+	}
+
+	if rACK.Status != protocol.ResumeStatusOK {
+		conn.Close()
+		return nil, 0, fmt.Errorf("server rejected resume: status=%d", rACK.Status)
+	}
+
+	return conn, int64(rACK.LastOffset), nil
 }
 
 // dialWithContext conecta via TLS respeitando o contexto para cancelamento.
@@ -130,4 +319,21 @@ func dialWithContext(ctx context.Context, address string, tlsCfg *tls.Config) (*
 	tlsConn.SetDeadline(time.Time{})
 
 	return tlsConn, nil
+}
+
+// teeWriter é um io.Writer que escreve em ambos os destinos.
+// Usado para escrever no ring buffer E no hash ao mesmo tempo.
+type teeWriter struct {
+	a, b io.Writer
+}
+
+func (tw *teeWriter) Write(p []byte) (int, error) {
+	n, err := tw.a.Write(p)
+	if err != nil {
+		return n, err
+	}
+	if n != len(p) {
+		return n, io.ErrShortWrite
+	}
+	return tw.b.Write(p)
 }
