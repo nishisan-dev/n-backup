@@ -25,6 +25,10 @@ import (
 // sackInterval define a cada quantos bytes o server envia um SACK.
 const sackInterval = 64 * 1024 * 1024 // 64MB
 
+// readInactivityTimeout é o tempo máximo de inatividade na leitura de dados.
+// Se expirar, a conexão é considerada morta e a goroutine é liberada.
+const readInactivityTimeout = 5 * time.Minute
+
 // PartialSession rastreia um backup parcial para resume.
 type PartialSession struct {
 	TmpPath      string
@@ -369,8 +373,15 @@ func (h *Handler) receiveWithSACK(ctx context.Context, reader io.Reader, sackWri
 	var lastSACK int64
 	var sackErr atomic.Value // armazena erro de SACK para não bloquear
 
+	// Sliding read deadline: reseta a cada read bem-sucedido.
+	// Se a rede morrer silenciosamente (sem TCP RST), o read expirará em vez de travar para sempre.
+	netConn, hasDeadline := sackWriter.(net.Conn)
+
 	buf := make([]byte, 256*1024)
 	for {
+		if hasDeadline {
+			netConn.SetReadDeadline(time.Now().Add(readInactivityTimeout))
+		}
 		n, readErr := bufConn.Read(buf)
 		if n > 0 {
 			if _, wErr := bufFile.Write(buf[:n]); wErr != nil {
@@ -639,7 +650,7 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 
 	// Recebe dados do stream 0 com io.Discard para sackWriter
 	// Stream 0 compartilha conn com trailer/FinalACK, então não envia ChunkSACKs
-	bytesReceived, err := h.receiveParallelStream(ctx, br, io.Discard, 0, pSession, logger)
+	bytesReceived, err := h.receiveParallelStream(ctx, conn, br, io.Discard, 0, pSession, logger)
 
 	if err != nil {
 		logger.Error("receiving parallel stream 0", "error", err, "bytes", bytesReceived)
@@ -671,11 +682,14 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 // Cada chunk é escrito em seu próprio arquivo, permitindo reconstrução por GlobalSeq.
 // O Trailer é enviado como o último chunk (dentro de ChunkHeader framing).
 // O stream termina com EOF (CloseWrite do agent) ou io.EOF no reader.
-func (h *Handler) receiveParallelStream(ctx context.Context, reader io.Reader, sackWriter io.Writer, streamIndex uint8, session *ParallelSession, logger *slog.Logger) (int64, error) {
+func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, reader io.Reader, sackWriter io.Writer, streamIndex uint8, session *ParallelSession, logger *slog.Logger) (int64, error) {
 	var bytesReceived int64
 	var localChunkSeq uint32
 
 	for {
+		// Sliding read deadline: previne goroutine leak em conexões half-open.
+		conn.SetReadDeadline(time.Now().Add(readInactivityTimeout))
+
 		// Lê ChunkHeader (8 bytes: GlobalSeq + Length)
 		hdr, err := protocol.ReadChunkHeader(reader)
 		if err != nil {
@@ -770,7 +784,7 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 	pSession.StreamWg.Add(1)
 
 	// Recebe dados do stream com ChunkHeader framing
-	bytesReceived, err := h.receiveParallelStream(ctx, conn, conn, pj.StreamIndex, pSession, logger)
+	bytesReceived, err := h.receiveParallelStream(ctx, conn, conn, conn, pj.StreamIndex, pSession, logger)
 	pSession.StreamWg.Done()
 
 	if err != nil {

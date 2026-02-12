@@ -326,45 +326,40 @@ func (d *Dispatcher) ActiveStreams() int {
 	return int(atomic.LoadInt32(&d.activeCount))
 }
 
-// ProducerRate retorna bytes/s do produtor desde a última amostra.
-func (d *Dispatcher) ProducerRate() float64 {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	now := time.Now()
-	elapsed := now.Sub(d.lastSampleAt).Seconds()
-	if elapsed <= 0 {
-		return 0
-	}
-
-	bytes := atomic.LoadInt64(&d.producerBytes)
-	rate := float64(bytes) / elapsed
-
-	// Reset para próxima amostra
-	atomic.StoreInt64(&d.producerBytes, 0)
-	d.lastSampleAt = now
-
-	return rate
+// RateSample contém as taxas calculadas em um único ponto no tempo.
+// Elimina a race condition de calcular elapsed separadamente para cada métrica.
+type RateSample struct {
+	ProducerBps float64 // bytes/s do produtor
+	DrainBps    float64 // bytes/s drenados (soma de todos os streams)
 }
 
-// DrainRate retorna a soma de bytes/s drenados por todos os streams ativos.
-func (d *Dispatcher) DrainRate() float64 {
-	var totalDrain int64
-	for i := 0; i < d.maxStreams; i++ {
-		if d.streams[i].active {
-			totalDrain += atomic.LoadInt64(&d.streams[i].drainBytes)
-			atomic.StoreInt64(&d.streams[i].drainBytes, 0)
-		}
-	}
-
+// SampleRates captura as taxas do produtor e drain em um único instante,
+// usando o mesmo elapsed para ambas. Reseta todos os contadores atomicamente.
+func (d *Dispatcher) SampleRates() RateSample {
 	d.mu.Lock()
-	elapsed := time.Since(d.lastSampleAt).Seconds()
+	now := time.Now()
+	elapsed := now.Sub(d.lastSampleAt).Seconds()
+	d.lastSampleAt = now
 	d.mu.Unlock()
 
 	if elapsed <= 0 {
-		return 0
+		return RateSample{}
 	}
-	return float64(totalDrain) / elapsed
+
+	// Swap-and-reset dos contadores atômicos
+	producerBytes := atomic.SwapInt64(&d.producerBytes, 0)
+
+	var totalDrain int64
+	for i := 0; i < d.maxStreams; i++ {
+		if d.streams[i].active {
+			totalDrain += atomic.SwapInt64(&d.streams[i].drainBytes, 0)
+		}
+	}
+
+	return RateSample{
+		ProducerBps: float64(producerBytes) / elapsed,
+		DrainBps:    float64(totalDrain) / elapsed,
+	}
 }
 
 // Close fecha todos os ring buffers e conexões.

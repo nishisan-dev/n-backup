@@ -87,26 +87,25 @@ func (as *AutoScaler) Run(ctx context.Context) {
 //   - efficiency < 0.7 por 3 janelas → scale-down (-1 stream, mínimo 1)
 //   - 0.7 ≤ efficiency ≤ 1.0 → estável (reset contadores)
 func (as *AutoScaler) evaluate() {
-	producerRate := as.dispatcher.ProducerRate()
-	drainRate := as.dispatcher.DrainRate()
+	rates := as.dispatcher.SampleRates()
 	active := as.dispatcher.ActiveStreams()
 
 	// Evita divisão por zero
-	if drainRate <= 0 || active <= 0 {
+	if rates.DrainBps <= 0 || active <= 0 {
 		as.logger.Debug("auto-scaler: insufficient drain data",
-			"producerRate", producerRate,
-			"drainRate", drainRate,
+			"producerBps", rates.ProducerBps,
+			"drainBps", rates.DrainBps,
 			"active", active,
 		)
 		return
 	}
 
-	efficiency := producerRate / (drainRate * float64(active))
+	efficiency := rates.ProducerBps / (rates.DrainBps * float64(active))
 
 	as.logger.Debug("auto-scaler evaluation",
 		"efficiency", efficiency,
-		"producerRate_Bps", producerRate,
-		"drainRate_Bps", drainRate,
+		"producerBps", rates.ProducerBps,
+		"drainBps", rates.DrainBps,
 		"activeStreams", active,
 		"scaleUpCount", as.scaleUpCount,
 		"scaleDownCount", as.scaleDownCount,
