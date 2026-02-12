@@ -5,9 +5,12 @@
 package server
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestAtomicWriter_CommitAndAbort(t *testing.T) {
@@ -171,5 +174,88 @@ func TestRotate_IgnoresNonTarGz(t *testing.T) {
 			names[i] = e.Name()
 		}
 		t.Errorf("expected 3 files, got %d: %v", len(entries), names)
+	}
+}
+
+func TestCleanupExpiredSessions_MixedTypes(t *testing.T) {
+	dir := t.TempDir()
+	logger := slog.Default()
+
+	// Cria um tmp file para a PartialSession expirada
+	tmpPath := filepath.Join(dir, "expired.tmp")
+	os.WriteFile(tmpPath, []byte("partial data"), 0644)
+
+	sessions := &sync.Map{}
+
+	// PartialSession expirada (2h atrás)
+	sessions.Store("partial-expired", &PartialSession{
+		TmpPath:     tmpPath,
+		AgentName:   "agent-a",
+		StorageName: "storage-a",
+		BaseDir:     dir,
+		CreatedAt:   time.Now().Add(-2 * time.Hour),
+	})
+
+	// PartialSession fresh (agora)
+	sessions.Store("partial-fresh", &PartialSession{
+		TmpPath:     filepath.Join(dir, "fresh.tmp"),
+		AgentName:   "agent-b",
+		StorageName: "storage-b",
+		BaseDir:     dir,
+		CreatedAt:   time.Now(),
+	})
+
+	// ParallelSession expirada (2h atrás) — esta causava o panic antes do fix
+	assembler, err := NewChunkAssembler("par-expired", dir, logger)
+	if err != nil {
+		t.Fatalf("NewChunkAssembler: %v", err)
+	}
+	sessions.Store("parallel-expired", &ParallelSession{
+		SessionID:   "par-expired",
+		Assembler:   assembler,
+		AgentName:   "agent-c",
+		StorageName: "storage-c",
+		MaxStreams:  4,
+		Done:        make(chan struct{}),
+		CreatedAt:   time.Now().Add(-2 * time.Hour),
+	})
+
+	// ParallelSession fresh (agora)
+	assembler2, err := NewChunkAssembler("par-fresh", dir, logger)
+	if err != nil {
+		t.Fatalf("NewChunkAssembler: %v", err)
+	}
+	sessions.Store("parallel-fresh", &ParallelSession{
+		SessionID:   "par-fresh",
+		Assembler:   assembler2,
+		AgentName:   "agent-d",
+		StorageName: "storage-d",
+		MaxStreams:  4,
+		Done:        make(chan struct{}),
+		CreatedAt:   time.Now(),
+	})
+
+	// Deve NÃO dar panic
+	CleanupExpiredSessions(sessions, 1*time.Hour, logger)
+
+	// Verifica que sessões expiradas foram removidas
+	if _, ok := sessions.Load("partial-expired"); ok {
+		t.Error("partial-expired should have been cleaned up")
+	}
+	if _, ok := sessions.Load("parallel-expired"); ok {
+		t.Error("parallel-expired should have been cleaned up")
+	}
+
+	// Verifica que sessões fresh foram mantidas
+	if _, ok := sessions.Load("partial-fresh"); !ok {
+		t.Error("partial-fresh should still exist")
+	}
+	if _, ok := sessions.Load("parallel-fresh"); !ok {
+		t.Error("parallel-fresh should still exist")
+	}
+
+	// Verifica que o tmp file da partial expirada foi removido
+	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
+		t.Error("expired tmp file should have been removed")
 	}
 }

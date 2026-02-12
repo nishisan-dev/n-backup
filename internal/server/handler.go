@@ -498,17 +498,29 @@ func generateSessionID() string {
 // CleanupExpiredSessions remove sessões parciais expiradas e seus arquivos .tmp.
 func CleanupExpiredSessions(sessions *sync.Map, ttl time.Duration, logger *slog.Logger) {
 	sessions.Range(func(key, value any) bool {
-		session := value.(*PartialSession)
-		if time.Since(session.CreatedAt) > ttl {
-			logger.Info("cleaning expired session",
-				"session", key,
-				"agent", session.AgentName,
-				"storage", session.StorageName,
-				"age", time.Since(session.CreatedAt).Round(time.Second),
-			)
-			// Remove .tmp
-			os.Remove(session.TmpPath)
-			sessions.Delete(key)
+		switch s := value.(type) {
+		case *PartialSession:
+			if time.Since(s.CreatedAt) > ttl {
+				logger.Info("cleaning expired session",
+					"session", key,
+					"agent", s.AgentName,
+					"storage", s.StorageName,
+					"age", time.Since(s.CreatedAt).Round(time.Second),
+				)
+				os.Remove(s.TmpPath)
+				sessions.Delete(key)
+			}
+		case *ParallelSession:
+			if time.Since(s.CreatedAt) > ttl {
+				logger.Info("cleaning expired parallel session",
+					"session", key,
+					"agent", s.AgentName,
+					"storage", s.StorageName,
+					"age", time.Since(s.CreatedAt).Round(time.Second),
+				)
+				s.Assembler.Cleanup()
+				sessions.Delete(key)
+			}
 		}
 		return true
 	})
@@ -526,6 +538,7 @@ type ParallelSession struct {
 	MaxStreams  uint8
 	ChunkSize   uint32
 	Done        chan struct{} // sinaliza conclusão
+	CreatedAt   time.Time
 }
 
 // handleParallelBackup processa um backup paralelo.
@@ -564,6 +577,7 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		MaxStreams:  pi.MaxStreams,
 		ChunkSize:   pi.ChunkSize,
 		Done:        make(chan struct{}),
+		CreatedAt:   time.Now(),
 	}
 	h.sessions.Store(sessionID, pSession)
 	defer h.sessions.Delete(sessionID)
