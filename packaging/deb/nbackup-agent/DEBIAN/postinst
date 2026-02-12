@@ -1,0 +1,28 @@
+#!/bin/bash
+set -e
+
+# Criar usuário de serviço se não existir
+if ! id -u nbackup >/dev/null 2>&1; then
+    useradd --system --no-create-home --shell /usr/sbin/nologin nbackup
+fi
+
+# Criar diretório de configuração
+mkdir -p /etc/nbackup
+chown root:nbackup /etc/nbackup
+chmod 750 /etc/nbackup
+
+# Proteger chaves privadas se existirem
+if ls /etc/nbackup/*-key.pem >/dev/null 2>&1; then
+    chmod 640 /etc/nbackup/*-key.pem
+    chown root:nbackup /etc/nbackup/*-key.pem
+fi
+
+# Recarregar systemd e habilitar o serviço
+systemctl daemon-reload
+systemctl enable nbackup-agent.service || true
+
+echo ""
+echo "==> nbackup-agent instalado com sucesso."
+echo "==> Configure /etc/nbackup/agent.yaml e inicie com:"
+echo "    sudo systemctl start nbackup-agent"
+echo ""

@@ -1,0 +1,9 @@
+#!/bin/bash
+set -e
+
+# Parar e desabilitar o serviço antes da remoção
+if systemctl is-active --quiet nbackup-agent.service; then
+    systemctl stop nbackup-agent.service || true
+fi
+systemctl disable nbackup-agent.service || true
+systemctl daemon-reload || true

@@ -1,0 +1,158 @@
+.\" nbackup-agent(1) man page
+.TH NBACKUP-AGENT 1 "February 2026" "nbackup VERSION_PLACEHOLDER" "NBackup Manual"
+.SH NAME
+nbackup\-agent \- high\-performance streaming backup client daemon
+.SH SYNOPSIS
+.B nbackup\-agent
+.RB [ \-\-config
+.IR path ]
+.RB [ \-\-once ]
+.RB [ \-\-progress ]
+.br
+.B nbackup\-agent health
+.I address
+.RB [ \-\-config
+.IR path ]
+.SH DESCRIPTION
+.B nbackup\-agent
+is a daemon that performs scheduled backups by streaming data directly from
+the source filesystem to a remote
+.B nbackup\-server
+without creating any temporary files on the source host.
+.PP
+Data flows through a zero\-copy pipeline:
+.BR "fs.WalkDir \(-> tar \(-> gzip \(-> TLS \(-> Server" .
+The resulting backup is a standard
+.B .tar.gz
+file stored on the server.
+.PP
+Communication uses TCP with mutual TLS (mTLS) authentication, ensuring
+both the agent and server verify each other's identity via X.509
+certificates signed by a shared Certificate Authority.
+.SH OPTIONS
+.TP
+.BI \-\-config " path"
+Path to the agent configuration file in YAML format.
+Default:
+.IR /etc/nbackup/agent.yaml .
+.TP
+.B \-\-once
+Run all configured backups once and exit immediately. Does not start the
+daemon scheduler.
+.TP
+.B \-\-progress
+Show a progress bar during backup execution. Only works in combination
+with
+.BR \-\-once .
+Displays transfer speed (MB/s), objects per second, elapsed time, and ETA.
+.SH COMMANDS
+.TP
+.BI "health " address
+Perform a health check against the specified server address
+(e.g.,
+.IR backup.nishisan.dev:9847 ).
+Requires TLS configuration. Returns server status and available disk space.
+.SH CONFIGURATION
+The agent is configured via a YAML file. Key sections:
+.TP
+.B agent.name
+Unique identifier for this agent (e.g., hostname).
+.TP
+.B daemon.schedule
+Cron expression for automatic backup scheduling (e.g., "0 2 * * *").
+.TP
+.B server.address
+Address of the nbackup\-server (host:port).
+.TP
+.B tls
+Paths to CA certificate, client certificate, and client private key
+for mTLS authentication.
+.TP
+.B backups[]
+List of backup entries. Each entry has:
+.B name
+(identifier),
+.B storage
+(named storage on server),
+.B sources[]
+(directories to back up),
+.B exclude[]
+(glob patterns),
+.B parallels
+(0=single stream, 1\-8=parallel streams).
+.TP
+.B retry
+.B max_attempts
+(default: 5),
+.B initial_delay
+(default: 1s),
+.B max_delay
+(default: 5m).
+.TP
+.B resume.buffer_size
+Ring buffer size for mid\-stream resume (default: 256mb).
+.TP
+.B resume.chunk_size
+Chunk size for parallel streaming (default: 1mb, range: 64kb\-16mb).
+.SH FILES
+.TP
+.I /etc/nbackup/agent.yaml
+Default agent configuration file.
+.TP
+.I /etc/nbackup/ca.pem
+Certificate Authority certificate.
+.TP
+.I /etc/nbackup/agent.pem
+Agent client certificate.
+.TP
+.I /etc/nbackup/agent\-key.pem
+Agent client private key (should be mode 0640).
+.SH EXIT STATUS
+.TP
+.B 0
+Successful execution.
+.TP
+.B 1
+Error (configuration, connection, or backup failure).
+.SH EXAMPLES
+Run the agent as a daemon:
+.PP
+.RS
+.nf
+nbackup\-agent \-\-config /etc/nbackup/agent.yaml
+.fi
+.RE
+.PP
+Run a one\-shot backup with progress bar:
+.PP
+.RS
+.nf
+nbackup\-agent \-\-config /etc/nbackup/agent.yaml \-\-once \-\-progress
+.fi
+.RE
+.PP
+Check server health:
+.PP
+.RS
+.nf
+nbackup\-agent health backup.example.com:9847 \-\-config /etc/nbackup/agent.yaml
+.fi
+.RE
+.SH SECURITY
+The agent requires mutual TLS (mTLS) with TLS 1.3. Both the agent and
+server must present certificates signed by the same CA. The SHA\-256
+checksum is computed inline during streaming and verified by the server
+before committing the backup.
+.SH SEE ALSO
+.BR nbackup\-server (1),
+.BR tar (1),
+.BR gzip (1),
+.BR openssl (1),
+.BR systemctl (1)
+.SH BUGS
+Report bugs at
+.UR https://github.com/nishisan\-dev/n\-backup/issues
+.UE .
+.SH COPYRIGHT
+Copyright (c) 2025 Nishisan. All rights reserved.
+Licensed under the N\-Backup License (Non\-Commercial Evaluation).

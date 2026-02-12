@@ -1,0 +1,13 @@
+Package: nbackup-agent
+Version: VERSION_PLACEHOLDER
+Architecture: ARCH_PLACEHOLDER
+Maintainer: Nishisan <dev@nishisan.dev>
+Depends: libc6
+Section: admin
+Priority: optional
+Homepage: https://github.com/nishisan-dev/n-backup
+Description: NBackup Agent — High-performance streaming backup client
+ NBackup Agent is a daemon that performs scheduled backups via streaming
+ (tar+gzip) over TCP with mutual TLS (mTLS) authentication. Zero temporary
+ files on the source host. Supports parallel streaming, resume mid-stream,
+ and exponential backoff retry.

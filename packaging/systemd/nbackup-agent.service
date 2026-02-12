@@ -1,0 +1,41 @@
+[Unit]
+Description=NBackup Agent — Streaming Backup Client
+Documentation=man:nbackup-agent(1) https://github.com/nishisan-dev/n-backup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/nbackup-agent --config /etc/nbackup/agent.yaml
+Restart=on-failure
+RestartSec=10s
+
+# Usuário de serviço
+User=nbackup
+Group=nbackup
+
+# Hardening de segurança
+ProtectSystem=strict
+ProtectHome=read-only
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+
+# O agent precisa ler arquivos do filesystem para fazer backup
+# Adicione aqui os diretórios que o agent precisa ler
+# ReadOnlyPaths=/app /home /etc
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nbackup-agent
+
+[Install]
+WantedBy=multi-user.target

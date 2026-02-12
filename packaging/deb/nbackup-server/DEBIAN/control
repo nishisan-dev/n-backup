@@ -1,0 +1,13 @@
+Package: nbackup-server
+Version: VERSION_PLACEHOLDER
+Architecture: ARCH_PLACEHOLDER
+Maintainer: Nishisan <dev@nishisan.dev>
+Depends: libc6
+Section: admin
+Priority: optional
+Homepage: https://github.com/nishisan-dev/n-backup
+Description: NBackup Server — High-performance streaming backup receiver
+ NBackup Server receives backup streams from NBackup Agents over TCP with
+ mutual TLS (mTLS) authentication. Validates data integrity via SHA-256,
+ performs atomic writes, and manages automatic backup rotation per named
+ storage. Supports parallel streaming and session resume.
