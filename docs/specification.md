@@ -213,6 +213,98 @@ Quando uma conexão cai mid-stream, o agent pode reconectar e retomar de onde pa
 
 Enviado periodicamente pelo server (a cada 64MB) para confirmar recebimento. O agent avança o tail do ring buffer, liberando espaço para novas escritas.
 
+### 3.5 Parallel Streaming
+
+Para backups grandes, o agent pode usar **múltiplos streams paralelos** para aumentar o throughput.
+
+#### Fluxo
+
+```
+Client                                     Server
+  │                                          │
+  │──── Handshake + ACK GO (normal) ───────▶│
+  │──── ParallelInit (maxStreams, chunkSize)▶│  ← extensão após ACK
+  │                                          │
+  │──── DATA stream 0 (primário) ─────────▶ │  ← conexão principal
+  │                                          │
+  │──── ParallelJoin (sessionID, idx=1) ──▶ │  ← nova conexão TLS
+  │◀─── ParallelACK (OK/FULL/NOT_FOUND) ─── │
+  │──── DATA stream 1 ────────────────────▶ │
+  │◀─── ChunkSACK (idx, seq, offset) ────── │  ← ACK por chunk/stream
+  │                                          │
+  │──── ParallelJoin (sessionID, idx=2) ──▶ │  ← mais streams...
+  │                                          │
+  │──── Trailer (SHA-256, size total) ────▶ │  ← via stream 0
+  │◀─── FINAL ACK ─────────────────────── │
+```
+
+#### ParallelInit (Client → Server)
+
+Enviado imediatamente após o ACK GO na conexão primária:
+
+```
+┌──────────┬───────────┐
+│ MaxStreams│ ChunkSize   │
+│ 1 byte   │ 4B uint32   │
+└──────────┴───────────┘
+```
+
+- **MaxStreams**: Número máximo de streams (1-8)
+- **ChunkSize**: Tamanho de cada chunk em bytes (default: 1MB)
+
+#### ParallelJoin (Client → Server)
+
+Enviado em uma **nova conexão TLS** para unir-se a uma sessão existente:
+
+```
+┌──────────┬────────────────┬───────┬────────────┐
+│ "PJIN"   │ SessionID (UTF8)│ '\n'  │ StreamIndex │
+│ 4 bytes  │ variável        │ 1B    │ 1 byte      │
+└──────────┴────────────────┴───────┴────────────┘
+```
+
+#### ParallelACK (Server → Client)
+
+```
+┌──────────┐
+│ Status   │
+│ 1 byte   │
+└──────────┘
+```
+
+| Status | Código | Significado |
+|---|---|---|
+| OK | `0x00` | Stream aceito |
+| FULL | `0x01` | Sessão no limite de streams |
+| NOT_FOUND | `0x02` | SessionID não encontrado |
+
+#### ChunkSACK (Server → Client)
+
+ACK seletivo por stream, enviado nos streams secundários:
+
+```
+┌──────────┬────────────┬──────────┬──────────┐
+│ "CSAK"   │ StreamIndex │ ChunkSeq  │ Offset    │
+│ 4 bytes  │ 1 byte      │ 4B uint32 │ 8B uint64 │
+└──────────┴────────────┴──────────┴──────────┘
+```
+
+#### Configuração
+
+```yaml
+backups:
+  - name: "app"
+    storage: "scripts"
+    parallels: 0         # 0 = single stream (padrão)
+
+  - name: "home"
+    storage: "home-dirs"
+    parallels: 4         # 4 streams paralelos
+```
+
+- **parallels**: `0` desabilita (single stream), `1-8` define o máximo de streams.
+- O agent usa um **Dispatcher** (round-robin) e um **AutoScaler** (histerese) para distribuir chunks entre streams.
+
 ---
 
 ## 4. Configuração
@@ -423,6 +515,5 @@ nbackup-agent cert gen-host --name web-server-01
 - Backup incremental / diferencial
 - Deduplicação
 - Interface web / API REST
-- Múltiplos streams paralelos por agent
 - PKI integrada (certificados gerenciados externamente na v1)
 - Compressão Zstd (gzip na v1 para compatibilidade)

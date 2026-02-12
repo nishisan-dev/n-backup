@@ -576,8 +576,9 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		return
 	}
 
-	// Recebe dados do stream 0 com ChunkSACK
-	bytesReceived, err := h.receiveParallelStream(ctx, br, conn, chunkFile, 0, pSession, logger)
+	// Recebe dados do stream 0 com io.Discard para sackWriter
+	// Stream 0 compartilha conn com trailer/FinalACK, então não envia ChunkSACKs
+	bytesReceived, err := h.receiveParallelStream(ctx, br, io.Discard, chunkFile, 0, pSession, logger)
 	chunkFile.Close()
 
 	if err != nil {

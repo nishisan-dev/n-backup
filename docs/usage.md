@@ -154,6 +154,7 @@ Cada backup entry define quais diretórios incluir e para qual storage do server
 backups:
   - name: app               # Nome lógico do backup
     storage: scripts         # Storage nomeado no server
+    parallels: 0             # 0 = single stream (padrão)
     sources:
       - path: /app/scripts
     exclude:
@@ -161,6 +162,7 @@ backups:
 
   - name: home
     storage: home-dirs
+    parallels: 4             # 4 streams paralelos
     sources:
       - path: /home
     exclude:
@@ -229,6 +231,44 @@ resume:
 
 > [!IMPORTANT]
 > Se o offset não estiver mais no ring buffer (avançou além da capacidade), o backup reinicia do zero.
+
+---
+
+## Parallel Streaming
+
+Para aumentar o throughput de backups grandes, o agent pode usar **múltiplos streams TLS paralelos**:
+
+```yaml
+backups:
+  - name: "data"
+    storage: "main"
+    parallels: 4             # 0 = single stream, 1-8 = máximo de streams
+```
+
+### Como Funciona
+
+```
+1. Agent envia Handshake normal, recebe ACK GO + SessionID
+2. Agent envia ParallelInit (maxStreams, chunkSize) na conexão primária
+3. Agent abre conexões TLS adicionais com ParallelJoin (sessionID, streamIndex)
+4. Dados são distribuídos round-robin entre streams pelo Dispatcher
+5. AutoScaler ajusta dinamicamente o número de streams ativos
+6. Server reassembla chunks na ordem correta e faz commit atômico
+```
+
+### Parâmetros
+
+| Parâmetro | Default | Descrição |
+|----------|---------|----------|
+| `parallels` | `0` | Número máximo de streams (0=desabilita) |
+| Chunk size (fixo) | 1MB | Tamanho de cada chunk distribuído |
+| Hysteresis window (fixo) | 3 | Janelas consecutivas para escalar |
+
+> [!TIP]
+> Use `parallels: 2-4` para links com laten̂ncia alta (WAN). Para LAN, `parallels: 0` costuma ser suficiente.
+
+> [!NOTE]
+> O AutoScaler adiciona streams gradualmente com base na eficiência observada (razão producer/drain), evitando overhead desnecessário.
 
 ---
 

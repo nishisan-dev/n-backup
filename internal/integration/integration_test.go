@@ -401,6 +401,165 @@ func TestEndToEnd_Rotation(t *testing.T) {
 	}
 }
 
+// TestEndToEnd_ParallelBackupSession testa o fluxo paralelo:
+// Agent → Handshake → ACK GO → ParallelInit → Stream tar.gz (stream 0) → Trailer → FinalACK → Commit
+func TestEndToEnd_ParallelBackupSession(t *testing.T) {
+	pkiDir := t.TempDir()
+	pki := generatePKI(t, pkiDir)
+
+	storageDir := t.TempDir()
+	agentName := "test-agent-parallel"
+
+	serverCfg := &config.ServerConfig{
+		Storages: map[string]config.StorageInfo{
+			testStorageName: {BaseDir: storageDir, MaxBackups: 3},
+		},
+		Logging: config.LoggingInfo{Level: "debug", Format: "text"},
+	}
+
+	serverTLS, err := tls.LoadX509KeyPair(pki.serverCertPath, pki.serverKeyPath)
+	if err != nil {
+		t.Fatalf("loading server cert: %v", err)
+	}
+
+	caPool := loadCAPool(t, pki.caCertPath)
+
+	serverTLSCfg := &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{serverTLS},
+		ClientCAs:    caPool,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+	}
+
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", serverTLSCfg)
+	if err != nil {
+		t.Fatalf("TLS listen: %v", err)
+	}
+	defer ln.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger := testLogger()
+	go server.RunWithListener(ctx, ln, serverCfg, logger)
+
+	sourceDir := t.TempDir()
+	createTestFiles(t, sourceDir)
+
+	clientTLS, err := tls.LoadX509KeyPair(pki.clientCertPath, pki.clientKeyPath)
+	if err != nil {
+		t.Fatalf("loading client cert: %v", err)
+	}
+
+	clientTLSCfg := &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{clientTLS},
+		RootCAs:      caPool,
+		ServerName:   "localhost",
+	}
+
+	conn, err := tls.Dial("tcp", ln.Addr().String(), clientTLSCfg)
+	if err != nil {
+		t.Fatalf("TLS dial: %v", err)
+	}
+	defer conn.Close()
+
+	// 1. Handshake
+	if err := protocol.WriteHandshake(conn, agentName, testStorageName); err != nil {
+		t.Fatalf("WriteHandshake: %v", err)
+	}
+
+	ack, err := protocol.ReadACK(conn)
+	if err != nil {
+		t.Fatalf("ReadACK: %v", err)
+	}
+
+	if ack.Status != protocol.StatusGo {
+		t.Fatalf("expected StatusGo, got %d: %s", ack.Status, ack.Message)
+	}
+
+	// 2. ParallelInit: 2 streams, 256KB chunks
+	if err := protocol.WriteParallelInit(conn, 2, 256*1024); err != nil {
+		t.Fatalf("WriteParallelInit: %v", err)
+	}
+
+	// 3. Stream tar.gz via stream 0
+	var streamBuf bytes.Buffer
+	hasher := sha256.New()
+	multiW := io.MultiWriter(&streamBuf, hasher)
+
+	gzW, _ := gzip.NewWriterLevel(multiW, gzip.BestSpeed)
+	tw := tar.NewWriter(gzW)
+
+	filepath.WalkDir(sourceDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		info, _ := d.Info()
+
+		header, _ := tar.FileInfoHeader(info, "")
+		relPath, _ := filepath.Rel(sourceDir, path)
+		header.Name = relPath
+
+		tw.WriteHeader(header)
+
+		if info.Mode().IsRegular() {
+			f, _ := os.Open(path)
+			io.Copy(tw, f)
+			f.Close()
+		}
+		return nil
+	})
+
+	tw.Close()
+	gzW.Close()
+
+	var checksum [32]byte
+	copy(checksum[:], hasher.Sum(nil))
+	size := uint64(streamBuf.Len())
+
+	if _, err := conn.Write(streamBuf.Bytes()); err != nil {
+		t.Fatalf("writing stream: %v", err)
+	}
+
+	if err := protocol.WriteTrailer(conn, checksum, size); err != nil {
+		t.Fatalf("WriteTrailer: %v", err)
+	}
+
+	conn.CloseWrite()
+
+	// 4. Final ACK
+	finalACK, err := protocol.ReadFinalACK(conn)
+	if err != nil {
+		t.Fatalf("ReadFinalACK: %v", err)
+	}
+
+	if finalACK.Status != protocol.FinalStatusOK {
+		t.Fatalf("expected FinalStatusOK, got %d", finalACK.Status)
+	}
+
+	// 5. Verifica backup gravado
+	agentDir := filepath.Join(storageDir, agentName)
+	entries, err := os.ReadDir(agentDir)
+	if err != nil {
+		t.Fatalf("reading agent dir: %v", err)
+	}
+
+	var backupFiles []string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tar.gz") {
+			backupFiles = append(backupFiles, e.Name())
+		}
+	}
+
+	if len(backupFiles) != 1 {
+		t.Fatalf("expected 1 backup, got %d: %v", len(backupFiles), backupFiles)
+	}
+
+	backupPath := filepath.Join(agentDir, backupFiles[0])
+	verifyTarGz(t, backupPath, sourceDir)
+}
+
 // ===== Helpers =====
 
 type pkiPaths struct {
