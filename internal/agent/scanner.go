@@ -89,30 +89,50 @@ func (s *Scanner) Scan(ctx context.Context, fn func(entry FileEntry) error) erro
 }
 
 // isExcluded verifica se o caminho relativo corresponde a algum glob de exclusão.
+// Suporta:
+//   - "*.log"              → match pelo basename
+//   - ".git/**"            → match diretório em qualquer nível
+//   - "*/access-logs/"     → trailing slash indica match de diretório
+//   - "node_modules/**"    → exclui diretório e todo conteúdo
 func (s *Scanner) isExcluded(relPath string, isDir bool) bool {
+	base := filepath.Base(relPath)
+	parts := strings.Split(relPath, string(os.PathSeparator))
+
 	for _, pattern := range s.excludes {
-		// Testa o caminho completo
-		if matched, _ := filepath.Match(pattern, relPath); matched {
-			return true
+		// Trailing slash = match apenas diretórios pelo nome
+		if strings.HasSuffix(pattern, "/") {
+			if isDir {
+				dirPattern := strings.TrimSuffix(pattern, "/")
+				// Remove */ prefix se existir (ex: "*/access-logs/" → "access-logs")
+				dirPattern = strings.TrimPrefix(dirPattern, "*/")
+				for _, part := range parts {
+					if matched, _ := filepath.Match(dirPattern, part); matched {
+						return true
+					}
+				}
+			}
+			continue
 		}
 
-		// Testa apenas o basename
-		base := filepath.Base(relPath)
-		if matched, _ := filepath.Match(pattern, base); matched {
-			return true
-		}
-
-		// Para patterns como "node_modules/**", testa se o path está dentro
-		// de um diretório que match o prefix
+		// Patterns com "/**" suffix — exclui diretório e todo conteúdo recursivamente
 		if strings.HasSuffix(pattern, "/**") {
 			prefix := strings.TrimSuffix(pattern, "/**")
-			// Verifica se algum componente do path match o prefix
-			parts := strings.Split(relPath, string(os.PathSeparator))
 			for _, part := range parts {
 				if matched, _ := filepath.Match(prefix, part); matched {
 					return true
 				}
 			}
+			continue
+		}
+
+		// Testa o caminho completo contra o pattern
+		if matched, _ := filepath.Match(pattern, relPath); matched {
+			return true
+		}
+
+		// Testa o basename contra o pattern (ex: "*.log" matcha qualquer .log)
+		if matched, _ := filepath.Match(pattern, base); matched {
+			return true
 		}
 	}
 	return false
