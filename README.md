@@ -1,5 +1,6 @@
 # n-backup
 
+[![CI](https://github.com/nishisan-dev/n-backup/actions/workflows/ci.yml/badge.svg)](https://github.com/nishisan-dev/n-backup/actions/workflows/ci.yml)
 Sistema de backup high-performance client-server escrito em Go. Realiza streaming de dados da origem para o destino sem criação de arquivos temporários, utilizando comunicação TCP pura com mTLS.
 
 ## Pilares
