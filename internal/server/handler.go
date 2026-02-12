@@ -5,6 +5,7 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -139,9 +140,18 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 		return
 	}
 
-	// Stream: conn → arquivo .tmp
-	bytesReceived, err := io.Copy(tmpFile, conn)
+	// Stream: conn → buffer → arquivo .tmp (256KB buffers para reduzir syscalls)
+	bufConn := bufio.NewReaderSize(conn, 256*1024)
+	bufFile := bufio.NewWriterSize(tmpFile, 256*1024)
+
+	bytesReceived, err := io.Copy(bufFile, bufConn)
+
+	// Flush antes de fechar
+	if flushErr := bufFile.Flush(); flushErr != nil && err == nil {
+		err = flushErr
+	}
 	tmpFile.Close()
+
 	if err != nil {
 		logger.Error("receiving data stream", "error", err)
 		writer.Abort(tmpPath)

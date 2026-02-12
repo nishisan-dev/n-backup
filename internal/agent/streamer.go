@@ -6,6 +6,7 @@ package agent
 
 import (
 	"archive/tar"
+	"bufio"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -26,11 +27,14 @@ type StreamResult struct {
 // O SHA-256 é calculado inline sobre o stream gzip compactado.
 // Retorna o checksum e total de bytes escritos no destino.
 func Stream(ctx context.Context, scanner *Scanner, dest io.Writer) (*StreamResult, error) {
+	// Buffer de escrita para reduzir syscalls na conexão TLS
+	bufDest := bufio.NewWriterSize(dest, 256*1024) // 256KB
+
 	// Cria o hash inline
 	hasher := sha256.New()
-	counter := &countWriter{w: io.MultiWriter(dest, hasher)}
+	counter := &countWriter{w: io.MultiWriter(bufDest, hasher)}
 
-	// Pipeline: tar → gzip → (dest + hasher)
+	// Pipeline: tar → gzip → buffer → (dest + hasher)
 	gzWriter, err := gzip.NewWriterLevel(counter, gzip.BestSpeed)
 	if err != nil {
 		return nil, fmt.Errorf("creating gzip writer: %w", err)
@@ -65,6 +69,11 @@ func Stream(ctx context.Context, scanner *Scanner, dest io.Writer) (*StreamResul
 	// Fecha o gzip writer (flush + trailer)
 	if err := gzWriter.Close(); err != nil {
 		return nil, fmt.Errorf("closing gzip writer: %w", err)
+	}
+
+	// Flush do buffer para a conexão
+	if err := bufDest.Flush(); err != nil {
+		return nil, fmt.Errorf("flushing buffer: %w", err)
 	}
 
 	var checksum [32]byte
