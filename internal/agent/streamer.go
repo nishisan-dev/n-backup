@@ -86,6 +86,8 @@ func Stream(ctx context.Context, scanner *Scanner, dest io.Writer) (*StreamResul
 }
 
 // addToTar adiciona um arquivo ou diretório ao tar archive.
+// Para arquivos regulares, usa stat do fd aberto + LimitReader para evitar
+// "write too long" em arquivos que crescem durante o backup (ex: logs ativos).
 func addToTar(tw *tar.Writer, entry FileEntry) error {
 	// Trata symlinks
 	link := ""
@@ -97,29 +99,48 @@ func addToTar(tw *tar.Writer, entry FileEntry) error {
 		}
 	}
 
+	// Se for arquivo regular, abre antes de criar o header
+	// para garantir consistência entre size no header e bytes copiados
+	if entry.Info.Mode().IsRegular() {
+		f, err := os.Open(entry.Path)
+		if err != nil {
+			return nil // pula arquivos que sumiram entre scan e tar
+		}
+		defer f.Close()
+
+		// Stat via fd aberto (não via path) — evita TOCTOU
+		fi, err := f.Stat()
+		if err != nil {
+			return nil // pula se não conseguir stat
+		}
+
+		header, err := tar.FileInfoHeader(fi, "")
+		if err != nil {
+			return fmt.Errorf("creating tar header for %s: %w", entry.Path, err)
+		}
+		header.Name = entry.RelPath
+
+		if err := tw.WriteHeader(header); err != nil {
+			return fmt.Errorf("writing tar header for %s: %w", entry.Path, err)
+		}
+
+		// LimitReader garante que nunca escrevemos mais que o declarado no header
+		if _, err := io.Copy(tw, io.LimitReader(f, fi.Size())); err != nil {
+			return fmt.Errorf("writing file %s to tar: %w", entry.Path, err)
+		}
+
+		return nil
+	}
+
+	// Diretórios e symlinks
 	header, err := tar.FileInfoHeader(entry.Info, link)
 	if err != nil {
 		return fmt.Errorf("creating tar header for %s: %w", entry.Path, err)
 	}
-
-	// Usa o caminho relativo para preservar a estrutura
 	header.Name = entry.RelPath
 
 	if err := tw.WriteHeader(header); err != nil {
 		return fmt.Errorf("writing tar header for %s: %w", entry.Path, err)
-	}
-
-	// Se for arquivo regular, copia o conteúdo
-	if entry.Info.Mode().IsRegular() {
-		f, err := os.Open(entry.Path)
-		if err != nil {
-			return fmt.Errorf("opening file %s: %w", entry.Path, err)
-		}
-		defer f.Close()
-
-		if _, err := io.Copy(tw, f); err != nil {
-			return fmt.Errorf("writing file %s to tar: %w", entry.Path, err)
-		}
 	}
 
 	return nil
