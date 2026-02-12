@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/nishisan-dev/n-backup/internal/config"
 	"github.com/nishisan-dev/n-backup/internal/pki"
@@ -45,7 +46,8 @@ func Run(ctx context.Context, cfg *config.ServerConfig, logger *slog.Logger) err
 		ln.Close()
 	}()
 
-	// Accept loop
+	// Accept loop com backoff para prevenir hot loop em erros consecutivos
+	consecutiveErrors := 0
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -54,11 +56,20 @@ func Run(ctx context.Context, cfg *config.ServerConfig, logger *slog.Logger) err
 				logger.Info("server shutdown complete")
 				return nil
 			default:
-				logger.Error("accepting connection", "error", err)
+				consecutiveErrors++
+				logger.Error("accepting connection", "error", err, "consecutive_errors", consecutiveErrors)
+				if consecutiveErrors > 5 {
+					delay := time.Duration(consecutiveErrors) * 100 * time.Millisecond
+					if delay > 5*time.Second {
+						delay = 5 * time.Second
+					}
+					time.Sleep(delay)
+				}
 				continue
 			}
 		}
 
+		consecutiveErrors = 0
 		go handler.HandleConnection(ctx, conn)
 	}
 }
@@ -73,6 +84,7 @@ func RunWithListener(ctx context.Context, ln net.Listener, cfg *config.ServerCon
 		ln.Close()
 	}()
 
+	consecutiveErrors := 0
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -80,11 +92,20 @@ func RunWithListener(ctx context.Context, ln net.Listener, cfg *config.ServerCon
 			case <-ctx.Done():
 				return nil
 			default:
-				logger.Error("accepting connection", "error", err)
+				consecutiveErrors++
+				logger.Error("accepting connection", "error", err, "consecutive_errors", consecutiveErrors)
+				if consecutiveErrors > 5 {
+					delay := time.Duration(consecutiveErrors) * 100 * time.Millisecond
+					if delay > 5*time.Second {
+						delay = 5 * time.Second
+					}
+					time.Sleep(delay)
+				}
 				continue
 			}
 		}
 
+		consecutiveErrors = 0
 		go handler.HandleConnection(ctx, conn)
 	}
 }
