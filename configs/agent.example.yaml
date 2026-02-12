@@ -42,6 +42,7 @@ retry:
 
 resume:
   buffer_size: 256mb               # Tamanho do ring buffer (kb, mb, gb)
+  chunk_size: 1mb                  # Tamanho de cada chunk paralelo (64kb-16mb, default: 1mb)
 
 logging:
   level: info                      # debug, info, warn, error

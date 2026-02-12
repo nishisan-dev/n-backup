@@ -69,10 +69,15 @@ type RetryInfo struct {
 	MaxDelay     time.Duration `yaml:"max_delay"`
 }
 
+// DefaultChunkSize é o tamanho padrão de cada chunk para streaming paralelo (1MB).
+const DefaultChunkSize = 1 * 1024 * 1024
+
 // ResumeConfig contém configurações do ring buffer para resume.
 type ResumeConfig struct {
 	BufferSize    string `yaml:"buffer_size"` // ex: "256mb", "1gb"
 	BufferSizeRaw int64  `yaml:"-"`           // valor parseado em bytes
+	ChunkSize     string `yaml:"chunk_size"`  // ex: "1mb", "4mb" (default: 1mb)
+	ChunkSizeRaw  int64  `yaml:"-"`           // valor parseado em bytes
 }
 
 // LoggingInfo contém configurações de logging.
@@ -166,6 +171,22 @@ func (c *AgentConfig) validate() error {
 		return fmt.Errorf("resume.buffer_size: %w", err)
 	}
 	c.Resume.BufferSizeRaw = parsed
+
+	// Chunk size defaults
+	if c.Resume.ChunkSize == "" {
+		c.Resume.ChunkSize = "1mb"
+	}
+	chunkParsed, err := ParseByteSize(c.Resume.ChunkSize)
+	if err != nil {
+		return fmt.Errorf("resume.chunk_size: %w", err)
+	}
+	if chunkParsed < 64*1024 {
+		return fmt.Errorf("resume.chunk_size must be at least 64kb, got %s", c.Resume.ChunkSize)
+	}
+	if chunkParsed > 16*1024*1024 {
+		return fmt.Errorf("resume.chunk_size must be at most 16mb, got %s", c.Resume.ChunkSize)
+	}
+	c.Resume.ChunkSizeRaw = chunkParsed
 
 	return nil
 }
