@@ -5,6 +5,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -403,15 +404,22 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 		return fmt.Errorf("parallel pipeline error: %w", producerErr)
 	}
 
-	// Envia trailer pela conexão primária (stream 0)
-	logger.Info("parallel data transfer complete",
-		"bytes", producerResult.Size,
-		"checksum", fmt.Sprintf("%x", producerResult.Checksum),
-		"streams", dispatcher.ActiveStreams(),
-	)
+	// Envia trailer pela conexão primária (stream 0), envolto em ChunkHeader.
+	// O server espera ChunkHeader framing em todo o stream; enviar o trailer
+	// sem framing faria o server interpretar os bytes como um ChunkHeader
+	// com GlobalSeq/Length lixo, bloqueando em io.CopyN.
+	var trailerBuf bytes.Buffer
+	if err := protocol.WriteTrailer(&trailerBuf, producerResult.Checksum, producerResult.Size); err != nil {
+		return fmt.Errorf("serializing trailer: %w", err)
+	}
 
-	if err := protocol.WriteTrailer(conn, producerResult.Checksum, producerResult.Size); err != nil {
-		return fmt.Errorf("writing trailer: %w", err)
+	// Usa o próximo globalSeq do dispatcher para o ChunkHeader do trailer.
+	// O dispatcher já foi fechado, então acessamos diretamente sem lock.
+	if err := protocol.WriteChunkHeader(conn, dispatcher.globalSeq, uint32(trailerBuf.Len())); err != nil {
+		return fmt.Errorf("writing trailer chunk header: %w", err)
+	}
+	if _, err := conn.Write(trailerBuf.Bytes()); err != nil {
+		return fmt.Errorf("writing trailer data: %w", err)
 	}
 
 	// Sinaliza EOF para o server (TLS close_notify) — server lê até EOF,
