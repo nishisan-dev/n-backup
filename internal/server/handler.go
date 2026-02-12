@@ -428,6 +428,85 @@ func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath
 	protocol.WriteFinalACK(conn, protocol.FinalStatusOK)
 }
 
+// validateAndCommitWithTrailer valida usando um trailer já parseado (modo paralelo).
+func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWriter, tmpPath string, totalBytes int64, trailer *protocol.Trailer, storageInfo config.StorageInfo, logger *slog.Logger) {
+	// Calcula SHA-256 dos dados
+	serverChecksum, err := hashFile(tmpPath)
+	if err != nil {
+		logger.Error("computing server checksum", "error", err)
+		writer.Abort(tmpPath)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+		return
+	}
+
+	// Compara checksums
+	if serverChecksum != trailer.Checksum {
+		logger.Error("checksum mismatch",
+			"client", fmt.Sprintf("%x", trailer.Checksum),
+			"server", fmt.Sprintf("%x", serverChecksum),
+		)
+		writer.Abort(tmpPath)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusChecksumMismatch)
+		return
+	}
+
+	// Commit (rename atômico)
+	finalPath, err := writer.Commit(tmpPath)
+	if err != nil {
+		logger.Error("committing backup", "error", err)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+		return
+	}
+
+	// Rotação
+	if err := Rotate(writer.AgentDir(), storageInfo.MaxBackups); err != nil {
+		logger.Warn("rotation failed", "error", err)
+	}
+
+	logger.Info("backup committed",
+		"path", finalPath,
+		"bytes", totalBytes,
+		"checksum", fmt.Sprintf("%x", serverChecksum),
+	)
+
+	protocol.WriteFinalACK(conn, protocol.FinalStatusOK)
+}
+
+// trailerDetectingReader wraps a bufio.Reader and returns io.EOF
+// when it detects the trailer magic "DONE" at the start of unread data.
+// This prevents receiveParallelStream from consuming the trailer as data,
+// allowing it to be read separately via protocol.ReadTrailer.
+type trailerDetectingReader struct {
+	br   *bufio.Reader
+	done bool
+}
+
+func (t *trailerDetectingReader) Read(p []byte) (int, error) {
+	if t.done {
+		return 0, io.EOF
+	}
+
+	// Peek 4 bytes para verificar se é o magic do trailer
+	peek, err := t.br.Peek(4)
+	if err != nil {
+		// Se não conseguiu peek de 4 bytes, pode ser EOF real ou erro
+		if err == io.EOF {
+			t.done = true
+			return 0, io.EOF
+		}
+		return 0, err
+	}
+
+	if peek[0] == 'D' && peek[1] == 'O' && peek[2] == 'N' && peek[3] == 'E' {
+		// Trailer detectado — retorna EOF sem consumir os bytes
+		t.done = true
+		return 0, io.EOF
+	}
+
+	// Dados normais — delega para o bufio.Reader
+	return t.br.Read(p)
+}
+
 // readUntilNewline lê bytes até encontrar '\n', retornando a string sem o delimitador.
 func readUntilNewline(conn net.Conn) (string, error) {
 	var buf []byte
@@ -590,9 +669,17 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		return
 	}
 
-	// Recebe dados do stream 0 com io.Discard para sackWriter
-	// Stream 0 compartilha conn com trailer/FinalACK, então não envia ChunkSACKs
-	bytesReceived, err := h.receiveParallelStream(ctx, br, io.Discard, chunkFile, 0, pSession, logger)
+	// Garante que br é um bufio.Reader para poder usar Peek
+	bufBR, ok := br.(*bufio.Reader)
+	if !ok {
+		bufBR = bufio.NewReaderSize(br, 256*1024)
+	}
+
+	// Recebe dados do stream 0 usando trailerDetectingReader.
+	// Este wrapper detecta o magic "DONE" no início de um read e retorna EOF,
+	// deixando os bytes do trailer no bufio.Reader para leitura posterior.
+	tdr := &trailerDetectingReader{br: bufBR}
+	bytesReceived, err := h.receiveParallelStream(ctx, tdr, io.Discard, chunkFile, 0, pSession, logger)
 	chunkFile.Close()
 
 	if err != nil {
@@ -602,6 +689,19 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 
 	logger.Info("stream 0 data received", "bytes", bytesReceived)
 
+	// Lê o trailer diretamente da conexão (agent envia após todos os dados)
+	trailer, err := protocol.ReadTrailer(bufBR)
+	if err != nil {
+		logger.Error("reading parallel trailer from conn", "error", err)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+		return
+	}
+
+	logger.Info("parallel trailer received",
+		"checksum", fmt.Sprintf("%x", trailer.Checksum),
+		"size", trailer.Size,
+	)
+
 	// Monta o arquivo final
 	assembledPath, totalBytes, err := assembler.Assemble()
 	if err != nil {
@@ -610,9 +710,9 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		return
 	}
 
-	// Validação do trailer e commit
-	logger.Info("parallel assembly complete, awaiting trailer", "totalBytes", totalBytes)
-	h.validateAndCommit(conn, writer, assembledPath, totalBytes, storageInfo, logger)
+	// Validação com trailer já parseado e commit
+	logger.Info("parallel assembly complete", "totalBytes", totalBytes)
+	h.validateAndCommitWithTrailer(conn, writer, assembledPath, totalBytes, trailer, storageInfo, logger)
 }
 
 // receiveParallelStream recebe dados de um stream paralelo e envia ChunkSACKs.
