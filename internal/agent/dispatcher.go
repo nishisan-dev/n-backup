@@ -33,6 +33,11 @@ type Dispatcher struct {
 	storageName string
 	logger      *slog.Logger
 
+	// Buffer de acumulação: dados são coletados aqui até completar chunkSize,
+	// momento em que um chunk completo é emitido para o ring buffer do stream.
+	pending    []byte
+	pendingLen int
+
 	// Callback invocado quando streams mudam (ativação/desativação)
 	onStreamChange func(active, max int)
 
@@ -84,6 +89,8 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 		logger:         cfg.Logger,
 		onStreamChange: cfg.OnStreamChange,
 		lastSampleAt:   time.Now(),
+		pending:        make([]byte, cfg.ChunkSize),
+		pendingLen:     0,
 	}
 
 	// Inicializa todos os streams com ring buffers
@@ -108,57 +115,87 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 	return d
 }
 
-// Write implementa io.Writer. Distribui chunks em round-robin pelos streams ativos.
+// Write implementa io.Writer. Acumula dados no buffer interno (pending) e emite
+// chunks completos de chunkSize bytes para os ring buffers dos streams em round-robin.
 // Cada chunk é precedido por um ChunkHeader (GlobalSeq + Length) no ring buffer,
 // permitindo ao server reconstruir a ordem global dos chunks.
 func (d *Dispatcher) Write(p []byte) (int, error) {
-	written := 0
-	active := int(atomic.LoadInt32(&d.activeCount))
+	totalWritten := 0
 
-	for written < len(p) {
-		// Calcula tamanho do chunk
-		remaining := len(p) - written
-		chunk := d.chunkSize
-		if remaining < chunk {
-			chunk = remaining
+	for totalWritten < len(p) {
+		// Quanto espaço resta no buffer pending?
+		space := d.chunkSize - d.pendingLen
+		toCopy := len(p) - totalWritten
+		if toCopy > space {
+			toCopy = space
 		}
 
-		// Seleciona stream em round-robin (apenas ativos)
-		d.mu.Lock()
-		streamIdx := d.nextStream % active
-		seq := d.globalSeq
-		d.globalSeq++
-		d.nextStream++
-		d.mu.Unlock()
+		// Copia dados para o buffer pending
+		copy(d.pending[d.pendingLen:], p[totalWritten:totalWritten+toCopy])
+		d.pendingLen += toCopy
+		totalWritten += toCopy
 
-		stream := d.streams[streamIdx]
-
-		// Escreve ChunkHeader (8 bytes) no ring buffer antes dos dados
-		hdr := make([]byte, 8)
-		hdr[0] = byte(seq >> 24)
-		hdr[1] = byte(seq >> 16)
-		hdr[2] = byte(seq >> 8)
-		hdr[3] = byte(seq)
-		l := uint32(chunk)
-		hdr[4] = byte(l >> 24)
-		hdr[5] = byte(l >> 16)
-		hdr[6] = byte(l >> 8)
-		hdr[7] = byte(l)
-
-		if _, err := stream.rb.Write(hdr); err != nil {
-			return written, fmt.Errorf("writing chunk header to stream %d ring buffer: %w", streamIdx, err)
+		// Se o buffer está cheio, emite um chunk completo
+		if d.pendingLen == d.chunkSize {
+			if err := d.emitChunk(d.pending[:d.pendingLen]); err != nil {
+				return totalWritten, err
+			}
+			d.pendingLen = 0
 		}
-
-		// Escreve os dados do chunk no ring buffer
-		n, err := stream.rb.Write(p[written : written+chunk])
-		if err != nil {
-			return written, fmt.Errorf("writing to stream %d ring buffer: %w", streamIdx, err)
-		}
-		written += n
 	}
 
-	atomic.AddInt64(&d.producerBytes, int64(written))
-	return written, nil
+	atomic.AddInt64(&d.producerBytes, int64(totalWritten))
+	return totalWritten, nil
+}
+
+// Flush emite o chunk parcial pendente (se houver).
+// Deve ser chamado antes de Close para garantir que todos os dados foram enviados.
+func (d *Dispatcher) Flush() error {
+	if d.pendingLen > 0 {
+		if err := d.emitChunk(d.pending[:d.pendingLen]); err != nil {
+			return err
+		}
+		d.pendingLen = 0
+	}
+	return nil
+}
+
+// emitChunk envia um chunk completo para o ring buffer do próximo stream em round-robin.
+func (d *Dispatcher) emitChunk(data []byte) error {
+	active := int(atomic.LoadInt32(&d.activeCount))
+
+	// Seleciona stream em round-robin (apenas ativos)
+	d.mu.Lock()
+	streamIdx := d.nextStream % active
+	seq := d.globalSeq
+	d.globalSeq++
+	d.nextStream++
+	d.mu.Unlock()
+
+	stream := d.streams[streamIdx]
+
+	// Escreve ChunkHeader (8 bytes) no ring buffer antes dos dados
+	hdr := make([]byte, 8)
+	hdr[0] = byte(seq >> 24)
+	hdr[1] = byte(seq >> 16)
+	hdr[2] = byte(seq >> 8)
+	hdr[3] = byte(seq)
+	l := uint32(len(data))
+	hdr[4] = byte(l >> 24)
+	hdr[5] = byte(l >> 16)
+	hdr[6] = byte(l >> 8)
+	hdr[7] = byte(l)
+
+	if _, err := stream.rb.Write(hdr); err != nil {
+		return fmt.Errorf("writing chunk header to stream %d ring buffer: %w", streamIdx, err)
+	}
+
+	// Escreve os dados do chunk no ring buffer
+	if _, err := stream.rb.Write(data); err != nil {
+		return fmt.Errorf("writing to stream %d ring buffer: %w", streamIdx, err)
+	}
+
+	return nil
 }
 
 // StartSender inicia a goroutine sender para um stream específico.
