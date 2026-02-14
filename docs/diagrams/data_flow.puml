@@ -4,79 +4,93 @@ skinparam backgroundColor #FEFEFE
 skinparam defaultFontName Inter
 skinparam activityDiamondBackgroundColor #FFE082
 
-title NBackup — Fluxo de Dados (Single Stream)
+title NBackup — Fluxo de Dados
 
 start
 
 :Scheduler dispara backup\n(cron expression);
+:Carregar config YAML;
+:Resolver backup entries;
 
-partition "Agent — Preparação" {
-  :Carregar config YAML;
-  :Resolver backup entries;
-}
+while (Mais backup entries?) is (sim)
 
-repeat
-  partition "Agent — Backup Entry" {
-    :Conectar ao Server\n(TCP + TLS 1.3 mTLS);
+  :Conectar ao Server\n(TCP + TLS 1.3 mTLS);
 
-    if (Conexão OK?) then (sim)
-      :Enviar **HANDSHAKE**\n(magic NBKP + agent + storage);
-    else (não)
-      :Retry com\nexponential backoff;
-      if (Max attempts?) then (sim)
-        :Log error, abortar entry;
-        stop
-      else (não)
-        :Aguardar delay;
-        backward :Reconectar;
-      endif
-    endif
+  if (Conexão OK?) then (sim)
+    :Enviar **HANDSHAKE**\n(magic NBKP + agent + storage);
+  else (não)
+    :Retry com\nexponential backoff;
+    :Aguardar delay e reconectar;
+  endif
 
-    :Receber **ACK** do Server;
+  :Receber **ACK** do Server;
 
-    if (Status == GO?) then (sim)
-    else (BUSY/FULL/REJECT)
-      :Log warning;
-      :Encerrar conexão;
-      stop
-    endif
-  }
+  if (Status == GO?) then (sim)
+  else (BUSY/FULL/REJECT)
+    :Log warning;
+    :Encerrar conexão;
+    stop
+  endif
 
-  partition "Agent — Streaming" {
+  if (parallels > 0?) then (sim — Paralelo)
+
+    :Enviar **ParallelInit**\n(maxStreams, chunkSize);
+    :Conn primária → **control-only**;
+
     fork
-      :fs.WalkDir\n(glob include/exclude);
-      :tar.Writer\n(preserva paths, perms);
-      :gzip.Writer\n(compressão inline);
-      :io.TeeReader\n(SHA-256 inline);
-      :RingBuffer\n(backpressure);
+      :Dispatcher\n(round-robin);
+      :ChunkHeader + DATA;
     fork again
-      :Sender goroutine\n(lê buffer → tls.Conn);
+      :Stream 0\n(ParallelJoin);
     fork again
-      :ACK reader\n(processa SACKs);
-      :Avança tail do buffer;
+      :Stream 1\n(ParallelJoin);
+    fork again
+      :Stream N\n(ParallelJoin);
     end fork
-  }
 
-  partition "Agent — Finalização" {
-    :Fechar tar.Writer\ne gzip.Writer;
-    :Enviar **TRAILER**\n(SHA-256 + size);
-  }
-
-  partition "Server — Recepção" {
-    :io.Copy → arquivo .tmp;
-    :Calcular SHA-256\n(io.MultiWriter);
-    if (Checksum match?) then (sim)
-      :Rename .tmp → timestamp.tar.gz\n(atomic rename);
-      :Rotação: remover excedentes\n(max_backups);
-      :Enviar **FINAL ACK**\n(status OK);
+    if (Stream cai?) then (sim)
+      :Retry + Re-Join\n(backoff 1s/2s/4s);
+      if (3 tentativas?) then (esgotou)
+        :Dead stream\nContinua nos demais;
+      else (reconectou)
+        :ParallelACK\n(lastOffset resume);
+      endif
     else (não)
-      :Remover .tmp;
-      :Enviar **FINAL ACK**\n(CHECKSUM_MISMATCH);
     endif
-  }
 
-repeat while (Mais backup entries?) is (sim)
-->não;
+    :ChunkAssembler\nreassembla na ordem;
+
+  else (não — Single)
+
+    fork
+      :fs.WalkDir (glob);
+      :tar.Writer → gzip.Writer;
+      :io.TeeReader (SHA-256);
+      :RingBuffer (backpressure);
+    fork again
+      :Sender (buffer → tls.Conn);
+    fork again
+      :ACK reader (SACKs);
+    end fork
+
+    :io.Copy → arquivo .tmp;
+
+  endif
+
+  :Fechar tar.Writer e gzip.Writer;
+  :Enviar **TRAILER** (SHA-256 + size)\nvia conn primária;
+
+  :Calcular SHA-256 (io.MultiWriter);
+  if (Checksum match?) then (sim)
+    :Rename .tmp → timestamp.tar.gz\n(atomic rename);
+    :Rotação (max_backups);
+    :Enviar **FINAL ACK** (OK);
+  else (não)
+    :Remover .tmp;
+    :Enviar **FINAL ACK** (MISMATCH);
+  endif
+
+endwhile (não)
 
 :Todos os backups concluídos;
 

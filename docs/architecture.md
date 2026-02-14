@@ -90,13 +90,13 @@ O **n-backup** é um sistema de backup client-server de alta performance escrito
 
 | Componente | Arquivo | Responsabilidade |
 |-----------|---------|-----------------|
-| **Scheduler** | `internal/agent/scheduler.go` | Agenda execuções via cron expression (`robfig/cron`) |
-| **Daemon** | `internal/agent/daemon.go` | Loop principal, graceful shutdown (`SIGTERM`/`SIGINT`), mutex de execução |
+| **Scheduler** | `internal/agent/scheduler.go` | Agenda execuções via cron expression (`robfig/cron`), timeout de 24h por job |
+| **Daemon** | `internal/agent/daemon.go` | Loop principal, graceful shutdown (`SIGTERM`/`SIGINT`), hot-reload via `SIGHUP` |
 | **Scanner** | `internal/agent/scanner.go` | `fs.WalkDir` com glob include/exclude, gera lista de arquivos para tar |
 | **Streamer** | `internal/agent/streamer.go` | Pipeline `tar.Writer → gzip.Writer → io.Pipe`, calcula SHA-256 inline |
 | **RingBuffer** | `internal/agent/ringbuffer.go` | Buffer circular em memória (default 256MB), backpressure, suporte a resume |
-| **Backup** | `internal/agent/backup.go` | Orquestrador: conecta, handshake, decide single/parallel, envia trailer |
-| **Dispatcher** | `internal/agent/dispatcher.go` | Distribui chunks round-robin entre streams paralelos |
+| **Backup** | `internal/agent/backup.go` | Orquestrador: conecta, handshake, decide single/parallel, conn primária control-only (parallel) |
+| **Dispatcher** | `internal/agent/dispatcher.go` | Round-robin de chunks, retry/reconnect por stream com backoff, dead stream marking |
 | **AutoScaler** | `internal/agent/autoscaler.go` | Escala streams dinamicamente com histerese baseada em eficiência |
 | **Progress** | `internal/agent/progress.go` | Barra de progresso para modo `--once --progress` (MB/s, ETA, retries) |
 
@@ -162,17 +162,22 @@ fs.WalkDir ──▶ tar.Writer ──▶ gzip.Writer ──▶ RingBuffer ─�
 6. **Sender goroutine** lê do buffer por offset absoluto e envia para a conexão TLS
 7. **ACK reader** processa SACKs do server e avança o tail do buffer
 
-### Pipeline Paralelo
+### Pipeline Paralelo (v1.2.3+)
+
+![Sessão Paralela](https://uml.nishisan.dev/proxy?src=https://raw.githubusercontent.com/nishisan-dev/n-backup/refs/heads/main/docs/diagrams/parallel_sequence.puml)
 
 Quando `parallels > 0`:
 
 1. Agent completa handshake normal na conexão primária
 2. Envia `ParallelInit` com `maxStreams` e `chunkSize`
-3. Abre conexões TLS adicionais com `ParallelJoin`
-4. **Dispatcher** distribui chunks round-robin entre streams
-5. **AutoScaler** ajusta streams ativos baseado em eficiência (razão producer/drain)
-6. **ChunkAssembler** no server reassembla na ordem correta
-7. Trailer e Final ACK trafegam pela conexão primária
+3. Conexão primária torna-se **control-only** (Trailer + FinalACK)
+4. **Todos** os N streams (incluindo stream 0) conectam via `ParallelJoin` em conns TLS separadas
+5. Server responde com `ParallelACK(status, lastOffset)` — `lastOffset=0` para first-join, `>0` para re-join
+6. **Dispatcher** distribui chunks round-robin entre streams ativos, com `ChunkHeader` framing
+7. Se um stream cai: retry com backoff exponencial (1s, 2s, 4s), re-join com resume do `lastOffset`
+8. Stream permanentemente morto após 3 falhas — backup continua nos restantes
+9. **ChunkAssembler** no server reassembla na ordem correta
+10. Trailer e Final ACK trafegam pela conexão primária (control-only)
 
 ---
 
@@ -207,6 +212,7 @@ Agent                                      Server
 | ResumeACK | — | S→C | 9 bytes |
 | ParallelInit | — | C→S | 5 bytes |
 | ParallelJoin | `PJIN` | C→S | variável |
+| ParallelACK | — | S→C | 9 bytes |
 | ChunkSACK | `CSAK` | S→C | 17 bytes |
 | Health (PING) | `PING` | C→S | 4 bytes |
 | Health (PONG) | — | S→C | 10 bytes |
@@ -235,11 +241,11 @@ Para detalhes completos dos frames, veja a [Especificação Técnica](specificat
 ### Hardening (systemd)
 
 As units systemd do pacote `.deb` incluem:
-- `ProtectSystem=strict` — filesystem raiz é read-only
 - `NoNewPrivileges=yes` — sem escalada de privilégios
-- `ProtectHome=read-only` (agent) — leitura apenas
-- `ReadWritePaths` restritos ao necessário
 - `PrivateTmp=yes` — `/tmp` isolado por serviço
+- `ProtectKernelModules=yes`, `ProtectKernelTunables=yes` — kernel hardening
+- `MemoryDenyWriteExecute=yes` — previne JIT malicioso
+- `CPUSchedulingPriority=10`, `IOSchedulingClass=realtime` — prioridade defensiva
 
 ---
 
@@ -255,7 +261,11 @@ Tentativa 3 → falha → aguarda 4s
 Tentativa N → falha → aguarda min(2^N × initial_delay, max_delay)
 ```
 
+**Streams paralelos (v1.2.3+):** cada stream tem retry independente (3 tentativas). O backup só falha quando todos os streams morrem (`ErrAllStreamsDead`). Conexões TCP usam **write deadline** para detectar half-open connections.
+
 ### Resume de Sessão
+
+#### Single Stream
 
 1. Agent mantém **ring buffer** em memória (256MB default, até 1GB)
 2. Server envia **SACK** a cada 64MB
@@ -264,9 +274,21 @@ Tentativa N → falha → aguarda min(2^N × initial_delay, max_delay)
 5. Agent retoma do offset (se ainda no buffer)
 6. Máximo 5 tentativas de resume; sessão expira após 1h no server
 
+#### Parallel Streams (v1.2.3+)
+
+1. Server rastreia `StreamOffsets` por stream via `sync.Map` + `atomic`
+2. Se stream cai: agent faz `ParallelJoin` novamente com mesmo `StreamIndex`
+3. Server responde `ParallelACK(OK, lastOffset=N)` — resume do offset
+4. Até 3 tentativas por stream; stream morto após esgotar
+5. `StreamReady` channel garante que `StreamWg.Wait()` não retorna antes do primeiro stream conectar
+
+### Job Timeout (v1.2.3+)
+
+O scheduler configura `context.WithTimeout(24h)` por job, prevenindo zombie jobs.
+
 ### Graceful Shutdown
 
-- Agent responde a `SIGTERM`/`SIGINT`
+- Agent responde a `SIGTERM`/`SIGINT`/`SIGHUP` (reload)
 - Se ocioso: shutdown imediato
 - Se backup em andamento: aguarda conclusão antes de encerrar
 

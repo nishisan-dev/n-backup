@@ -217,26 +217,59 @@ Enviado periodicamente pelo server (a cada 64MB) para confirmar recebimento. O a
 
 Para backups grandes, o agent pode usar **múltiplos streams paralelos** para aumentar o throughput.
 
-#### Fluxo
+#### Fluxo (v1.2.3+)
+
+A conexão primária é **control-only** — não transporta dados de stream. Todos os N streams (incluindo stream 0) conectam via `ParallelJoin` em conexões TLS separadas.
 
 ```
 Client                                     Server
   │                                          │
-  │──── Handshake + ACK GO (normal) ───────▶│
-  │──── ParallelInit (maxStreams, chunkSize)▶│  ← extensão após ACK
+  │──── Handshake + ACK GO (normal) ───────▶│  ← conn primária (control-only)
+  │──── ParallelInit (maxStreams, chunkSize)▶│
   │                                          │
-  │──── DATA stream 0 (primário) ─────────▶ │  ← conexão principal
+  │──── ParallelJoin (sessionID, idx=0) ──▶ │  ← nova conn TLS (stream 0)
+  │◀─── ParallelACK (OK, lastOffset=0) ──── │
+  │──── [ChunkHeader+DATA] stream 0 ──────▶ │
   │                                          │
-  │──── ParallelJoin (sessionID, idx=1) ──▶ │  ← nova conexão TLS
-  │◀─── ParallelACK (OK/FULL/NOT_FOUND) ─── │
-  │──── DATA stream 1 ────────────────────▶ │
-  │◀─── ChunkSACK (idx, seq, offset) ────── │  ← ACK por chunk/stream
+  │──── ParallelJoin (sessionID, idx=1) ──▶ │  ← nova conn TLS (stream 1)
+  │◀─── ParallelACK (OK, lastOffset=0) ──── │
+  │──── [ChunkHeader+DATA] stream 1 ──────▶ │
   │                                          │
-  │──── ParallelJoin (sessionID, idx=2) ──▶ │  ← mais streams...
+  │     ... streams completam ...             │
   │                                          │
-  │──── Trailer (SHA-256, size total) ────▶ │  ← via stream 0
+  │──── Trailer (SHA-256, size total) ─────▶ │  ← via conn primária (sem ChunkHeader)
   │◀─── FINAL ACK ─────────────────────── │
 ```
+
+#### Stream Resume (Re-Join)
+
+Se uma conexão de stream cai mid-transfer, o agent reconecta via novo `ParallelJoin` para o mesmo `StreamIndex`. O server responde com o `lastOffset` já recebido desse stream, permitindo resume sem reenvio de dados.
+
+```
+Client                                     Server
+  │   (stream 1 cai — i/o timeout)           │
+  │                                          │
+  │   ... retry com exponential backoff ...   │
+  │                                          │
+  │──── ParallelJoin (sessionID, idx=1) ──▶ │  ← reconexão
+  │◀─── ParallelACK (OK, lastOffset=N) ──── │  ← resume do offset N
+  │──── [ChunkHeader+DATA] from offset N ──▶ │
+```
+
+O agent faz até **3 tentativas** de reconnect por stream com backoff exponencial (1s, 2s, 4s). Se todas falharem, o stream é marcado como **permanentemente morto**. O backup continua nos streams restantes. Se todos os streams morrerem, o backup falha com `ErrAllStreamsDead`.
+
+#### ChunkHeader Framing
+
+Nos streams paralelos, cada chunk é precedido por um header:
+
+```
+┌────────────┬──────────┬──────────┐
+│ StreamIndex │ ChunkSeq  │ DataLen   │
+│ 1 byte      │ 4B uint32 │ 4B uint32 │
+└────────────┴──────────┴──────────┘
+```
+
+Seguido por `DataLen` bytes de payload. O server usa `StreamIndex` e `ChunkSeq` para reassemblar na ordem correta.
 
 #### ParallelInit (Client → Server)
 
@@ -263,24 +296,30 @@ Enviado em uma **nova conexão TLS** para unir-se a uma sessão existente:
 └──────────┴────────────────┴───────┴────────────┘
 ```
 
+Usado tanto para **first-join** quanto para **re-join** (resume após queda).
+
 #### ParallelACK (Server → Client)
 
 ```
-┌──────────┐
-│ Status   │
-│ 1 byte   │
-└──────────┘
+┌──────────┬─────────────┐
+│ Status   │ LastOffset    │
+│ 1 byte   │ 8B uint64     │
+└──────────┴─────────────┘
 ```
+
+Total: **9 bytes**.
 
 | Status | Código | Significado |
 |---|---|---|
-| OK | `0x00` | Stream aceito |
+| OK | `0x00` | Stream aceito. `LastOffset` = bytes já recebidos (0 para first-join) |
 | FULL | `0x01` | Sessão no limite de streams |
 | NOT_FOUND | `0x02` | SessionID não encontrado |
 
+O campo `LastOffset` permite que o agent saiba exatamente de onde retomar o envio em caso de re-join.
+
 #### ChunkSACK (Server → Client)
 
-ACK seletivo por stream, enviado nos streams secundários:
+ACK seletivo por stream, enviado nos streams de dados:
 
 ```
 ┌──────────┬────────────┬──────────┬──────────┐
@@ -388,7 +427,7 @@ O server organiza os backups por agent e mantém no máximo `max_backups`:
 
 ### 5.1 Retry com Exponential Backoff
 
-Aplica-se à **conexão inicial** e ao **health check**. Se a conexão cai **mid-stream**, o backup é abortado e reagendado.
+**Conexão inicial e health check:** backoff padrão com até `max_attempts` tentativas.
 
 ```
 Tentativa 1 → falha → aguarda 1s
@@ -397,6 +436,10 @@ Tentativa 3 → falha → aguarda 4s
 Tentativa 4 → falha → aguarda 8s (capped em max_delay)
 Tentativa 5 → falha → ABORT, log error
 ```
+
+**Streams paralelos individuais (v1.2.3+):** cada stream tem retry independente (3 tentativas, backoff 1s/2s/4s). Se um stream falha, os demais continuam operando. O backup só é abortado quando **todos os streams** estão mortos (`ErrAllStreamsDead`). Conexões TCP possuem **write deadline** para detecção de half-open connections.
+
+**Timeout de job:** o scheduler configura `context.WithTimeout(24h)` para cada job de backup. Isso previne zombie jobs que rodariam indefinidamente em caso de deadlock.
 
 ### 5.2 Lock de Execução
 
@@ -410,7 +453,7 @@ O server grava em arquivo temporário (`.tmp`) e só renomeia (atomic rename) ap
 
 Quando a conexão cai mid-stream, o agent tenta reconectar e resumir automaticamente.
 
-**Mecânica:**
+#### Single Stream — Resume via RESUME frame
 
 1. O agent mantém um **ring buffer** em memória (256MB padrão, configurável até 1GB).
 2. O server envia **SACKs** a cada 64MB confirmando recebimento.
@@ -425,6 +468,20 @@ Quando a conexão cai mid-stream, o agent tenta reconectar e resumir automaticam
 - Se o offset não estiver mais no buffer, o backup reinicia do zero.
 - Sessões parciais no server expiram após 1 hora (TTL).
 - O `.tmp` parcial é deletado na expiração.
+
+#### Parallel Streams — Resume via Re-Join (v1.2.3+)
+
+Cada stream paralelo tem resume individual, independente dos demais:
+
+1. O server rastreia `StreamOffsets` (bytes completos) por stream via `sync.Map` + `atomic`.
+2. Se uma conexão de stream cai, o agent faz `ParallelJoin` novamente com o mesmo `StreamIndex`.
+3. O server reconhece o re-join e responde com `ParallelACK(OK, lastOffset=N)`.
+4. O agent ignora chunks já enviados e retoma do offset N.
+5. Até 3 tentativas por stream com backoff (1s, 2s, 4s).
+6. Stream permanentemente morto após esgotar tentativas — backup continua nos demais.
+7. Se todos os streams morrem: `ErrAllStreamsDead` — backup falha.
+
+O server sinaliza readiness via `StreamReady` (canal fechado no primeiro connect) para evitar race conditions.
 
 ```yaml
 resume:

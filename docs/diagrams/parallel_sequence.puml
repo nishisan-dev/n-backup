@@ -1,0 +1,93 @@
+@startuml parallel_sequence
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontName Inter
+skinparam sequenceMessageAlign center
+
+title NBackup — Sessão de Backup Paralelo (v1.2.3+)
+
+participant "Agent\n(Primary Conn)" as C
+participant "Agent\n(Stream Senders)" as S
+participant "Server\n(Handler)" as H
+database "Storage\n(ChunkAssembler)" as D
+
+== TLS 1.3 Handshake (mTLS) — Conn Primária ==
+
+C -> H : ClientHello + Certificate
+H -> C : ServerHello + Certificate
+
+== Handshake + ParallelInit ==
+
+C -> H : **HANDSHAKE**\n[Magic: "NBKP"] [Ver: 0x01]\n[AgentName] [StorageName]
+H -> C : **ACK** [Status: GO] [SessionID: UUID]
+
+C -> H : **ParallelInit**\n[MaxStreams: 4] [ChunkSize: 1MB]
+
+note over C, H
+  Conn primária torna-se **control-only**.
+  Nenhum dado de stream trafega aqui.
+end note
+
+== Ativação de Streams via ParallelJoin ==
+
+S -> H : **ParallelJoin** [SessionID, idx=0]\n(nova Conn TLS)
+H -> H : Registra stream 0\nStreamReady = sinalizado
+H -> S : **ParallelACK** [OK, lastOffset=0]
+
+S -> H : **ParallelJoin** [SessionID, idx=1]\n(nova Conn TLS)
+H -> S : **ParallelACK** [OK, lastOffset=0]
+
+S -> H : **ParallelJoin** [SessionID, idx=2]\n(nova Conn TLS)
+H -> S : **ParallelACK** [OK, lastOffset=0]
+
+S -> H : **ParallelJoin** [SessionID, idx=3]\n(nova Conn TLS)
+H -> S : **ParallelACK** [OK, lastOffset=0]
+
+== Data Streaming (ChunkHeader + Payload) ==
+
+loop Dispatcher round-robin entre streams ativos
+  S -> H : **[ChunkHeader]** [idx, seq, len]\n+ **DATA** (payload bytes)
+  H -> D : Escrita no offset correto\n(StreamOffsets atualizado atomicamente)
+end
+
+== Stream Failure + Resume (Re-Join) ==
+
+note over S, H #FFE0E0
+  Stream 2 cai (i/o timeout)
+end note
+
+S -> S : Retry 1: aguarda 1s
+S -> H : **ParallelJoin** [SessionID, idx=2]\n(nova Conn TLS — reconexão)
+H -> H : Detecta re-join\nlastOffset = StreamOffsets[2]
+H -> S : **ParallelACK** [OK, lastOffset=N]
+
+S -> H : **[ChunkHeader+DATA]**\nresume from offset N
+
+note over S
+  Se 3 retries falharem:
+  stream marcado como **dead**.
+  Backup continua nos demais.
+end note
+
+== Finalização ==
+
+S -> S : Todos os senders\nconcluem (WaitAllSenders)
+note over H : StreamWg.Wait() retorna\n(todos os streams terminaram)
+
+C -> H : **TRAILER** [SHA-256, Size]\n(direto na conn primária, sem ChunkHeader)
+
+H -> D : Finaliza assembler\n(flush + close)
+H -> H : Valida SHA-256\nclient vs server
+alt Checksum OK
+  H -> D : Rename .tmp → timestamp.tar.gz\nRotação (max_backups)
+  H -> C : **FINAL ACK** [Status: OK]
+else Checksum mismatch
+  H -> D : Remove .tmp
+  H -> C : **FINAL ACK** [Status: MISMATCH]
+end
+
+== Conexão encerrada ==
+
+C -> H : TCP FIN
+
+@enduml
