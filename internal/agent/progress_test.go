@@ -182,9 +182,16 @@ func TestDispatcher_OnStreamChangeCallback(t *testing.T) {
 	d := NewDispatcher(cfg)
 	defer d.Close()
 
-	// NewDispatcher deve ter chamado callback com (1, 3)
+	// NewDispatcher NÃO ativa streams — callback não deve ter sido chamado
+	if len(calls) != 0 {
+		t.Fatalf("expected 0 callback calls from NewDispatcher, got %d", len(calls))
+	}
+
+	// Ativa stream 0 manualmente — deve chamar callback com (1, 3)
+	activateStreamManually(d, 0, &mockConn{})
+	d.notifyStreamChange()
 	if len(calls) != 1 {
-		t.Fatalf("expected 1 callback call from NewDispatcher, got %d", len(calls))
+		t.Fatalf("expected 1 callback call after activate, got %d", len(calls))
 	}
 	if calls[0].active != 1 || calls[0].max != 3 {
 		t.Errorf("expected callback(1, 3), got callback(%d, %d)", calls[0].active, calls[0].max)

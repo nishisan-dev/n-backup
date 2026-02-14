@@ -36,6 +36,14 @@ func (mc *mockConn) SetDeadline(t time.Time) error      { return nil }
 func (mc *mockConn) SetReadDeadline(t time.Time) error  { return nil }
 func (mc *mockConn) SetWriteDeadline(t time.Time) error { return nil }
 
+// activateStreamManually ativa um stream sem rede (para testes unitários).
+func activateStreamManually(d *Dispatcher, idx int, conn net.Conn) {
+	s := d.streams[idx]
+	s.conn = conn
+	s.active = true
+	atomic.AddInt32(&d.activeCount, 1)
+}
+
 func TestDispatcher_RoundRobin(t *testing.T) {
 	// Cria dispatcher com 3 streams
 	conns := make([]*mockConn, 3)
@@ -54,15 +62,13 @@ func TestDispatcher_RoundRobin(t *testing.T) {
 		AgentName:   "test-agent",
 		StorageName: "test-storage",
 		Logger:      logger,
-		PrimaryConn: conns[0],
+		PrimaryConn: nil, // control-only, não usado nos testes de round-robin
 	})
 
-	// Ativa streams 1 e 2 manualmente (sem rede)
-	d.streams[1].conn = conns[1]
-	d.streams[1].active = true
-	d.streams[2].conn = conns[2]
-	d.streams[2].active = true
-	atomic.StoreInt32(&d.activeCount, 3)
+	// Ativa todos os streams manualmente (sem rede)
+	for i := 0; i < 3; i++ {
+		activateStreamManually(d, i, conns[i])
+	}
 
 	// Escreve 3 chunks de 1KB
 	data := make([]byte, 1024)
@@ -99,8 +105,11 @@ func TestDispatcher_SingleStream(t *testing.T) {
 		AgentName:   "test-agent",
 		StorageName: "test-storage",
 		Logger:      logger,
-		PrimaryConn: conn,
+		PrimaryConn: nil,
 	})
+
+	// Ativa stream 0 manualmente
+	activateStreamManually(d, 0, conn)
 
 	// Escreve 5 chunks — todos devem ir para stream 0
 	data := make([]byte, 512)
@@ -118,7 +127,6 @@ func TestDispatcher_SingleStream(t *testing.T) {
 }
 
 func TestDispatcher_ActiveStreams(t *testing.T) {
-	conn := &mockConn{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	d := NewDispatcher(DispatcherConfig{
@@ -130,18 +138,22 @@ func TestDispatcher_ActiveStreams(t *testing.T) {
 		AgentName:   "test-agent",
 		StorageName: "test-storage",
 		Logger:      logger,
-		PrimaryConn: conn,
+		PrimaryConn: nil,
 	})
 
+	// Nenhum stream ativo inicialmente
+	if d.ActiveStreams() != 0 {
+		t.Errorf("expected 0 active streams, got %d", d.ActiveStreams())
+	}
+
+	// Ativa stream 0 manualmente
+	activateStreamManually(d, 0, &mockConn{})
 	if d.ActiveStreams() != 1 {
 		t.Errorf("expected 1 active stream, got %d", d.ActiveStreams())
 	}
 
-	// Ativa stream 1 manualmente
-	d.streams[1].conn = &mockConn{}
-	d.streams[1].active = true
-	atomic.AddInt32(&d.activeCount, 1)
-
+	// Ativa stream 1
+	activateStreamManually(d, 1, &mockConn{})
 	if d.ActiveStreams() != 2 {
 		t.Errorf("expected 2 active streams, got %d", d.ActiveStreams())
 	}
@@ -153,8 +165,110 @@ func TestDispatcher_ActiveStreams(t *testing.T) {
 	}
 }
 
+func TestDispatcher_AllDeadStreams(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	d := NewDispatcher(DispatcherConfig{
+		MaxStreams:  2,
+		BufferSize:  1024 * 1024,
+		ChunkSize:   512,
+		SessionID:   "test-dead",
+		ServerAddr:  "localhost:9847",
+		AgentName:   "test-agent",
+		StorageName: "test-storage",
+		Logger:      logger,
+		PrimaryConn: nil,
+	})
+
+	// Ativa e marca como mortos
+	activateStreamManually(d, 0, &mockConn{})
+	activateStreamManually(d, 1, &mockConn{})
+	d.streams[0].dead = true
+	d.streams[1].dead = true
+
+	// Write deve retornar ErrAllStreamsDead
+	data := make([]byte, 512)
+	_, err := d.Write(data)
+	if err != ErrAllStreamsDead {
+		t.Errorf("expected ErrAllStreamsDead, got %v", err)
+	}
+}
+
+func TestDispatcher_SkipDeadStream(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	d := NewDispatcher(DispatcherConfig{
+		MaxStreams:  3,
+		BufferSize:  1024 * 1024,
+		ChunkSize:   512,
+		SessionID:   "test-skip-dead",
+		ServerAddr:  "localhost:9847",
+		AgentName:   "test-agent",
+		StorageName: "test-storage",
+		Logger:      logger,
+		PrimaryConn: nil,
+	})
+
+	// Ativa streams 0, 1, 2
+	for i := 0; i < 3; i++ {
+		activateStreamManually(d, i, &mockConn{})
+	}
+
+	// Marca stream 1 como morto
+	d.streams[1].dead = true
+
+	// Escreve 4 chunks — devem ir para streams 0 e 2 (skip 1)
+	data := make([]byte, 512)
+	for i := 0; i < 4; i++ {
+		if _, err := d.Write(data); err != nil {
+			t.Fatalf("Write chunk %d: %v", i, err)
+		}
+	}
+
+	// Stream 0 e 2 devem ter recebido chunks, stream 1 nenhum
+	if d.streams[1].rb.Head() != 0 {
+		t.Errorf("dead stream 1 should have head=0, got %d", d.streams[1].rb.Head())
+	}
+	if d.streams[0].rb.Head() == 0 {
+		t.Error("stream 0 should have received chunks")
+	}
+	if d.streams[2].rb.Head() == 0 {
+		t.Error("stream 2 should have received chunks")
+	}
+}
+
+func TestDispatcher_WaitAllSendersContext(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	d := NewDispatcher(DispatcherConfig{
+		MaxStreams:  1,
+		BufferSize:  1024 * 1024,
+		ChunkSize:   512,
+		SessionID:   "test-wait-ctx",
+		ServerAddr:  "localhost:9847",
+		AgentName:   "test-agent",
+		StorageName: "test-storage",
+		Logger:      logger,
+		PrimaryConn: nil,
+	})
+
+	// Ativa stream ma não inicia sender — senderDone nunca fecha
+	activateStreamManually(d, 0, &mockConn{})
+
+	// WaitAllSenders com context que expira rapidamente
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err := d.WaitAllSenders(ctx)
+	if err == nil {
+		t.Fatal("expected context timeout error, got nil")
+	}
+	if err != context.DeadlineExceeded {
+		t.Errorf("expected DeadlineExceeded, got %v", err)
+	}
+}
+
 func TestAutoScaler_Hysteresis(t *testing.T) {
-	conn := &mockConn{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	d := NewDispatcher(DispatcherConfig{
@@ -166,8 +280,11 @@ func TestAutoScaler_Hysteresis(t *testing.T) {
 		AgentName:   "test-agent",
 		StorageName: "test-storage",
 		Logger:      logger,
-		PrimaryConn: conn,
+		PrimaryConn: nil,
 	})
+
+	// Ativa stream 0 para o scaler ter algo com que trabalhar
+	activateStreamManually(d, 0, &mockConn{})
 
 	as := NewAutoScaler(AutoScalerConfig{
 		Dispatcher: d,

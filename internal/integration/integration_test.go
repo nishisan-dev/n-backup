@@ -408,7 +408,7 @@ func TestEndToEnd_Rotation(t *testing.T) {
 }
 
 // TestEndToEnd_ParallelBackupSession testa o fluxo paralelo:
-// Agent → Handshake → ACK GO → ParallelInit → Stream tar.gz (stream 0) → Trailer → FinalACK → Commit
+// Agent → Handshake → ACK GO → ParallelInit → ParallelJoin(stream 0) → Stream data → Trailer (primary) → FinalACK → Commit
 func TestEndToEnd_ParallelBackupSession(t *testing.T) {
 	pkiDir := t.TempDir()
 	pki := generatePKI(t, pkiDir)
@@ -464,6 +464,7 @@ func TestEndToEnd_ParallelBackupSession(t *testing.T) {
 		ServerName:   "localhost",
 	}
 
+	// Conn primária: control-only (Handshake + ParallelInit + Trailer + FinalACK)
 	conn, err := tls.Dial("tcp", ln.Addr().String(), clientTLSCfg)
 	if err != nil {
 		t.Fatalf("TLS dial: %v", err)
@@ -484,12 +485,14 @@ func TestEndToEnd_ParallelBackupSession(t *testing.T) {
 		t.Fatalf("expected StatusGo, got %d: %s", ack.Status, ack.Message)
 	}
 
+	sessionID := ack.SessionID // session ID retornado pelo server
+
 	// 2. ParallelInit: 2 streams, 256KB chunks
 	if err := protocol.WriteParallelInit(conn, 2, 256*1024); err != nil {
 		t.Fatalf("WriteParallelInit: %v", err)
 	}
 
-	// 3. Stream tar.gz via stream 0
+	// 3. Prepara dados tar.gz
 	var streamBuf bytes.Buffer
 	hasher := sha256.New()
 	multiW := io.MultiWriter(&streamBuf, hasher)
@@ -524,7 +527,26 @@ func TestEndToEnd_ParallelBackupSession(t *testing.T) {
 	copy(checksum[:], hasher.Sum(nil))
 	size := uint64(streamBuf.Len())
 
-	// Escreve dados com ChunkHeader framing (como o Dispatcher faz)
+	// 4. Conecta stream 0 via ParallelJoin
+	stream0Conn, err := tls.Dial("tcp", ln.Addr().String(), clientTLSCfg)
+	if err != nil {
+		t.Fatalf("TLS dial stream 0: %v", err)
+	}
+	defer stream0Conn.Close()
+
+	if err := protocol.WriteParallelJoin(stream0Conn, sessionID, 0); err != nil {
+		t.Fatalf("WriteParallelJoin stream 0: %v", err)
+	}
+
+	pAck, err := protocol.ReadParallelACK(stream0Conn)
+	if err != nil {
+		t.Fatalf("ReadParallelACK stream 0: %v", err)
+	}
+	if pAck.Status != protocol.ParallelStatusOK {
+		t.Fatalf("expected ParallelStatusOK, got %d", pAck.Status)
+	}
+
+	// 5. Envia dados com ChunkHeader framing pelo stream 0
 	chunkSize := 256 * 1024
 	rawData := streamBuf.Bytes()
 	var globalSeq uint32
@@ -535,26 +557,28 @@ func TestEndToEnd_ParallelBackupSession(t *testing.T) {
 		}
 		chunk := rawData[off:end]
 
-		// Escreve ChunkHeader: [GlobalSeq uint32] [Length uint32]
-		if err := protocol.WriteChunkHeader(conn, globalSeq, uint32(len(chunk))); err != nil {
+		if err := protocol.WriteChunkHeader(stream0Conn, globalSeq, uint32(len(chunk))); err != nil {
 			t.Fatalf("WriteChunkHeader seq %d: %v", globalSeq, err)
 		}
-		if _, err := conn.Write(chunk); err != nil {
+		if _, err := stream0Conn.Write(chunk); err != nil {
 			t.Fatalf("writing chunk data seq %d: %v", globalSeq, err)
 		}
 		globalSeq++
 		off = end
 	}
 
-	// Escreve Trailer envolto em ChunkHeader (fica nos últimos 44B do arquivo montado)
-	var trailerBuf bytes.Buffer
-	protocol.WriteTrailer(&trailerBuf, checksum, size)
-	protocol.WriteChunkHeader(conn, globalSeq, uint32(trailerBuf.Len()))
-	conn.Write(trailerBuf.Bytes())
+	// Fecha stream 0 (EOF) — server receiveParallelStream termina
+	stream0Conn.CloseWrite()
 
-	conn.CloseWrite()
+	// Aguarda server processar antes de enviar trailer
+	time.Sleep(200 * time.Millisecond)
 
-	// 4. Final ACK
+	// 6. Envia Trailer direto pela conn primária (sem ChunkHeader framing)
+	if err := protocol.WriteTrailer(conn, checksum, size); err != nil {
+		t.Fatalf("WriteTrailer: %v", err)
+	}
+
+	// 7. Final ACK
 	finalACK, err := protocol.ReadFinalACK(conn)
 	if err != nil {
 		t.Fatalf("ReadFinalACK: %v", err)
@@ -564,7 +588,7 @@ func TestEndToEnd_ParallelBackupSession(t *testing.T) {
 		t.Fatalf("expected FinalStatusOK, got %d", finalACK.Status)
 	}
 
-	// 5. Verifica backup gravado
+	// 8. Verifica backup gravado
 	backupDir := filepath.Join(storageDir, agentName, testBackupName)
 	entries, err := os.ReadDir(backupDir)
 	if err != nil {
