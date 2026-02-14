@@ -371,7 +371,17 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 	// diretamente após cada write, evitando deadlock por buffer cheio.
 	dispatcher.StartSelfDrainingSender(0)
 
-	// Inicia auto-scaler
+	// Eager Start: ativa todos os streams paralelos imediatamente.
+	// O usuário configurou parallels=N, logo a expectativa é usar N streams desde o início.
+	// Streams que falharem no connect são logados mas não impedem o backup.
+	for i := 1; i < entry.Parallels; i++ {
+		if err := dispatcher.ActivateStream(i); err != nil {
+			logger.Warn("failed to activate parallel stream, continuing with fewer streams",
+				"stream", i, "error", err)
+		}
+	}
+
+	// Auto-scaler mantido apenas para scale-down em caso de subutilização
 	scalerCtx, scalerCancel := context.WithCancel(ctx)
 	defer scalerCancel()
 
