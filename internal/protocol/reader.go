@@ -251,6 +251,21 @@ func ReadParallelInit(r io.Reader) (*ParallelInit, error) {
 	}, nil
 }
 
+// ReadParallelInitAfterMaxStreams lê o restante do ParallelInit quando o byte
+// MaxStreams já foi consumido pelo discriminador de modo (handler.go).
+// Lê apenas ChunkSize (4B) e reconstrói o ParallelInit completo.
+func ReadParallelInitAfterMaxStreams(r io.Reader, maxStreams uint8) (*ParallelInit, error) {
+	var chunkSize uint32
+	if err := binary.Read(r, binary.BigEndian, &chunkSize); err != nil {
+		return nil, fmt.Errorf("reading parallel init chunk size: %w", err)
+	}
+
+	return &ParallelInit{
+		MaxStreams: maxStreams,
+		ChunkSize:  chunkSize,
+	}, nil
+}
+
 // ReadParallelJoin lê o frame ParallelJoin (Client → Server).
 // O magic "PJIN" já foi lido pelo dispatcher; lê version + sessionID + streamIndex.
 func ReadParallelJoin(r io.Reader) (*ParallelJoin, error) {

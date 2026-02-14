@@ -112,7 +112,12 @@ func TestEndToEnd_FullBackupSession(t *testing.T) {
 		t.Fatalf("expected StatusGo, got %d: %s", ack.Status, ack.Message)
 	}
 
-	// 2. Stream tar.gz
+	// 2. Envia byte discriminador single-stream (0x00)
+	if _, err := conn.Write([]byte{0x00}); err != nil {
+		t.Fatalf("writing single-stream marker: %v", err)
+	}
+
+	// 3. Stream tar.gz
 	var streamBuf bytes.Buffer
 	hasher := sha256.New()
 	multiW := io.MultiWriter(&streamBuf, hasher)

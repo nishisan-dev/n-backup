@@ -77,6 +77,13 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 
 	logger.Info("handshake successful, starting resumable pipeline")
 
+	// Envia byte discriminador 0x00 para sinalizar single-stream ao server
+	// (ParallelInit começa com MaxStreams >= 1, então 0x00 = single-stream)
+	if _, err := conn.Write([]byte{0x00}); err != nil {
+		conn.Close()
+		return fmt.Errorf("writing single-stream marker: %w", err)
+	}
+
 	// Ring buffer para backpressure e resume
 	rb := NewRingBuffer(cfg.Resume.BufferSizeRaw)
 

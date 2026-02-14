@@ -203,19 +203,18 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 		return
 	}
 
-	// Detecta extensão ParallelInit: peek 1 byte
-	// Se valor >= 1, é MaxStreams de ParallelInit → modo paralelo
-	// (0 = single-stream, 1-255 = paralelo, limitado pelo uint8 do protocolo)
+	// Detecta modo: lê 1 byte discriminador
+	// 0x00 = single-stream, 1-255 = MaxStreams de ParallelInit → modo paralelo
 	br := bufio.NewReaderSize(conn, 8)
-	peek, err := br.Peek(1)
-	if err != nil {
-		logger.Error("peeking for parallel init", "error", err)
+	modeByte := make([]byte, 1)
+	if _, err := io.ReadFull(br, modeByte); err != nil {
+		logger.Error("reading mode byte", "error", err)
 		return
 	}
 
-	if peek[0] >= 1 {
-		// Modo paralelo — lê ParallelInit completo
-		pi, err := protocol.ReadParallelInit(br)
+	if modeByte[0] >= 1 {
+		// Modo paralelo — o byte já lido é MaxStreams; lê ChunkSize (4B restantes)
+		pi, err := protocol.ReadParallelInitAfterMaxStreams(br, modeByte[0])
 		if err != nil {
 			logger.Error("reading ParallelInit", "error", err)
 			return
@@ -226,7 +225,7 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 		return
 	}
 
-	// Modo single-stream (legacy) — usa br que já tem os dados bufferizados
+	// Modo single-stream — byte 0x00 já consumido, br contém os dados
 
 	// Prepara escrita atômica
 	writer, err := NewAtomicWriter(storageInfo.BaseDir, agentName)
