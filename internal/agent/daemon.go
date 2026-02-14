@@ -23,7 +23,8 @@ import (
 
 // RunDaemon inicia o agent em modo daemon com um cron job por backup.
 // Bloqueia até receber SIGTERM ou SIGINT.
-func RunDaemon(cfg *config.AgentConfig, logger *slog.Logger) error {
+// SIGHUP recarrega a configuração sem downtime (systemctl reload).
+func RunDaemon(configPath string, cfg *config.AgentConfig, logger *slog.Logger) error {
 	logger.Info("starting daemon",
 		"agent", cfg.Agent.Name,
 		"backups", len(cfg.Backups),
@@ -44,20 +45,54 @@ func RunDaemon(cfg *config.AgentConfig, logger *slog.Logger) error {
 	stats := NewStatsReporter(sched, logger)
 	stats.Start()
 
-	// Aguarda signal
+	// Aguarda signals
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 
-	sig := <-sigCh
-	logger.Info("received signal, shutting down", "signal", sig)
+	for {
+		sig := <-sigCh
 
-	// Graceful shutdown com timeout de 30s
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+		if sig == syscall.SIGHUP {
+			logger.Info("received SIGHUP, reloading config", "path", configPath)
 
-	stats.Stop()
-	sched.Stop(ctx)
-	return nil
+			newCfg, loadErr := config.LoadAgentConfig(configPath)
+			if loadErr != nil {
+				logger.Error("reload failed, keeping current config", "error", loadErr)
+				continue
+			}
+
+			// Para scheduler e stats atuais
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			stats.Stop()
+			sched.Stop(stopCtx)
+			stopCancel()
+
+			// Recria com nova config
+			cfg = newCfg
+			sched, err = NewScheduler(cfg, logger, runFn)
+			if err != nil {
+				logger.Error("failed to create scheduler after reload", "error", err)
+				return fmt.Errorf("reload scheduler: %w", err)
+			}
+			sched.Start()
+			stats = NewStatsReporter(sched, logger)
+			stats.Start()
+
+			logger.Info("config reloaded successfully",
+				"agent", cfg.Agent.Name,
+				"backups", len(cfg.Backups),
+			)
+			continue
+		}
+
+		// SIGTERM ou SIGINT — graceful shutdown
+		logger.Info("received signal, shutting down", "signal", sig)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		stats.Stop()
+		sched.Stop(ctx)
+		cancel()
+		return nil
+	}
 }
 
 // RunAllBackups executa todos os blocos de backup sequencialmente com retry.

@@ -46,7 +46,7 @@ func main() {
 	}
 
 	// Daemon mode
-	if err := agent.RunDaemon(cfg, logger); err != nil {
+	if err := agent.RunDaemon(*configPath, cfg, logger); err != nil {
 		logger.Error("daemon error", "error", err)
 		os.Exit(1)
 	}
