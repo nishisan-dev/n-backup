@@ -502,6 +502,70 @@ func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath
 	protocol.WriteFinalACK(conn, protocol.FinalStatusOK)
 }
 
+// validateAndCommitWithTrailer valida e comita um backup paralelo.
+// Diferente de validateAndCommit, o Trailer já foi recebido separadamente
+// pela conn de controle (não embutido no arquivo). O arquivo contém apenas dados.
+func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWriter, tmpPath string, totalBytes int64, trailer *protocol.Trailer, storageInfo config.StorageInfo, logger *slog.Logger) {
+	if totalBytes == 0 {
+		logger.Error("no data received")
+		writer.Abort(tmpPath)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+		return
+	}
+
+	// Calcula SHA-256 dos dados (arquivo inteiro = dados puros)
+	serverChecksum, err := hashFile(tmpPath)
+	if err != nil {
+		logger.Error("computing server checksum", "error", err)
+		writer.Abort(tmpPath)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+		return
+	}
+
+	// Compara checksums
+	if serverChecksum != trailer.Checksum {
+		logger.Error("checksum mismatch",
+			"client", fmt.Sprintf("%x", trailer.Checksum),
+			"server", fmt.Sprintf("%x", serverChecksum),
+		)
+		writer.Abort(tmpPath)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusChecksumMismatch)
+		return
+	}
+
+	// Verifica tamanho
+	if uint64(totalBytes) != trailer.Size {
+		logger.Error("size mismatch",
+			"client", trailer.Size,
+			"server", totalBytes,
+		)
+		writer.Abort(tmpPath)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+		return
+	}
+
+	// Commit (rename atômico)
+	finalPath, err := writer.Commit(tmpPath)
+	if err != nil {
+		logger.Error("committing backup", "error", err)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+		return
+	}
+
+	// Rotação
+	if err := Rotate(writer.AgentDir(), storageInfo.MaxBackups); err != nil {
+		logger.Warn("rotation failed", "error", err)
+	}
+
+	logger.Info("backup committed",
+		"path", finalPath,
+		"bytes", totalBytes,
+		"checksum", fmt.Sprintf("%x", serverChecksum),
+	)
+
+	protocol.WriteFinalACK(conn, protocol.FinalStatusOK)
+}
+
 // readUntilNewline lê bytes até encontrar '\n', retornando a string sem o delimitador.
 func readUntilNewline(conn net.Conn) (string, error) {
 	var buf []byte
@@ -602,23 +666,27 @@ func CleanupExpiredSessions(sessions *sync.Map, ttl time.Duration, logger *slog.
 
 // ParallelSession rastreia uma sessão de backup com streams paralelos.
 type ParallelSession struct {
-	SessionID   string
-	Assembler   *ChunkAssembler
-	Writer      *AtomicWriter
-	StorageInfo config.StorageInfo
-	AgentName   string
-	StorageName string
-	BackupName  string
-	StreamConns sync.Map // streamIndex (uint8) → net.Conn
-	MaxStreams  uint8
-	ChunkSize   uint32
-	StreamWg    sync.WaitGroup // barreira para todos os streams secundários
-	Done        chan struct{}  // sinaliza conclusão
-	CreatedAt   time.Time
+	SessionID       string
+	Assembler       *ChunkAssembler
+	Writer          *AtomicWriter
+	StorageInfo     config.StorageInfo
+	AgentName       string
+	StorageName     string
+	BackupName      string
+	StreamConns     sync.Map // streamIndex (uint8) → net.Conn
+	StreamOffsets   sync.Map // streamIndex (uint8) → *int64 (completed bytes, atômico)
+	MaxStreams      uint8
+	ChunkSize       uint32
+	StreamWg        sync.WaitGroup // barreira para todos os streams
+	StreamReady     chan struct{}  // fechado quando o primeiro stream conecta
+	streamReadyOnce sync.Once      // garante close único do StreamReady
+	Done            chan struct{}  // sinaliza conclusão
+	CreatedAt       time.Time
 }
 
 // handleParallelBackup processa um backup paralelo.
-// Recebe dados pela conexão primária (stream 0) + streams secundários via ParallelJoin.
+// A conexão primária é usada apenas como canal de controle (Trailer + FinalACK).
+// Todos os dados são recebidos via streams secundários (ParallelJoin).
 func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io.Reader, sessionID, agentName, storageName, backupName string, storageInfo config.StorageInfo, pi *protocol.ParallelInit, lockKey string, logger *slog.Logger) {
 	defer h.locks.Delete(lockKey)
 
@@ -653,25 +721,31 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		BackupName:  backupName,
 		MaxStreams:  pi.MaxStreams,
 		ChunkSize:   pi.ChunkSize,
+		StreamReady: make(chan struct{}),
 		Done:        make(chan struct{}),
 		CreatedAt:   time.Now(),
 	}
 	h.sessions.Store(sessionID, pSession)
 	defer h.sessions.Delete(sessionID)
 
-	// Recebe dados do stream 0 com io.Discard para sackWriter
-	// Stream 0 compartilha conn com trailer/FinalACK, então não envia ChunkSACKs
-	bytesReceived, err := h.receiveParallelStream(ctx, conn, br, io.Discard, 0, pSession, logger)
+	// Conn primária é control-only: não recebe dados de stream 0 aqui.
+	// Todos os N streams de dados conectam via ParallelJoin (handleParallelJoin).
 
-	if err != nil {
-		logger.Error("receiving parallel stream 0", "error", err, "bytes", bytesReceived)
+	// Espera pelo menos 1 stream conectar (via canal StreamReady),
+	// depois espera todos terminarem via StreamWg.
+	select {
+	case <-pSession.StreamReady:
+		// Pelo menos 1 stream conectou — espera todos finalizarem.
+	case <-ctx.Done():
+		logger.Error("context cancelled waiting for streams")
+		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+		return
+	case <-time.After(5 * time.Minute):
+		logger.Error("timeout waiting for streams to connect")
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
 		return
 	}
 
-	logger.Info("stream 0 data received", "bytes", bytesReceived)
-
-	// Espera todos os streams secundários terminarem
 	pSession.StreamWg.Wait()
 	logger.Info("all parallel streams complete")
 
@@ -683,20 +757,41 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		return
 	}
 
-	// Validação do trailer (últimos 44 bytes do arquivo) e commit
-	logger.Info("parallel assembly complete", "totalBytes", totalBytes)
-	h.validateAndCommit(conn, writer, assembledPath, totalBytes, storageInfo, logger)
+	// Lê Trailer direto da conn primária (sem ChunkHeader framing).
+	// O agent envia o Trailer diretamente após todos os senders finalizarem.
+	logger.Info("parallel assembly complete, waiting for trailer", "totalBytes", totalBytes)
+
+	// Set read deadline para a conn primária enquanto espera o Trailer
+	conn.SetReadDeadline(time.Now().Add(readInactivityTimeout))
+	trailer, err := protocol.ReadTrailer(br)
+	if err != nil {
+		logger.Error("reading trailer from primary conn", "error", err)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+		return
+	}
+	conn.SetReadDeadline(time.Time{}) // limpa deadline
+
+	// Validação do checksum e commit
+	h.validateAndCommitWithTrailer(conn, writer, assembledPath, totalBytes, trailer, storageInfo, logger)
 }
 
 // receiveParallelStream recebe dados de um stream paralelo usando ChunkHeader framing.
 // Cada chunk é precedido por um ChunkHeader (8B: GlobalSeq uint32 + Length uint32).
 // Os dados são escritos incrementalmente no assembler, que decide se escreve direto
 // no arquivo final (in-order) ou bufferiza temporariamente (out-of-order).
-// O Trailer é enviado como o último chunk (dentro de ChunkHeader framing).
 // O stream termina com EOF (CloseWrite do agent) ou io.EOF no reader.
+// Atualiza StreamOffsets atomicamente após cada chunk completo para suporte a resume.
 func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, reader io.Reader, sackWriter io.Writer, streamIndex uint8, session *ParallelSession, logger *slog.Logger) (int64, error) {
 	var bytesReceived int64
 	var localChunkSeq uint32
+
+	// Inicializa ou recupera o ponteiro de offset para este stream
+	offsetPtr := new(int64)
+	if existing, loaded := session.StreamOffsets.LoadOrStore(streamIndex, offsetPtr); loaded {
+		offsetPtr = existing.(*int64)
+		bytesReceived = atomic.LoadInt64(offsetPtr)
+		logger.Info("resuming stream from offset", "stream", streamIndex, "offset", bytesReceived)
+	}
 
 	for {
 		// Sliding read deadline: previne goroutine leak em conexões half-open.
@@ -720,6 +815,9 @@ func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, read
 		h.TrafficIn.Add(int64(hdr.Length))
 		h.DiskWrite.Add(int64(hdr.Length))
 
+		// Atualiza offset atômico — usado por handleParallelJoin para resume
+		atomic.StoreInt64(offsetPtr, bytesReceived)
+
 		// Envia ChunkSACK
 		localChunkSeq++
 		if sErr := protocol.WriteChunkSACK(sackWriter, streamIndex, localChunkSeq, uint64(bytesReceived)); sErr != nil {
@@ -733,6 +831,7 @@ func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, read
 }
 
 // handleParallelJoin processa uma conexão secundária de ParallelJoin.
+// Suporta re-join: se o stream já foi conectado antes, responde com lastOffset para resume.
 func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger *slog.Logger) {
 	// O magic "PJIN" já foi lido pelo HandleConnection
 	pj, err := protocol.ReadParallelJoin(conn)
@@ -748,32 +847,42 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 	raw, ok := h.sessions.Load(pj.SessionID)
 	if !ok {
 		logger.Warn("parallel session not found")
-		protocol.WriteParallelACK(conn, protocol.ParallelStatusNotFound)
+		protocol.WriteParallelACK(conn, protocol.ParallelStatusNotFound, 0)
 		return
 	}
 
 	pSession, ok := raw.(*ParallelSession)
 	if !ok {
 		logger.Warn("session is not a parallel session")
-		protocol.WriteParallelACK(conn, protocol.ParallelStatusNotFound)
+		protocol.WriteParallelACK(conn, protocol.ParallelStatusNotFound, 0)
 		return
 	}
 
 	// Valida stream index
 	if pj.StreamIndex >= pSession.MaxStreams {
 		logger.Warn("stream index exceeds max", "maxStreams", pSession.MaxStreams)
-		protocol.WriteParallelACK(conn, protocol.ParallelStatusFull)
+		protocol.WriteParallelACK(conn, protocol.ParallelStatusFull, 0)
 		return
 	}
 
-	// ACK OK
-	if err := protocol.WriteParallelACK(conn, protocol.ParallelStatusOK); err != nil {
+	// Verifica se é re-join (stream já conectou antes) — resume offset
+	var lastOffset uint64
+	if raw, ok := pSession.StreamOffsets.Load(pj.StreamIndex); ok {
+		lastOffset = uint64(atomic.LoadInt64(raw.(*int64)))
+		logger.Info("parallel stream re-join (resume)", "lastOffset", lastOffset)
+	}
+
+	// ACK OK com lastOffset para negociação de resume
+	if err := protocol.WriteParallelACK(conn, protocol.ParallelStatusOK, lastOffset); err != nil {
 		logger.Error("writing ParallelACK", "error", err)
 		return
 	}
 
 	// Registra conexão do stream
 	pSession.StreamConns.Store(pj.StreamIndex, conn)
+
+	// Sinaliza que pelo menos 1 stream conectou
+	pSession.streamReadyOnce.Do(func() { close(pSession.StreamReady) })
 
 	// Adiciona ao WaitGroup antes de receber dados
 	pSession.StreamWg.Add(1)
