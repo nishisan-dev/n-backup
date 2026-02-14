@@ -9,24 +9,11 @@ Type=simple
 ExecStart=/usr/bin/nbackup-server --config /etc/nbackup/server.yaml
 Restart=on-failure
 RestartSec=5s
-
-# Limite de file descriptors (uma conexão por agent simultâneo)
 LimitNOFILE=65536
+Nice=0
+IOSchedulingClass=best-effort
+IOSchedulingPriority=4
 
-# O server roda como root para escrever em qualquer path de storage configurado.
-# Hardening kernel mantido.
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-RestrictNamespaces=yes
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-RestrictRealtime=yes
-
-# Logging
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=nbackup-server

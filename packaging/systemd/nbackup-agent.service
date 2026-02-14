@@ -10,21 +10,11 @@ ExecStart=/usr/bin/nbackup-agent --config /etc/nbackup/agent.yaml
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=10s
+LimitNOFILE=65536
+Nice=0
+IOSchedulingClass=best-effort
+IOSchedulingPriority=4
 
-# O agent roda como root para ter acesso de leitura a qualquer path do filesystem.
-# Hardening mantido onde possível sem restringir leitura.
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-RestrictNamespaces=yes
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-RestrictRealtime=yes
-
-# Logging
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=nbackup-agent
