@@ -26,6 +26,10 @@ type ProgressReporter struct {
 	totalBytes   atomic.Int64
 	totalObjects atomic.Int64
 
+	// Streams paralelos (0 = single-stream, sem exibição)
+	activeStreams atomic.Int32
+	maxStreams    atomic.Int32
+
 	startTime      time.Time
 	warmupDuration time.Duration // período sem exibir speed/ETA
 	done           chan struct{}
@@ -64,6 +68,12 @@ func (p *ProgressReporter) AddRetry() {
 func (p *ProgressReporter) SetTotals(totalBytes, totalObjects int64) {
 	p.totalBytes.Store(totalBytes)
 	p.totalObjects.Store(totalObjects)
+}
+
+// SetStreams atualiza a contagem de streams ativos e máximo configurado.
+func (p *ProgressReporter) SetStreams(active, max int) {
+	p.activeStreams.Store(int32(active))
+	p.maxStreams.Store(int32(max))
 }
 
 // Stop para o ticker e imprime a linha final.
@@ -125,15 +135,35 @@ func (p *ProgressReporter) render(final bool) {
 		bar = strings.Repeat("░", pos) + "█" + strings.Repeat("░", barWidth-pos-1)
 	}
 
-	// ETA
+	// ETA pessimista: max(etaBytes, etaObjects)
 	eta := "∞"
-	if totalBytes > 0 && speed > 0 && bytes > 0 {
-		remaining := float64(totalBytes) - float64(bytes)
-		if remaining < 0 {
-			remaining = 0
+	var etaBytesSec, etaObjsSec float64
+
+	// ETA por bytes
+	if totalBytes > 0 && speed > 0 {
+		remBytes := float64(totalBytes) - float64(bytes)
+		if remBytes < 0 {
+			remBytes = 0
 		}
-		etaSec := remaining / speed
-		eta = formatDuration(time.Duration(etaSec * float64(time.Second)))
+		etaBytesSec = remBytes / speed
+	}
+
+	// ETA por objetos
+	if totalObjects > 0 && objsPerSec > 0 {
+		remObjs := float64(totalObjects) - float64(objects)
+		if remObjs < 0 {
+			remObjs = 0
+		}
+		etaObjsSec = remObjs / objsPerSec
+	}
+
+	// Escolhe o cenário mais pessimista (maior ETA)
+	if speed > 0 || objsPerSec > 0 {
+		pessimistic := etaBytesSec
+		if etaObjsSec > pessimistic {
+			pessimistic = etaObjsSec
+		}
+		eta = formatDuration(time.Duration(pessimistic * float64(time.Second)))
 	}
 
 	// Formata elapsed
@@ -143,6 +173,14 @@ func (p *ProgressReporter) render(final bool) {
 	retriesStr := ""
 	if retries > 0 {
 		retriesStr = fmt.Sprintf("  │  retries: %d", retries)
+	}
+
+	// Streams paralelos
+	streamsStr := ""
+	maxStr := p.maxStreams.Load()
+	if maxStr > 1 {
+		actStr := p.activeStreams.Load()
+		streamsStr = fmt.Sprintf("  │  ⇅ %d/%d", actStr, maxStr)
 	}
 
 	// Formata bytes e velocidade
@@ -158,10 +196,10 @@ func (p *ProgressReporter) render(final bool) {
 		)
 	} else {
 		speedStr := formatBytes(int64(speed)) + "/s"
-		line = fmt.Sprintf("\r[%s] %s  %s  │  %s  │  %s objs (%s/s)  │  %s  │  ETA %s%s",
+		line = fmt.Sprintf("\r[%s] %s  %s  │  %s  │  %s objs (%s/s)  │  %s  │  ETA %s%s%s",
 			p.name, bar, bytesStr, speedStr,
 			fmtObjs(objects, totalObjects), formatNumber(int64(objsPerSec)),
-			elapsedStr, eta, retriesStr,
+			elapsedStr, eta, streamsStr, retriesStr,
 		)
 	}
 

@@ -33,6 +33,9 @@ type Dispatcher struct {
 	storageName string
 	logger      *slog.Logger
 
+	// Callback invocado quando streams mudam (ativação/desativação)
+	onStreamChange func(active, max int)
+
 	// Métricas para o auto-scaler
 	producerBytes int64 // atomic — total de bytes recebidos pelo Write
 	lastSampleAt  time.Time
@@ -54,31 +57,33 @@ type ParallelStream struct {
 
 // DispatcherConfig contém os parâmetros para criar um Dispatcher.
 type DispatcherConfig struct {
-	MaxStreams  int
-	BufferSize  int64
-	ChunkSize   int
-	SessionID   string
-	ServerAddr  string
-	TLSConfig   *tls.Config
-	AgentName   string
-	StorageName string
-	Logger      *slog.Logger
-	PrimaryConn net.Conn // conexão primária (stream 0, já autenticada)
+	MaxStreams     int
+	BufferSize     int64
+	ChunkSize      int
+	SessionID      string
+	ServerAddr     string
+	TLSConfig      *tls.Config
+	AgentName      string
+	StorageName    string
+	Logger         *slog.Logger
+	PrimaryConn    net.Conn              // conexão primária (stream 0, já autenticada)
+	OnStreamChange func(active, max int) // callback para notificar mudanças de streams
 }
 
 // NewDispatcher cria um novo Dispatcher com o stream primário ativo.
 func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 	d := &Dispatcher{
-		streams:      make([]*ParallelStream, cfg.MaxStreams),
-		maxStreams:   cfg.MaxStreams,
-		chunkSize:    cfg.ChunkSize,
-		sessionID:    cfg.SessionID,
-		serverAddr:   cfg.ServerAddr,
-		tlsCfg:       cfg.TLSConfig,
-		agentName:    cfg.AgentName,
-		storageName:  cfg.StorageName,
-		logger:       cfg.Logger,
-		lastSampleAt: time.Now(),
+		streams:        make([]*ParallelStream, cfg.MaxStreams),
+		maxStreams:     cfg.MaxStreams,
+		chunkSize:      cfg.ChunkSize,
+		sessionID:      cfg.SessionID,
+		serverAddr:     cfg.ServerAddr,
+		tlsCfg:         cfg.TLSConfig,
+		agentName:      cfg.AgentName,
+		storageName:    cfg.StorageName,
+		logger:         cfg.Logger,
+		onStreamChange: cfg.OnStreamChange,
+		lastSampleAt:   time.Now(),
 	}
 
 	// Inicializa todos os streams com ring buffers
@@ -96,6 +101,9 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 	d.streams[0].conn = cfg.PrimaryConn
 	d.streams[0].active = true
 	atomic.StoreInt32(&d.activeCount, 1)
+
+	// Notifica callback inicial (1 stream ativo)
+	d.notifyStreamChange()
 
 	return d
 }
@@ -302,6 +310,7 @@ func (d *Dispatcher) ActivateStream(streamIdx int) error {
 	d.StartACKReader(streamIdx)
 
 	d.logger.Info("parallel stream activated", "stream", streamIdx)
+	d.notifyStreamChange()
 	return nil
 }
 
@@ -319,11 +328,19 @@ func (d *Dispatcher) DeactivateStream(streamIdx int) {
 	stream.active = false
 	atomic.AddInt32(&d.activeCount, -1)
 	d.logger.Info("parallel stream deactivated", "stream", streamIdx)
+	d.notifyStreamChange()
 }
 
 // ActiveStreams retorna o número de streams ativos.
 func (d *Dispatcher) ActiveStreams() int {
 	return int(atomic.LoadInt32(&d.activeCount))
+}
+
+// notifyStreamChange invoca o callback de mudança de streams, se configurado.
+func (d *Dispatcher) notifyStreamChange() {
+	if d.onStreamChange != nil {
+		d.onStreamChange(d.ActiveStreams(), d.maxStreams)
+	}
 }
 
 // RateSample contém as taxas calculadas em um único ponto no tempo.

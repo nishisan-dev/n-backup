@@ -342,18 +342,27 @@ func dialWithContext(ctx context.Context, address string, tlsCfg *tls.Config) (*
 func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, conn net.Conn, sessionID string, tlsCfg *tls.Config, logger *slog.Logger, progress *ProgressReporter) error {
 	defer conn.Close()
 
+	// Callback para atualizar o progress reporter com streams ativos
+	var onStreamChange func(active, max int)
+	if progress != nil {
+		onStreamChange = func(active, max int) {
+			progress.SetStreams(active, max)
+		}
+	}
+
 	// Cria dispatcher com stream primário
 	dispatcher := NewDispatcher(DispatcherConfig{
-		MaxStreams:  entry.Parallels,
-		BufferSize:  cfg.Resume.BufferSizeRaw,
-		ChunkSize:   int(cfg.Resume.ChunkSizeRaw),
-		SessionID:   sessionID,
-		ServerAddr:  cfg.Server.Address,
-		TLSConfig:   tlsCfg,
-		AgentName:   cfg.Agent.Name,
-		StorageName: entry.Storage,
-		Logger:      logger,
-		PrimaryConn: conn,
+		MaxStreams:     entry.Parallels,
+		BufferSize:     cfg.Resume.BufferSizeRaw,
+		ChunkSize:      int(cfg.Resume.ChunkSizeRaw),
+		SessionID:      sessionID,
+		ServerAddr:     cfg.Server.Address,
+		TLSConfig:      tlsCfg,
+		AgentName:      cfg.Agent.Name,
+		StorageName:    entry.Storage,
+		Logger:         logger,
+		PrimaryConn:    conn,
+		OnStreamChange: onStreamChange,
 	})
 	defer dispatcher.Close()
 
