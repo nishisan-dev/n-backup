@@ -6,31 +6,68 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
+	"github.com/nishisan-dev/n-backup/internal/config"
 	"github.com/robfig/cron/v3"
 )
 
-// Scheduler gerencia a execução periódica de backups via cron expression.
-type Scheduler struct {
-	cron     *cron.Cron
-	logger   *slog.Logger
-	backupFn func(ctx context.Context) error
-	mu       sync.Mutex // garante apenas um backup por vez
-	running  bool
+// BackupJobResult armazena o resultado do último backup de um job.
+type BackupJobResult struct {
+	Status           string    `json:"status"` // "completed", "failed", "skipped"
+	DurationSeconds  float64   `json:"duration_seconds"`
+	BytesTransferred int64     `json:"bytes_transferred"`
+	ObjectsCount     int64     `json:"objects_count"`
+	Timestamp        time.Time `json:"timestamp"`
 }
 
-// NewScheduler cria um Scheduler com a expressão cron fornecida.
-func NewScheduler(schedule string, logger *slog.Logger, fn func(ctx context.Context) error) (*Scheduler, error) {
+// BackupJob representa um job de backup com guard de execução.
+type BackupJob struct {
+	Entry      config.BackupEntry
+	mu         sync.Mutex
+	running    bool
+	LastResult *BackupJobResult
+}
+
+// Scheduler gerencia N cron jobs independentes, um por backup entry.
+type Scheduler struct {
+	cron   *cron.Cron
+	logger *slog.Logger
+	jobs   []*BackupJob
+	cfg    *config.AgentConfig
+}
+
+// NewScheduler cria um Scheduler com um cron job por backup entry.
+func NewScheduler(cfg *config.AgentConfig, logger *slog.Logger, runFn func(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, logger *slog.Logger) error) (*Scheduler, error) {
 	s := &Scheduler{
-		logger:   logger,
-		backupFn: fn,
+		logger: logger,
+		cfg:    cfg,
 	}
 
 	c := cron.New(cron.WithLogger(cron.VerbosePrintfLogger(slog.NewLogLogger(logger.Handler(), slog.LevelDebug))))
-	if _, err := c.AddFunc(schedule, s.execute); err != nil {
-		return nil, err
+
+	for _, entry := range cfg.Backups {
+		job := &BackupJob{Entry: entry}
+		s.jobs = append(s.jobs, job)
+
+		// Captura variáveis para closure
+		jobRef := job
+		entryRef := entry
+		if _, err := c.AddFunc(entry.Schedule, func() {
+			s.executeJob(jobRef, entryRef, runFn)
+		}); err != nil {
+			return nil, fmt.Errorf("adding cron job for backup %q: %w", entry.Name, err)
+		}
+
+		logger.Info("registered backup job",
+			"backup", entry.Name,
+			"storage", entry.Storage,
+			"schedule", entry.Schedule,
+			"parallels", entry.Parallels,
+		)
 	}
 
 	s.cron = c
@@ -39,7 +76,7 @@ func NewScheduler(schedule string, logger *slog.Logger, fn func(ctx context.Cont
 
 // Start inicia o scheduler.
 func (s *Scheduler) Start() {
-	s.logger.Info("scheduler started")
+	s.logger.Info("scheduler started", "jobs", len(s.jobs))
 	s.cron.Start()
 }
 
@@ -56,24 +93,52 @@ func (s *Scheduler) Stop(ctx context.Context) {
 	}
 }
 
-func (s *Scheduler) execute() {
-	s.mu.Lock()
-	if s.running {
-		s.mu.Unlock()
-		s.logger.Warn("backup already running, skipping scheduled execution")
+// Jobs retorna os jobs registrados (para StatsReporter).
+func (s *Scheduler) Jobs() []*BackupJob {
+	return s.jobs
+}
+
+func (s *Scheduler) executeJob(job *BackupJob, entry config.BackupEntry, runFn func(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, logger *slog.Logger) error) {
+	entryLogger := s.logger.With("backup", entry.Name, "storage", entry.Storage)
+
+	job.mu.Lock()
+	if job.running {
+		job.mu.Unlock()
+		entryLogger.Warn("backup already running, skipping scheduled execution")
+		job.LastResult = &BackupJobResult{
+			Status:    "skipped",
+			Timestamp: time.Now(),
+		}
 		return
 	}
-	s.running = true
-	s.mu.Unlock()
+	job.running = true
+	job.mu.Unlock()
 
 	defer func() {
-		s.mu.Lock()
-		s.running = false
-		s.mu.Unlock()
+		job.mu.Lock()
+		job.running = false
+		job.mu.Unlock()
 	}()
 
-	s.logger.Info("scheduled backup triggered")
-	if err := s.backupFn(context.Background()); err != nil {
-		s.logger.Error("backup failed", "error", err)
+	entryLogger.Info("scheduled backup triggered")
+	start := time.Now()
+
+	err := runFn(context.Background(), s.cfg, entry, entryLogger)
+	duration := time.Since(start)
+
+	if err != nil {
+		entryLogger.Error("backup failed", "error", err, "duration", duration)
+		job.LastResult = &BackupJobResult{
+			Status:          "failed",
+			DurationSeconds: duration.Seconds(),
+			Timestamp:       time.Now(),
+		}
+	} else {
+		entryLogger.Info("backup completed", "duration", duration)
+		job.LastResult = &BackupJobResult{
+			Status:          "completed",
+			DurationSeconds: duration.Seconds(),
+			Timestamp:       time.Now(),
+		}
 	}
 }

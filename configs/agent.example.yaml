@@ -4,9 +4,6 @@
 agent:
   name: "web-server-01"
 
-daemon:
-  schedule: "0 2 * * *"            # Cron expression (diário às 02h)
-
 server:
   address: "backup.nishisan.dev:9847"
 
@@ -18,7 +15,8 @@ tls:
 backups:
   - name: "app"
     storage: "scripts"             # Nome do storage no server
-    parallels: 0                   # 0=single stream, 1-8=max streams paralelos
+    schedule: "0 2 * * *"          # Cron expression (diário às 02h)
+    parallels: 0                   # 0=single stream, 1-255=max streams paralelos
     sources:
       - path: /app/scripts
     exclude:
@@ -26,6 +24,7 @@ backups:
 
   - name: "home"
     storage: "home-dirs"
+    schedule: "0 */6 * * *"        # A cada 6 horas
     parallels: 4                   # 4 streams paralelos
     sources:
       - path: /home
@@ -47,3 +46,4 @@ resume:
 logging:
   level: info                      # debug, info, warn, error
   format: json                     # json, text
+  file: /var/log/nbackup/agent.log # Log file dedicado (opcional)

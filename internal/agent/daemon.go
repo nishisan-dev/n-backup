@@ -21,20 +21,19 @@ import (
 	"github.com/nishisan-dev/n-backup/internal/pki"
 )
 
-// RunDaemon inicia o agent em modo daemon com scheduler cron.
+// RunDaemon inicia o agent em modo daemon com um cron job por backup.
 // Bloqueia até receber SIGTERM ou SIGINT.
 func RunDaemon(cfg *config.AgentConfig, logger *slog.Logger) error {
 	logger.Info("starting daemon",
 		"agent", cfg.Agent.Name,
-		"schedule", cfg.Daemon.Schedule,
 		"backups", len(cfg.Backups),
 	)
 
-	backupFn := func(ctx context.Context) error {
-		return RunAllBackups(ctx, cfg, false, logger)
+	runFn := func(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, entryLogger *slog.Logger) error {
+		return RunBackupWithRetry(ctx, cfg, entry, entryLogger, nil)
 	}
 
-	sched, err := NewScheduler(cfg.Daemon.Schedule, logger, backupFn)
+	sched, err := NewScheduler(cfg, logger, runFn)
 	if err != nil {
 		return fmt.Errorf("creating scheduler: %w", err)
 	}

@@ -31,10 +31,8 @@ type AgentInfo struct {
 	Name string `yaml:"name"`
 }
 
-// DaemonInfo contém a cron expression do scheduler.
-type DaemonInfo struct {
-	Schedule string `yaml:"schedule"`
-}
+// DaemonInfo reservado para configurações futuras do modo daemon.
+type DaemonInfo struct{}
 
 // ServerAddr contém o endereço do servidor de backup.
 type ServerAddr struct {
@@ -50,8 +48,9 @@ type TLSClient struct {
 
 // BackupEntry representa um bloco de backup nomeado com storage de destino.
 type BackupEntry struct {
-	Name      string         `yaml:"name"`    // Identificador local do backup
-	Storage   string         `yaml:"storage"` // Nome do storage no server
+	Name      string         `yaml:"name"`     // Identificador local do backup
+	Storage   string         `yaml:"storage"`  // Nome do storage no server
+	Schedule  string         `yaml:"schedule"` // Cron expression individual deste backup
 	Sources   []BackupSource `yaml:"sources"`
 	Exclude   []string       `yaml:"exclude"`
 	Parallels int            `yaml:"parallels"` // 0=desabilitado (single stream), 1-255=máx streams paralelos
@@ -84,6 +83,7 @@ type ResumeConfig struct {
 type LoggingInfo struct {
 	Level  string `yaml:"level"`
 	Format string `yaml:"format"`
+	File   string `yaml:"file"` // Caminho para arquivo de log (ex: /var/log/nbackup/agent.log)
 }
 
 // LoadAgentConfig lê e valida o arquivo YAML de configuração do agent.
@@ -109,9 +109,7 @@ func (c *AgentConfig) validate() error {
 	if c.Agent.Name == "" {
 		return fmt.Errorf("agent.name is required")
 	}
-	if c.Daemon.Schedule == "" {
-		return fmt.Errorf("daemon.schedule is required")
-	}
+
 	if c.Server.Address == "" {
 		return fmt.Errorf("server.address is required")
 	}
@@ -141,6 +139,9 @@ func (c *AgentConfig) validate() error {
 			if src.Path == "" {
 				return fmt.Errorf("backups[%d].sources[%d].path is required", i, j)
 			}
+		}
+		if b.Schedule == "" {
+			return fmt.Errorf("backups[%d].schedule is required", i)
 		}
 		if b.Parallels < 0 || b.Parallels > 255 {
 			return fmt.Errorf("backups[%d].parallels must be between 0 and 255, got %d", i, b.Parallels)

@@ -20,9 +20,6 @@ func TestLoadAgentConfig_ExampleFile(t *testing.T) {
 	if cfg.Agent.Name != "web-server-01" {
 		t.Errorf("expected agent.name 'web-server-01', got %q", cfg.Agent.Name)
 	}
-	if cfg.Daemon.Schedule != "0 2 * * *" {
-		t.Errorf("expected schedule '0 2 * * *', got %q", cfg.Daemon.Schedule)
-	}
 	if cfg.Server.Address != "backup.nishisan.dev:9847" {
 		t.Errorf("expected server address 'backup.nishisan.dev:9847', got %q", cfg.Server.Address)
 	}
@@ -35,6 +32,9 @@ func TestLoadAgentConfig_ExampleFile(t *testing.T) {
 	if cfg.Backups[0].Storage != "scripts" {
 		t.Errorf("expected backups[0].storage 'scripts', got %q", cfg.Backups[0].Storage)
 	}
+	if cfg.Backups[0].Schedule != "0 2 * * *" {
+		t.Errorf("expected backups[0].schedule '0 2 * * *', got %q", cfg.Backups[0].Schedule)
+	}
 	if len(cfg.Backups[0].Sources) != 1 {
 		t.Errorf("expected 1 source in backups[0], got %d", len(cfg.Backups[0].Sources))
 	}
@@ -44,11 +44,17 @@ func TestLoadAgentConfig_ExampleFile(t *testing.T) {
 	if cfg.Backups[1].Storage != "home-dirs" {
 		t.Errorf("expected backups[1].storage 'home-dirs', got %q", cfg.Backups[1].Storage)
 	}
+	if cfg.Backups[1].Schedule != "0 */6 * * *" {
+		t.Errorf("expected backups[1].schedule '0 */6 * * *', got %q", cfg.Backups[1].Schedule)
+	}
 	if cfg.Retry.MaxAttempts != 5 {
 		t.Errorf("expected max_attempts 5, got %d", cfg.Retry.MaxAttempts)
 	}
 	if cfg.Logging.Level != "info" {
 		t.Errorf("expected logging level 'info', got %q", cfg.Logging.Level)
+	}
+	if cfg.Logging.File != "/var/log/nbackup/agent.log" {
+		t.Errorf("expected logging file '/var/log/nbackup/agent.log', got %q", cfg.Logging.File)
 	}
 	if cfg.Backups[0].Parallels != 0 {
 		t.Errorf("expected backups[0].parallels 0, got %d", cfg.Backups[0].Parallels)
@@ -92,12 +98,11 @@ func TestLoadServerConfig_ExampleFile(t *testing.T) {
 	}
 }
 
-func TestLoadAgentConfig_MissingName(t *testing.T) {
-	content := `
+// validAgentYAML retorna um YAML mínimo válido para testes.
+// Testes de validação podem substituir campos com writeTempConfig.
+const validAgentYAML = `
 agent:
-  name: ""
-daemon:
-  schedule: "0 2 * * *"
+  name: "test-agent"
 server:
   address: "localhost:9847"
 tls:
@@ -107,6 +112,25 @@ tls:
 backups:
   - name: "test"
     storage: "default"
+    schedule: "0 2 * * *"
+    sources:
+      - path: /tmp
+`
+
+func TestLoadAgentConfig_MissingName(t *testing.T) {
+	content := `
+agent:
+  name: ""
+server:
+  address: "localhost:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  client_cert: /tmp/client.pem
+  client_key: /tmp/client-key.pem
+backups:
+  - name: "test"
+    storage: "default"
+    schedule: "0 2 * * *"
     sources:
       - path: /tmp
 `
@@ -121,8 +145,6 @@ func TestLoadAgentConfig_MissingBackups(t *testing.T) {
 	content := `
 agent:
   name: "test-agent"
-daemon:
-  schedule: "0 2 * * *"
 server:
   address: "localhost:9847"
 tls:
@@ -142,8 +164,6 @@ func TestLoadAgentConfig_MissingStorageName(t *testing.T) {
 	content := `
 agent:
   name: "test-agent"
-daemon:
-  schedule: "0 2 * * *"
 server:
   address: "localhost:9847"
 tls:
@@ -153,6 +173,7 @@ tls:
 backups:
   - name: "test"
     storage: ""
+    schedule: "0 2 * * *"
     sources:
       - path: /tmp
 `
@@ -163,12 +184,10 @@ backups:
 	}
 }
 
-func TestLoadAgentConfig_ParallelsOutOfRange(t *testing.T) {
+func TestLoadAgentConfig_MissingSchedule(t *testing.T) {
 	content := `
 agent:
   name: "test-agent"
-daemon:
-  schedule: "0 2 * * *"
 server:
   address: "localhost:9847"
 tls:
@@ -178,6 +197,30 @@ tls:
 backups:
   - name: "test"
     storage: "default"
+    sources:
+      - path: /tmp
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadAgentConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for missing schedule")
+	}
+}
+
+func TestLoadAgentConfig_ParallelsOutOfRange(t *testing.T) {
+	content := `
+agent:
+  name: "test-agent"
+server:
+  address: "localhost:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  client_cert: /tmp/client.pem
+  client_key: /tmp/client-key.pem
+backups:
+  - name: "test"
+    storage: "default"
+    schedule: "0 2 * * *"
     parallels: 256
     sources:
       - path: /tmp
@@ -193,8 +236,6 @@ func TestLoadAgentConfig_ParallelsValid(t *testing.T) {
 	content := `
 agent:
   name: "test-agent"
-daemon:
-  schedule: "0 2 * * *"
 server:
   address: "localhost:9847"
 tls:
@@ -204,6 +245,7 @@ tls:
 backups:
   - name: "test"
     storage: "default"
+    schedule: "0 2 * * *"
     parallels: 4
     sources:
       - path: /tmp
@@ -280,24 +322,7 @@ storages:
 }
 
 func TestLoadAgentConfig_DefaultRetry(t *testing.T) {
-	content := `
-agent:
-  name: "test-agent"
-daemon:
-  schedule: "0 2 * * *"
-server:
-  address: "localhost:9847"
-tls:
-  ca_cert: /tmp/ca.pem
-  client_cert: /tmp/client.pem
-  client_key: /tmp/client-key.pem
-backups:
-  - name: "test"
-    storage: "default"
-    sources:
-      - path: /tmp
-`
-	cfgPath := writeTempConfig(t, content)
+	cfgPath := writeTempConfig(t, validAgentYAML)
 	cfg, err := LoadAgentConfig(cfgPath)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
