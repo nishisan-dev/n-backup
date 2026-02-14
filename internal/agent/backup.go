@@ -5,7 +5,6 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -346,7 +345,8 @@ func dialWithContext(ctx context.Context, address string, tlsCfg *tls.Config) (*
 }
 
 // runParallelBackup executa o pipeline de backup com streams paralelos.
-// O stream 0 já está conectado (conn). Streams adicionais são abertos pelo auto-scaler.
+// A conn primária é usada apenas como canal de controle (Trailer + FinalACK).
+// Todas as N streams de dados conectam ao server via ParallelJoin.
 func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, conn net.Conn, sessionID string, tlsCfg *tls.Config, logger *slog.Logger, progress *ProgressReporter, job *BackupJob) error {
 	defer conn.Close()
 
@@ -362,7 +362,7 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 		}
 	}
 
-	// Cria dispatcher com stream primário
+	// Cria dispatcher — conn primária é control-only (não usada para dados)
 	dispatcher := NewDispatcher(DispatcherConfig{
 		MaxStreams:     entry.Parallels,
 		BufferSize:     cfg.Resume.BufferSizeRaw,
@@ -378,19 +378,21 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 	})
 	defer dispatcher.Close()
 
-	// Inicia sender auto-drenante para stream 0 — como não há ACK reader neste stream
-	// (a mesma conn é usada para Trailer+FinalACK), o sender avança o ring buffer
-	// diretamente após cada write, evitando deadlock por buffer cheio.
-	dispatcher.StartSelfDrainingSender(0)
-
-	// Eager Start: ativa todos os streams paralelos imediatamente.
-	// O usuário configurou parallels=N, logo a expectativa é usar N streams desde o início.
+	// Ativa todas as N streams via ParallelJoin (incluindo stream 0).
+	// Cada stream tem seu próprio sender com retry + ACK reader.
 	// Streams que falharem no connect são logados mas não impedem o backup.
-	for i := 1; i < entry.Parallels; i++ {
+	activatedCount := 0
+	for i := 0; i < entry.Parallels; i++ {
 		if err := dispatcher.ActivateStream(i); err != nil {
 			logger.Warn("failed to activate parallel stream, continuing with fewer streams",
 				"stream", i, "error", err)
+		} else {
+			activatedCount++
 		}
+	}
+
+	if activatedCount == 0 {
+		return fmt.Errorf("no parallel streams could be activated")
 	}
 
 	// Auto-scaler mantido apenas para scale-down em caso de subutilização
@@ -421,45 +423,40 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 		dispatcher.Close() // sinaliza EOF para todos os senders
 	}()
 
-	// Espera todos os senders terminarem
-	if err := dispatcher.WaitAllSenders(); err != nil {
-		scalerCancel()
+	// WaitAllSenders e produtor rodam em paralelo.
+	// Context com timeout previne deadlock eterno.
+	sendersCtx, sendersCancel := context.WithTimeout(ctx, 24*time.Hour)
+	defer sendersCancel()
+
+	sendersDone := make(chan error, 1)
+	go func() {
+		sendersDone <- dispatcher.WaitAllSenders(sendersCtx)
+	}()
+
+	// Espera ambos: senders E produtor
+	var sendersErr error
+	select {
+	case sendersErr = <-sendersDone:
+		// Senders terminaram — esperamos o produtor
 		<-producerDone
-		return fmt.Errorf("parallel sender error: %w", err)
+	case <-producerDone:
+		// Produtor terminou primeiro — espera senders (já deve estar perto de terminar)
+		sendersErr = <-sendersDone
 	}
 
-	// Espera produtor terminar
-	<-producerDone
 	scalerCancel()
 
+	if sendersErr != nil {
+		return fmt.Errorf("parallel sender error: %w", sendersErr)
+	}
 	if producerErr != nil {
 		return fmt.Errorf("parallel pipeline error: %w", producerErr)
 	}
 
-	// Envia trailer pela conexão primária (stream 0), envolto em ChunkHeader.
-	// O server espera ChunkHeader framing em todo o stream; enviar o trailer
-	// sem framing faria o server interpretar os bytes como um ChunkHeader
-	// com GlobalSeq/Length lixo, bloqueando em io.CopyN.
-	var trailerBuf bytes.Buffer
-	if err := protocol.WriteTrailer(&trailerBuf, producerResult.Checksum, producerResult.Size); err != nil {
-		return fmt.Errorf("serializing trailer: %w", err)
-	}
-
-	// Usa o próximo globalSeq do dispatcher para o ChunkHeader do trailer.
-	// O dispatcher já foi fechado, então acessamos diretamente sem lock.
-	if err := protocol.WriteChunkHeader(conn, dispatcher.globalSeq, uint32(trailerBuf.Len())); err != nil {
-		return fmt.Errorf("writing trailer chunk header: %w", err)
-	}
-	if _, err := conn.Write(trailerBuf.Bytes()); err != nil {
-		return fmt.Errorf("writing trailer data: %w", err)
-	}
-
-	// Sinaliza EOF para o server (TLS close_notify) — server lê até EOF,
-	// extrai trailer dos últimos 44 bytes. Sem isso, server bloqueia em Read().
-	if tlsConn, ok := conn.(*tls.Conn); ok {
-		if err := tlsConn.CloseWrite(); err != nil {
-			return fmt.Errorf("closing write side: %w", err)
-		}
+	// Envia Trailer direto pela conn primária (sem ChunkHeader framing).
+	// A conn primária nunca enviou dados, então não há conflito de framing.
+	if err := protocol.WriteTrailer(conn, producerResult.Checksum, producerResult.Size); err != nil {
+		return fmt.Errorf("writing trailer: %w", err)
 	}
 
 	// Lê Final ACK

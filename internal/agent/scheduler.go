@@ -132,7 +132,11 @@ func (s *Scheduler) executeJob(job *BackupJob, entry config.BackupEntry, runFn f
 	atomic.StoreInt32(&job.MaxStreams, int32(entry.Parallels))
 	atomic.StoreInt32(&job.ActiveStreams, 0)
 
-	err := runFn(context.Background(), s.cfg, entry, entryLogger, job)
+	// Context com timeout previne jobs zumbis (BUG 3: deadlock = job eterno)
+	jobCtx, jobCancel := context.WithTimeout(context.Background(), 24*time.Hour)
+	defer jobCancel()
+
+	err := runFn(jobCtx, s.cfg, entry, entryLogger, job)
 	duration := time.Since(start)
 
 	// Reseta métricas de streams após execução
