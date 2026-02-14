@@ -27,7 +27,7 @@ const (
 )
 
 // ProtocolVersion é a versão atual do protocolo.
-const ProtocolVersion byte = 0x01
+const ProtocolVersion byte = 0x02
 
 // Status codes para ACK (Server → Client após Handshake).
 const (
@@ -71,6 +71,7 @@ type Handshake struct {
 	Version     byte
 	AgentName   string
 	StorageName string
+	BackupName  string
 }
 
 // ACK representa a resposta do server ao handshake.

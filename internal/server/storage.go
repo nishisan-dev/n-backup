@@ -16,22 +16,24 @@ import (
 // AtomicWriter gerencia a escrita atômica de backups:
 // grava em .tmp → valida → rename para nome final.
 type AtomicWriter struct {
-	baseDir   string
-	agentName string
-	agentDir  string
+	baseDir    string
+	agentName  string
+	backupName string
+	agentDir   string
 }
 
-// NewAtomicWriter cria um AtomicWriter para o agent especificado.
-// Cria o diretório do agent se não existir.
-func NewAtomicWriter(baseDir, agentName string) (*AtomicWriter, error) {
-	agentDir := filepath.Join(baseDir, agentName)
+// NewAtomicWriter cria um AtomicWriter para o agent e backup especificados.
+// Cria o diretório {baseDir}/{agentName}/{backupName}/ se não existir.
+func NewAtomicWriter(baseDir, agentName, backupName string) (*AtomicWriter, error) {
+	agentDir := filepath.Join(baseDir, agentName, backupName)
 	if err := os.MkdirAll(agentDir, 0755); err != nil {
-		return nil, fmt.Errorf("creating agent directory: %w", err)
+		return nil, fmt.Errorf("creating backup directory: %w", err)
 	}
 	return &AtomicWriter{
-		baseDir:   baseDir,
-		agentName: agentName,
-		agentDir:  agentDir,
+		baseDir:    baseDir,
+		agentName:  agentName,
+		backupName: backupName,
+		agentDir:   agentDir,
 	}, nil
 }
 

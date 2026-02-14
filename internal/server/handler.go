@@ -35,6 +35,7 @@ type PartialSession struct {
 	BytesWritten int64
 	AgentName    string
 	StorageName  string
+	BackupName   string
 	BaseDir      string
 	CreatedAt    time.Time
 }
@@ -173,7 +174,14 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 		return
 	}
 
-	logger = logger.With("agent", agentName, "storage", storageName)
+	// Lê backup name até '\n'
+	backupName, err := readUntilNewline(conn)
+	if err != nil {
+		logger.Error("reading backup name", "error", err)
+		return
+	}
+
+	logger = logger.With("agent", agentName, "storage", storageName, "backup", backupName)
 	logger.Info("backup handshake received")
 
 	// Busca storage nomeado
@@ -184,8 +192,8 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 		return
 	}
 
-	// Lock: por agent:storage (permite backups simultâneos de storages diferentes do mesmo agent)
-	lockKey := agentName + ":" + storageName
+	// Lock: por agent:storage:backup (permite backups simultâneos de entries diferentes)
+	lockKey := agentName + ":" + storageName + ":" + backupName
 	if _, loaded := h.locks.LoadOrStore(lockKey, true); loaded {
 		logger.Warn("backup already in progress for agent")
 		protocol.WriteACK(conn, protocol.StatusBusy, "backup already in progress", "")
@@ -221,14 +229,14 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 		}
 		logger.Info("parallel mode detected", "maxStreams", pi.MaxStreams, "chunkSize", pi.ChunkSize)
 
-		h.handleParallelBackup(ctx, conn, br, sessionID, agentName, storageName, storageInfo, pi, lockKey, logger)
+		h.handleParallelBackup(ctx, conn, br, sessionID, agentName, storageName, backupName, storageInfo, pi, lockKey, logger)
 		return
 	}
 
 	// Modo single-stream — byte 0x00 já consumido, br contém os dados
 
 	// Prepara escrita atômica
-	writer, err := NewAtomicWriter(storageInfo.BaseDir, agentName)
+	writer, err := NewAtomicWriter(storageInfo.BaseDir, agentName, backupName)
 	if err != nil {
 		logger.Error("creating atomic writer", "error", err)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
@@ -247,6 +255,7 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 		TmpPath:     tmpPath,
 		AgentName:   agentName,
 		StorageName: storageName,
+		BackupName:  backupName,
 		BaseDir:     storageInfo.BaseDir,
 		CreatedAt:   time.Now(),
 	}
@@ -317,8 +326,8 @@ func (h *Handler) handleResume(ctx context.Context, conn net.Conn, logger *slog.
 		return
 	}
 
-	// Lock: por agent:storage
-	lockKey := session.AgentName + ":" + session.StorageName
+	// Lock: por agent:storage:backup
+	lockKey := session.AgentName + ":" + session.StorageName + ":" + session.BackupName
 	if _, loaded := h.locks.LoadOrStore(lockKey, true); loaded {
 		logger.Warn("backup already in progress for agent during resume")
 		return
@@ -354,7 +363,7 @@ func (h *Handler) handleResume(ctx context.Context, conn net.Conn, logger *slog.
 	h.sessions.Delete(resume.SessionID)
 
 	// Validação e commit
-	writer, wErr := NewAtomicWriter(storageInfo.BaseDir, session.AgentName)
+	writer, wErr := NewAtomicWriter(storageInfo.BaseDir, session.AgentName, session.BackupName)
 	if wErr != nil {
 		logger.Error("creating atomic writer for resume", "error", wErr)
 		return
@@ -599,6 +608,7 @@ type ParallelSession struct {
 	StorageInfo config.StorageInfo
 	AgentName   string
 	StorageName string
+	BackupName  string
 	StreamConns sync.Map // streamIndex (uint8) → net.Conn
 	MaxStreams  uint8
 	ChunkSize   uint32
@@ -609,14 +619,14 @@ type ParallelSession struct {
 
 // handleParallelBackup processa um backup paralelo.
 // Recebe dados pela conexão primária (stream 0) + streams secundários via ParallelJoin.
-func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io.Reader, sessionID, agentName, storageName string, storageInfo config.StorageInfo, pi *protocol.ParallelInit, lockKey string, logger *slog.Logger) {
+func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io.Reader, sessionID, agentName, storageName, backupName string, storageInfo config.StorageInfo, pi *protocol.ParallelInit, lockKey string, logger *slog.Logger) {
 	defer h.locks.Delete(lockKey)
 
 	logger = logger.With("session", sessionID, "mode", "parallel", "maxStreams", pi.MaxStreams)
 	logger.Info("starting parallel backup session")
 
 	// Prepara escrita atômica
-	writer, err := NewAtomicWriter(storageInfo.BaseDir, agentName)
+	writer, err := NewAtomicWriter(storageInfo.BaseDir, agentName, backupName)
 	if err != nil {
 		logger.Error("creating atomic writer", "error", err)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
@@ -640,6 +650,7 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		StorageInfo: storageInfo,
 		AgentName:   agentName,
 		StorageName: storageName,
+		BackupName:  backupName,
 		MaxStreams:  pi.MaxStreams,
 		ChunkSize:   pi.ChunkSize,
 		Done:        make(chan struct{}),

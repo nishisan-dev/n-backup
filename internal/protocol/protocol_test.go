@@ -14,8 +14,9 @@ func TestHandshake_RoundTrip(t *testing.T) {
 	var buf bytes.Buffer
 	agentName := "web-server-01"
 	storageName := "scripts"
+	backupName := "app"
 
-	if err := WriteHandshake(&buf, agentName, storageName); err != nil {
+	if err := WriteHandshake(&buf, agentName, storageName, backupName); err != nil {
 		t.Fatalf("WriteHandshake: %v", err)
 	}
 
@@ -32,6 +33,9 @@ func TestHandshake_RoundTrip(t *testing.T) {
 	}
 	if hs.StorageName != storageName {
 		t.Errorf("expected storage name %q, got %q", storageName, hs.StorageName)
+	}
+	if hs.BackupName != backupName {
+		t.Errorf("expected backup name %q, got %q", backupName, hs.BackupName)
 	}
 }
 
@@ -156,6 +160,7 @@ func TestHandshake_InvalidMagic(t *testing.T) {
 	buf.WriteByte(ProtocolVersion)
 	buf.Write([]byte("agent-name\n"))
 	buf.Write([]byte("storage-name\n"))
+	buf.Write([]byte("backup-name\n"))
 
 	_, err := ReadHandshake(&buf)
 	if err == nil {
@@ -169,6 +174,7 @@ func TestHandshake_InvalidVersion(t *testing.T) {
 	buf.WriteByte(0xFF) // versão inválida
 	buf.Write([]byte("agent-name\n"))
 	buf.Write([]byte("storage-name\n"))
+	buf.Write([]byte("backup-name\n"))
 
 	_, err := ReadHandshake(&buf)
 	if err == nil {
@@ -223,13 +229,14 @@ func TestHandshake_FrameSize(t *testing.T) {
 	var buf bytes.Buffer
 	agentName := "web-server-01"
 	storageName := "scripts"
+	backupName := "app"
 
-	if err := WriteHandshake(&buf, agentName, storageName); err != nil {
+	if err := WriteHandshake(&buf, agentName, storageName, backupName); err != nil {
 		t.Fatalf("WriteHandshake: %v", err)
 	}
 
-	// Magic(4) + Version(1) + AgentName(14) + Delimiter(1) + StorageName(7) + Delimiter(1) = 28 bytes
-	expected := 4 + 1 + len(agentName) + 1 + len(storageName) + 1
+	// Magic(4) + Version(1) + AgentName(14) + Delimiter(1) + StorageName(7) + Delimiter(1) + BackupName(3) + Delimiter(1) = 32 bytes
+	expected := 4 + 1 + len(agentName) + 1 + len(storageName) + 1 + len(backupName) + 1
 	if buf.Len() != expected {
 		t.Errorf("expected handshake size %d, got %d", expected, buf.Len())
 	}

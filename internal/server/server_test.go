@@ -16,15 +16,15 @@ import (
 func TestAtomicWriter_CommitAndAbort(t *testing.T) {
 	dir := t.TempDir()
 
-	w, err := NewAtomicWriter(dir, "test-agent")
+	w, err := NewAtomicWriter(dir, "test-agent", "test-backup")
 	if err != nil {
 		t.Fatalf("NewAtomicWriter: %v", err)
 	}
 
-	// Verifica que o diretório do agent foi criado
-	agentDir := filepath.Join(dir, "test-agent")
+	// Verifica que o diretório do agent/backup foi criado
+	agentDir := filepath.Join(dir, "test-agent", "test-backup")
 	if _, err := os.Stat(agentDir); os.IsNotExist(err) {
-		t.Fatal("agent directory not created")
+		t.Fatal("backup directory not created")
 	}
 
 	// Cria arquivo tmp
@@ -65,7 +65,7 @@ func TestAtomicWriter_CommitAndAbort(t *testing.T) {
 func TestAtomicWriter_Abort(t *testing.T) {
 	dir := t.TempDir()
 
-	w, err := NewAtomicWriter(dir, "test-agent")
+	w, err := NewAtomicWriter(dir, "test-agent", "test-backup")
 	if err != nil {
 		t.Fatalf("NewAtomicWriter: %v", err)
 	}

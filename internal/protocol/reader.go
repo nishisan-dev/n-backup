@@ -46,10 +46,18 @@ func ReadHandshake(r io.Reader) (*Handshake, error) {
 	}
 	storageName = storageName[:len(storageName)-1]
 
+	// Lê backup name até '\n'
+	backupName, err := br.ReadString('\n')
+	if err != nil {
+		return nil, fmt.Errorf("reading backup name: %w", err)
+	}
+	backupName = backupName[:len(backupName)-1]
+
 	return &Handshake{
 		Version:     version[0],
 		AgentName:   name,
 		StorageName: storageName,
+		BackupName:  backupName,
 	}, nil
 }
 

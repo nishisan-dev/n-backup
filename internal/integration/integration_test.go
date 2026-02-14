@@ -34,6 +34,7 @@ import (
 )
 
 const testStorageName = "e2e-storage"
+const testBackupName = "e2e-backup"
 
 // TestEndToEnd_FullBackupSession testa o fluxo completo:
 // Agent conecta → Handshake (com storage) → Stream tar.gz → Trailer → Server valida → Commit → Rotação
@@ -99,7 +100,7 @@ func TestEndToEnd_FullBackupSession(t *testing.T) {
 	defer conn.Close()
 
 	// 1. Handshake com storage name
-	if err := protocol.WriteHandshake(conn, agentName, testStorageName); err != nil {
+	if err := protocol.WriteHandshake(conn, agentName, testStorageName, testBackupName); err != nil {
 		t.Fatalf("WriteHandshake: %v", err)
 	}
 
@@ -173,10 +174,10 @@ func TestEndToEnd_FullBackupSession(t *testing.T) {
 	}
 
 	// 4. Verifica backup gravado
-	agentDir := filepath.Join(storageDir, agentName)
-	entries, err := os.ReadDir(agentDir)
+	backupDir := filepath.Join(storageDir, agentName, testBackupName)
+	entries, err := os.ReadDir(backupDir)
 	if err != nil {
-		t.Fatalf("reading agent dir: %v", err)
+		t.Fatalf("reading backup dir: %v", err)
 	}
 
 	var backupFiles []string
@@ -190,7 +191,7 @@ func TestEndToEnd_FullBackupSession(t *testing.T) {
 		t.Fatalf("expected 1 backup, got %d: %v", len(backupFiles), backupFiles)
 	}
 
-	backupPath := filepath.Join(agentDir, backupFiles[0])
+	backupPath := filepath.Join(backupDir, backupFiles[0])
 	verifyTarGz(t, backupPath, sourceDir)
 }
 
@@ -238,7 +239,7 @@ func TestEndToEnd_StorageNotFound(t *testing.T) {
 	defer conn.Close()
 
 	// Envia handshake com storage que não existe
-	if err := protocol.WriteHandshake(conn, "some-agent", "nonexistent-storage"); err != nil {
+	if err := protocol.WriteHandshake(conn, "some-agent", "nonexistent-storage", "some-backup"); err != nil {
 		t.Fatalf("WriteHandshake: %v", err)
 	}
 
@@ -355,7 +356,7 @@ func TestEndToEnd_BusyLock(t *testing.T) {
 	}
 	defer conn1.Close()
 
-	protocol.WriteHandshake(conn1, agentName, testStorageName)
+	protocol.WriteHandshake(conn1, agentName, testStorageName, testBackupName)
 	ack1, _ := protocol.ReadACK(conn1)
 	if ack1.Status != protocol.StatusGo {
 		t.Fatalf("expected GO for conn1, got %d", ack1.Status)
@@ -370,7 +371,7 @@ func TestEndToEnd_BusyLock(t *testing.T) {
 	}
 	defer conn2.Close()
 
-	protocol.WriteHandshake(conn2, agentName, testStorageName)
+	protocol.WriteHandshake(conn2, agentName, testStorageName, testBackupName)
 	ack2, err := protocol.ReadACK(conn2)
 	if err != nil {
 		t.Fatalf("ReadACK conn2: %v", err)
@@ -470,7 +471,7 @@ func TestEndToEnd_ParallelBackupSession(t *testing.T) {
 	defer conn.Close()
 
 	// 1. Handshake
-	if err := protocol.WriteHandshake(conn, agentName, testStorageName); err != nil {
+	if err := protocol.WriteHandshake(conn, agentName, testStorageName, testBackupName); err != nil {
 		t.Fatalf("WriteHandshake: %v", err)
 	}
 
@@ -564,10 +565,10 @@ func TestEndToEnd_ParallelBackupSession(t *testing.T) {
 	}
 
 	// 5. Verifica backup gravado
-	agentDir := filepath.Join(storageDir, agentName)
-	entries, err := os.ReadDir(agentDir)
+	backupDir := filepath.Join(storageDir, agentName, testBackupName)
+	entries, err := os.ReadDir(backupDir)
 	if err != nil {
-		t.Fatalf("reading agent dir: %v", err)
+		t.Fatalf("reading backup dir: %v", err)
 	}
 
 	var backupFiles []string
@@ -581,7 +582,7 @@ func TestEndToEnd_ParallelBackupSession(t *testing.T) {
 		t.Fatalf("expected 1 backup, got %d: %v", len(backupFiles), backupFiles)
 	}
 
-	backupPath := filepath.Join(agentDir, backupFiles[0])
+	backupPath := filepath.Join(backupDir, backupFiles[0])
 	verifyTarGz(t, backupPath, sourceDir)
 }
 

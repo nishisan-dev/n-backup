@@ -271,7 +271,7 @@ func initialConnect(ctx context.Context, cfg *config.AgentConfig, entry config.B
 	logger.Info("connected to server", "address", cfg.Server.Address)
 
 	// Handshake
-	if err := protocol.WriteHandshake(conn, cfg.Agent.Name, entry.Storage); err != nil {
+	if err := protocol.WriteHandshake(conn, cfg.Agent.Name, entry.Storage, entry.Name); err != nil {
 		conn.Close()
 		return nil, "", fmt.Errorf("writing handshake: %w", err)
 	}
@@ -412,6 +412,7 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 	go func() {
 		defer close(producerDone)
 		producerResult, producerErr = Stream(ctx, scanner, dispatcher, progress)
+		dispatcher.Flush() // emite chunk parcial pendente no buffer de acumulação
 		dispatcher.Close() // sinaliza EOF para todos os senders
 	}()
 
