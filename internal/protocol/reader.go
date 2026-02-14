@@ -307,13 +307,22 @@ func ReadParallelJoin(r io.Reader) (*ParallelJoin, error) {
 }
 
 // ReadParallelACK lê a resposta ao ParallelJoin (Server → Client).
-// Formato: [Status 1B]
-func ReadParallelACK(r io.Reader) (byte, error) {
+// Formato: [Status 1B] [LastOffset uint64 8B]
+func ReadParallelACK(r io.Reader) (*ParallelACK, error) {
 	var status [1]byte
 	if _, err := io.ReadFull(r, status[:]); err != nil {
-		return 0, fmt.Errorf("reading parallel ack: %w", err)
+		return nil, fmt.Errorf("reading parallel ack: %w", err)
 	}
-	return status[0], nil
+
+	var lastOffset uint64
+	if err := binary.Read(r, binary.BigEndian, &lastOffset); err != nil {
+		return nil, fmt.Errorf("reading parallel ack offset: %w", err)
+	}
+
+	return &ParallelACK{
+		Status:     status[0],
+		LastOffset: lastOffset,
+	}, nil
 }
 
 // ReadChunkSACK lê o frame ChunkSACK (Server → Client).

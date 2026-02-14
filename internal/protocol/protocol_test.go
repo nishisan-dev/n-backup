@@ -452,22 +452,36 @@ func TestChunkSACK_InvalidMagic(t *testing.T) {
 }
 
 func TestParallelACK_RoundTrip(t *testing.T) {
-	statuses := []byte{ParallelStatusOK, ParallelStatusFull, ParallelStatusNotFound}
+	tests := []struct {
+		name       string
+		status     byte
+		lastOffset uint64
+	}{
+		{"OK new stream", ParallelStatusOK, 0},
+		{"OK resume", ParallelStatusOK, 134217728}, // 128MB
+		{"Full", ParallelStatusFull, 0},
+		{"NotFound", ParallelStatusNotFound, 0},
+	}
 
-	for _, status := range statuses {
-		var buf bytes.Buffer
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
 
-		if err := WriteParallelACK(&buf, status); err != nil {
-			t.Fatalf("WriteParallelACK: %v", err)
-		}
+			if err := WriteParallelACK(&buf, tt.status, tt.lastOffset); err != nil {
+				t.Fatalf("WriteParallelACK: %v", err)
+			}
 
-		got, err := ReadParallelACK(&buf)
-		if err != nil {
-			t.Fatalf("ReadParallelACK: %v", err)
-		}
+			got, err := ReadParallelACK(&buf)
+			if err != nil {
+				t.Fatalf("ReadParallelACK: %v", err)
+			}
 
-		if got != status {
-			t.Errorf("expected status %d, got %d", status, got)
-		}
+			if got.Status != tt.status {
+				t.Errorf("expected status %d, got %d", tt.status, got.Status)
+			}
+			if got.LastOffset != tt.lastOffset {
+				t.Errorf("expected lastOffset %d, got %d", tt.lastOffset, got.LastOffset)
+			}
+		})
 	}
 }

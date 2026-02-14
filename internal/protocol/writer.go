@@ -189,10 +189,13 @@ func WriteParallelJoin(w io.Writer, sessionID string, streamIndex uint8) error {
 }
 
 // WriteParallelACK escreve a resposta ao ParallelJoin (Server → Client).
-// Formato: [Status 1B]
-func WriteParallelACK(w io.Writer, status byte) error {
+// Formato: [Status 1B] [LastOffset uint64 8B]
+func WriteParallelACK(w io.Writer, status byte, lastOffset uint64) error {
 	if _, err := w.Write([]byte{status}); err != nil {
 		return fmt.Errorf("writing parallel ack: %w", err)
+	}
+	if err := binary.Write(w, binary.BigEndian, lastOffset); err != nil {
+		return fmt.Errorf("writing parallel ack offset: %w", err)
 	}
 	return nil
 }

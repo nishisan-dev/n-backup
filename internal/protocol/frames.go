@@ -26,6 +26,14 @@ const (
 	ParallelStatusNotFound byte = 0x02 // SessionID não encontrado
 )
 
+// ParallelACK representa a resposta do server ao ParallelJoin.
+// Formato: [Status 1B] [LastOffset uint64 8B]
+// LastOffset indica quantos bytes o server já recebeu neste stream (0 para novo, >0 para resume).
+type ParallelACK struct {
+	Status     byte
+	LastOffset uint64
+}
+
 // ProtocolVersion é a versão atual do protocolo.
 const ProtocolVersion byte = 0x02
 
