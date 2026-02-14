@@ -158,7 +158,9 @@ func (p *ProgressReporter) render(final bool) {
 	}
 
 	// Escolhe o cenário mais pessimista (maior ETA)
-	if speed > 0 || objsPerSec > 0 {
+	// Só calcula se temos pelo menos um total conhecido (prescan completo)
+	hasTotals := totalBytes > 0 || totalObjects > 0
+	if hasTotals && (speed > 0 || objsPerSec > 0) {
 		pessimistic := etaBytesSec
 		if etaObjsSec > pessimistic {
 			pessimistic = etaObjsSec
@@ -203,9 +205,12 @@ func (p *ProgressReporter) render(final bool) {
 		)
 	}
 
-	// Pad com espaços para limpar restos de linha anterior
-	if len(line) < 120 {
-		line += strings.Repeat(" ", 120-len(line))
+	// Pad com espaços para limpar restos de linha anterior.
+	// Usa 200 para acomodar linhas longas com streams + retries.
+	padLen := 200
+	lineRunes := len([]rune(line))
+	if lineRunes < padLen {
+		line += strings.Repeat(" ", padLen-lineRunes)
 	}
 
 	if final {

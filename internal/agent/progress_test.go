@@ -30,7 +30,8 @@ func computeETA(totalBytes, bytesWritten int64, speed float64, totalObjects, obj
 		etaObjsSec = rem / objsPerSec
 	}
 
-	if speed > 0 || objsPerSec > 0 {
+	hasTotals := totalBytes > 0 || totalObjects > 0
+	if hasTotals && (speed > 0 || objsPerSec > 0) {
 		pessimistic := etaBytesSec
 		if etaObjsSec > pessimistic {
 			pessimistic = etaObjsSec
@@ -117,6 +118,21 @@ func TestETA_IndeterminateWithoutRates(t *testing.T) {
 
 	if eta != -1 {
 		t.Errorf("expected indeterminate ETA (-1), got %v", eta)
+	}
+}
+
+func TestETA_IndeterminateWithoutTotals(t *testing.T) {
+	// Cenário: prescan pendente (totals=0), mesmo com speed medida → ETA indeterminado
+	// Bug anterior: mostrava 0:00 em vez de ∞
+	eta := computeETA(
+		0, 1024*1024, // totalBytes=0 (prescan não terminou), bytes transferidos
+		13.5e6, // speed 13.5 MB/s
+		0, 30,  // totalObjects=0 (prescan não terminou), 30 objetos feitos
+		0.5, // objsPerSec
+	)
+
+	if eta != -1 {
+		t.Errorf("expected indeterminate ETA (-1) when totals unknown, got %v", eta)
 	}
 }
 
