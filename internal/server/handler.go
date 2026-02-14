@@ -204,7 +204,8 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	}
 
 	// Detecta extensão ParallelInit: peek 1 byte
-	// Se valor estiver entre 1-8, é MaxStreams de ParallelInit → modo paralelo
+	// Se valor >= 1, é MaxStreams de ParallelInit → modo paralelo
+	// (0 = single-stream, 1-255 = paralelo, limitado pelo uint8 do protocolo)
 	br := bufio.NewReaderSize(conn, 8)
 	peek, err := br.Peek(1)
 	if err != nil {
@@ -212,7 +213,7 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 		return
 	}
 
-	if peek[0] >= 1 && peek[0] <= 8 {
+	if peek[0] >= 1 {
 		// Modo paralelo — lê ParallelInit completo
 		pi, err := protocol.ReadParallelInit(br)
 		if err != nil {
