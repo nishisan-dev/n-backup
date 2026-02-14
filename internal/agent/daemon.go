@@ -40,6 +40,10 @@ func RunDaemon(cfg *config.AgentConfig, logger *slog.Logger) error {
 
 	sched.Start()
 
+	// Stats reporter — emite métricas a cada 5 minutos
+	stats := NewStatsReporter(sched, logger)
+	stats.Start()
+
 	// Aguarda signal
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
@@ -51,6 +55,7 @@ func RunDaemon(cfg *config.AgentConfig, logger *slog.Logger) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	stats.Stop()
 	sched.Stop(ctx)
 	return nil
 }
