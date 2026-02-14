@@ -242,14 +242,23 @@ func (d *Dispatcher) StartACKReader(streamIdx int) {
 	stream := d.streams[streamIdx]
 
 	go func() {
+		var lastOffset int64
 		for {
 			csack, err := protocol.ReadChunkSACK(stream.conn)
 			if err != nil {
 				return // conn fechada ou erro
 			}
 
-			stream.rb.Advance(int64(csack.Offset))
-			atomic.AddInt64(&stream.drainBytes, int64(csack.Offset))
+			newOffset := int64(csack.Offset)
+			stream.rb.Advance(newOffset)
+
+			// Acumula apenas o delta (bytes novos drenados desde o último SACK)
+			delta := newOffset - lastOffset
+			if delta > 0 {
+				atomic.AddInt64(&stream.drainBytes, delta)
+			}
+			lastOffset = newOffset
+
 			d.logger.Debug("ChunkSACK received",
 				"stream", streamIdx,
 				"chunkSeq", csack.ChunkSeq,

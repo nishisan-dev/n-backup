@@ -104,7 +104,7 @@ func (as *AutoScaler) evaluate() {
 		return
 	}
 
-	efficiency := rates.ProducerBps / (rates.DrainBps * float64(active))
+	efficiency := rates.ProducerBps / rates.DrainBps
 
 	// Armazena para uso nos logs de scale-up/down
 	as.lastEfficiency = efficiency
