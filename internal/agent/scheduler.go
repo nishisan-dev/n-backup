@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nishisan-dev/n-backup/internal/config"
@@ -30,6 +31,10 @@ type BackupJob struct {
 	mu         sync.Mutex
 	running    bool
 	LastResult *BackupJobResult
+
+	// Métricas de streams paralelos (atualizadas atomicamente durante execução)
+	ActiveStreams int32 // atomic — streams TCP ativos no momento
+	MaxStreams    int32 // atomic — máximo de streams configurado para esta execução
 }
 
 // Scheduler gerencia N cron jobs independentes, um por backup entry.
@@ -41,7 +46,7 @@ type Scheduler struct {
 }
 
 // NewScheduler cria um Scheduler com um cron job por backup entry.
-func NewScheduler(cfg *config.AgentConfig, logger *slog.Logger, runFn func(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, logger *slog.Logger) error) (*Scheduler, error) {
+func NewScheduler(cfg *config.AgentConfig, logger *slog.Logger, runFn func(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, logger *slog.Logger, job *BackupJob) error) (*Scheduler, error) {
 	s := &Scheduler{
 		logger: logger,
 		cfg:    cfg,
@@ -98,7 +103,7 @@ func (s *Scheduler) Jobs() []*BackupJob {
 	return s.jobs
 }
 
-func (s *Scheduler) executeJob(job *BackupJob, entry config.BackupEntry, runFn func(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, logger *slog.Logger) error) {
+func (s *Scheduler) executeJob(job *BackupJob, entry config.BackupEntry, runFn func(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, logger *slog.Logger, job *BackupJob) error) {
 	entryLogger := s.logger.With("backup", entry.Name, "storage", entry.Storage)
 
 	job.mu.Lock()
@@ -123,8 +128,16 @@ func (s *Scheduler) executeJob(job *BackupJob, entry config.BackupEntry, runFn f
 	entryLogger.Info("scheduled backup triggered")
 	start := time.Now()
 
-	err := runFn(context.Background(), s.cfg, entry, entryLogger)
+	// Inicializa métricas de streams antes da execução
+	atomic.StoreInt32(&job.MaxStreams, int32(entry.Parallels))
+	atomic.StoreInt32(&job.ActiveStreams, 0)
+
+	err := runFn(context.Background(), s.cfg, entry, entryLogger, job)
 	duration := time.Since(start)
+
+	// Reseta métricas de streams após execução
+	atomic.StoreInt32(&job.ActiveStreams, 0)
+	atomic.StoreInt32(&job.MaxStreams, 0)
 
 	if err != nil {
 		entryLogger.Error("backup failed", "error", err, "duration", duration)

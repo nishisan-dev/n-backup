@@ -6,11 +6,28 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
+	"sync/atomic"
 	"time"
 )
 
 const statsInterval = 5 * time.Minute
+
+// jobSnapshot captura o estado de um job para o log estruturado.
+type jobSnapshot struct {
+	Name          string  `json:"name"`
+	Schedule      string  `json:"schedule"`
+	Parallels     int     `json:"parallels"`
+	Status        string  `json:"status"`
+	ActiveStreams int     `json:"active_streams,omitempty"`
+	MaxStreams    int     `json:"max_streams,omitempty"`
+	LastStatus    string  `json:"last_status,omitempty"`
+	LastDurationS float64 `json:"last_duration_s,omitempty"`
+	LastBytes     int64   `json:"last_bytes,omitempty"`
+	LastObjects   int64   `json:"last_objects,omitempty"`
+	LastAt        string  `json:"last_at,omitempty"`
+}
 
 // StatsReporter emite métricas periódicas do daemon no log.
 type StatsReporter struct {
@@ -68,43 +85,48 @@ func (sr *StatsReporter) report() {
 	uptime := time.Since(sr.startTime).Seconds()
 
 	var runningCount int
+	snapshots := make([]jobSnapshot, 0, len(jobs))
+
 	for _, job := range jobs {
+		snap := jobSnapshot{
+			Name:      job.Entry.Name,
+			Schedule:  job.Entry.Schedule,
+			Parallels: job.Entry.Parallels,
+		}
+
 		job.mu.Lock()
-		if job.running {
-			runningCount++
-		}
+		isRunning := job.running
+		lastResult := job.LastResult
 		job.mu.Unlock()
-	}
 
-	// Encontrar último backup concluído
-	var lastResult *BackupJobResult
-	var lastBackupName string
-	var latestTime time.Time
+		if isRunning {
+			runningCount++
+			snap.Status = "running"
 
-	for _, job := range jobs {
-		if job.LastResult != nil && job.LastResult.Timestamp.After(latestTime) {
-			latestTime = job.LastResult.Timestamp
-			lastResult = job.LastResult
-			lastBackupName = job.Entry.Name
+			// Captura métricas de streams paralelos (atômicas, sem lock)
+			activeStreams := int(atomic.LoadInt32(&job.ActiveStreams))
+			maxStreams := int(atomic.LoadInt32(&job.MaxStreams))
+			if maxStreams > 0 {
+				snap.ActiveStreams = activeStreams
+				snap.MaxStreams = maxStreams
+			}
+		} else {
+			snap.Status = "idle"
 		}
+
+		if lastResult != nil {
+			snap.LastStatus = lastResult.Status
+			snap.LastDurationS = lastResult.DurationSeconds
+			snap.LastBytes = lastResult.BytesTransferred
+			snap.LastObjects = lastResult.ObjectsCount
+			snap.LastAt = lastResult.Timestamp.Format(time.RFC3339)
+		}
+
+		snapshots = append(snapshots, snap)
 	}
 
-	attrs := []any{
-		"uptime_seconds", int64(uptime),
-		"jobs_total", len(jobs),
-		"jobs_running", runningCount,
-	}
-
-	if lastResult != nil {
-		attrs = append(attrs,
-			"last_backup_name", lastBackupName,
-			"last_backup_status", lastResult.Status,
-			"last_backup_duration_seconds", lastResult.DurationSeconds,
-			"last_backup_bytes", lastResult.BytesTransferred,
-			"last_backup_objects", lastResult.ObjectsCount,
-			"last_backup_at", lastResult.Timestamp.Format(time.RFC3339),
-		)
-	}
+	// Serializa jobs como JSON para log estruturado
+	jobsJSON, _ := json.Marshal(snapshots)
 
 	// Encontrar próximo agendamento
 	entries := sr.scheduler.cron.Entries()
@@ -122,12 +144,20 @@ func (sr *StatsReporter) report() {
 		}
 	}
 
+	attrs := []any{
+		"uptime_seconds", int64(uptime),
+		"jobs_total", len(jobs),
+		"jobs_running", runningCount,
+	}
+
 	if !nextTime.IsZero() {
 		attrs = append(attrs,
 			"next_scheduled_name", nextJobName,
 			"next_scheduled_at", nextTime.Format(time.RFC3339),
 		)
 	}
+
+	attrs = append(attrs, "jobs", json.RawMessage(jobsJSON))
 
 	sr.logger.Info("daemon stats", attrs...)
 }

@@ -30,8 +30,8 @@ func RunDaemon(configPath string, cfg *config.AgentConfig, logger *slog.Logger) 
 		"backups", len(cfg.Backups),
 	)
 
-	runFn := func(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, entryLogger *slog.Logger) error {
-		return RunBackupWithRetry(ctx, cfg, entry, entryLogger, nil)
+	runFn := func(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, entryLogger *slog.Logger, job *BackupJob) error {
+		return RunBackupWithRetry(ctx, cfg, entry, entryLogger, nil, job)
 	}
 
 	sched, err := NewScheduler(cfg, logger, runFn)
@@ -132,7 +132,7 @@ func RunAllBackups(ctx context.Context, cfg *config.AgentConfig, showProgress bo
 			}()
 		}
 
-		err := RunBackupWithRetry(ctx, cfg, entry, entryLogger, progress)
+		err := RunBackupWithRetry(ctx, cfg, entry, entryLogger, progress, nil)
 
 		if progress != nil {
 			progress.Stop()
@@ -153,7 +153,7 @@ func RunAllBackups(ctx context.Context, cfg *config.AgentConfig, showProgress bo
 }
 
 // RunBackupWithRetry executa um backup entry com retry usando exponential backoff.
-func RunBackupWithRetry(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, logger *slog.Logger, progress *ProgressReporter) error {
+func RunBackupWithRetry(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, logger *slog.Logger, progress *ProgressReporter, job *BackupJob) error {
 	var lastErr error
 
 	for attempt := 0; attempt < cfg.Retry.MaxAttempts; attempt++ {
@@ -174,7 +174,7 @@ func RunBackupWithRetry(ctx context.Context, cfg *config.AgentConfig, entry conf
 			}
 		}
 
-		err := RunBackup(ctx, cfg, entry, logger, progress)
+		err := RunBackup(ctx, cfg, entry, logger, progress, job)
 		if err == nil {
 			return nil
 		}

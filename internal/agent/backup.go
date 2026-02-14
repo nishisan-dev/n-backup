@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nishisan-dev/n-backup/internal/config"
@@ -36,7 +37,7 @@ const resumeBackoff = 2 * time.Second
 //
 // Se a conexão cair, o sender reconecta, envia RESUME,
 // e continua de onde parou (se o offset ainda estiver no buffer).
-func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, logger *slog.Logger, progress *ProgressReporter) error {
+func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, logger *slog.Logger, progress *ProgressReporter, job *BackupJob) error {
 	logger = logger.With("backup", entry.Name, "storage", entry.Storage)
 	logger.Info("starting backup session", "server", cfg.Server.Address)
 
@@ -72,7 +73,7 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 			return fmt.Errorf("writing ParallelInit: %w", err)
 		}
 
-		return runParallelBackup(ctx, cfg, entry, conn, sessionID, tlsCfg, logger, progress)
+		return runParallelBackup(ctx, cfg, entry, conn, sessionID, tlsCfg, logger, progress, job)
 	}
 
 	logger.Info("handshake successful, starting resumable pipeline")
@@ -346,14 +347,18 @@ func dialWithContext(ctx context.Context, address string, tlsCfg *tls.Config) (*
 
 // runParallelBackup executa o pipeline de backup com streams paralelos.
 // O stream 0 já está conectado (conn). Streams adicionais são abertos pelo auto-scaler.
-func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, conn net.Conn, sessionID string, tlsCfg *tls.Config, logger *slog.Logger, progress *ProgressReporter) error {
+func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, conn net.Conn, sessionID string, tlsCfg *tls.Config, logger *slog.Logger, progress *ProgressReporter, job *BackupJob) error {
 	defer conn.Close()
 
-	// Callback para atualizar o progress reporter com streams ativos
+	// Callback para atualizar o progress reporter e job metrics com streams ativos
 	var onStreamChange func(active, max int)
-	if progress != nil {
-		onStreamChange = func(active, max int) {
+	onStreamChange = func(active, max int) {
+		if progress != nil {
 			progress.SetStreams(active, max)
+		}
+		if job != nil {
+			atomic.StoreInt32(&job.ActiveStreams, int32(active))
+			atomic.StoreInt32(&job.MaxStreams, int32(max))
 		}
 	}
 
