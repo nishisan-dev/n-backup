@@ -178,14 +178,14 @@ tls:
 backups:
   - name: "test"
     storage: "default"
-    parallels: 9
+    parallels: 256
     sources:
       - path: /tmp
 `
 	cfgPath := writeTempConfig(t, content)
 	_, err := LoadAgentConfig(cfgPath)
 	if err == nil {
-		t.Fatal("expected error for parallels > 8")
+		t.Fatal("expected error for parallels > 255")
 	}
 }
 

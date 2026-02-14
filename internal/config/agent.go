@@ -54,7 +54,7 @@ type BackupEntry struct {
 	Storage   string         `yaml:"storage"` // Nome do storage no server
 	Sources   []BackupSource `yaml:"sources"`
 	Exclude   []string       `yaml:"exclude"`
-	Parallels int            `yaml:"parallels"` // 0=desabilitado (single stream), 1-8=máx streams paralelos
+	Parallels int            `yaml:"parallels"` // 0=desabilitado (single stream), 1-255=máx streams paralelos
 }
 
 // BackupSource representa um diretório de origem para backup.
@@ -142,8 +142,8 @@ func (c *AgentConfig) validate() error {
 				return fmt.Errorf("backups[%d].sources[%d].path is required", i, j)
 			}
 		}
-		if b.Parallels < 0 || b.Parallels > 8 {
-			return fmt.Errorf("backups[%d].parallels must be between 0 and 8, got %d", i, b.Parallels)
+		if b.Parallels < 0 || b.Parallels > 255 {
+			return fmt.Errorf("backups[%d].parallels must be between 0 and 255, got %d", i, b.Parallels)
 		}
 	}
 	if c.Retry.MaxAttempts <= 0 {
