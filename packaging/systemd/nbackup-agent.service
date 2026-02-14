@@ -7,16 +7,12 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=/usr/bin/nbackup-agent --config /etc/nbackup/agent.yaml
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=10s
 
-# Usuário de serviço
-User=nbackup
-Group=nbackup
-
-# Hardening de segurança
-ProtectSystem=strict
-ProtectHome=read-only
+# O agent roda como root para ter acesso de leitura a qualquer path do filesystem.
+# Hardening mantido onde possível sem restringir leitura.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectKernelTunables=yes
@@ -27,10 +23,6 @@ RestrictNamespaces=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 RestrictRealtime=yes
-
-# O agent precisa ler arquivos do filesystem para fazer backup
-# Adicione aqui os diretórios que o agent precisa ler
-# ReadOnlyPaths=/app /home /etc
 
 # Logging
 StandardOutput=journal

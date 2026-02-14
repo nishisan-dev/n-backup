@@ -10,18 +10,13 @@ ExecStart=/usr/bin/nbackup-server --config /etc/nbackup/server.yaml
 Restart=on-failure
 RestartSec=5s
 
-# Usuário de serviço
-User=nbackup
-Group=nbackup
-
 # Limite de file descriptors (uma conexão por agent simultâneo)
 LimitNOFILE=65536
 
-# Hardening de segurança
-ProtectSystem=strict
+# O server roda como root para escrever em qualquer path de storage configurado.
+# Hardening kernel mantido.
 NoNewPrivileges=yes
 PrivateTmp=yes
-ProtectHome=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
@@ -30,9 +25,6 @@ RestrictNamespaces=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 RestrictRealtime=yes
-
-# O server precisa escrever nos diretórios de storage
-ReadWritePaths=/var/backups
 
 # Logging
 StandardOutput=journal
