@@ -24,6 +24,10 @@ type AutoScaler struct {
 	scaleDownCount int
 	hysteresis     int // janelas necessárias para ação (default 3)
 
+	// Última amostra para log nos métodos scale
+	lastEfficiency float64
+	lastRates      RateSample
+
 	// Estado
 	running int32 // atomic
 }
@@ -102,6 +106,10 @@ func (as *AutoScaler) evaluate() {
 
 	efficiency := rates.ProducerBps / (rates.DrainBps * float64(active))
 
+	// Armazena para uso nos logs de scale-up/down
+	as.lastEfficiency = efficiency
+	as.lastRates = rates
+
 	as.logger.Debug("auto-scaler evaluation",
 		"efficiency", efficiency,
 		"producerBps", rates.ProducerBps,
@@ -154,6 +162,10 @@ func (as *AutoScaler) scaleUp() {
 	}
 
 	as.logger.Info("auto-scaler: scale-up",
+		"reason", "producer faster than drains (efficiency > 1.0)",
+		"efficiency", as.lastEfficiency,
+		"producerMBs", as.lastRates.ProducerBps/(1024*1024),
+		"drainMBs", as.lastRates.DrainBps/(1024*1024),
 		"activeStreams", as.dispatcher.ActiveStreams(),
 		"maxStreams", as.dispatcher.maxStreams,
 	)
@@ -171,6 +183,10 @@ func (as *AutoScaler) scaleDown() {
 	as.dispatcher.DeactivateStream(lastIdx)
 
 	as.logger.Info("auto-scaler: scale-down",
+		"reason", "drains underutilized (efficiency < 0.7)",
+		"efficiency", as.lastEfficiency,
+		"producerMBs", as.lastRates.ProducerBps/(1024*1024),
+		"drainMBs", as.lastRates.DrainBps/(1024*1024),
 		"activeStreams", as.dispatcher.ActiveStreams(),
 		"maxStreams", as.dispatcher.maxStreams,
 	)
