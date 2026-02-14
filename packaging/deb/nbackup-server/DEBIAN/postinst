@@ -9,12 +9,15 @@ fi
 # Criar diretórios
 mkdir -p /etc/nbackup
 mkdir -p /var/backups/nbackup
+mkdir -p /var/log/nbackup
 
 # Permissões
 chown root:nbackup /etc/nbackup
 chmod 750 /etc/nbackup
 chown nbackup:nbackup /var/backups/nbackup
 chmod 750 /var/backups/nbackup
+chown nbackup:nbackup /var/log/nbackup
+chmod 750 /var/log/nbackup
 
 # Proteger chaves privadas se existirem
 if ls /etc/nbackup/*-key.pem >/dev/null 2>&1; then

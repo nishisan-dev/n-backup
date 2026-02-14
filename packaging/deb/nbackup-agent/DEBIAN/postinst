@@ -11,6 +11,11 @@ mkdir -p /etc/nbackup
 chown root:nbackup /etc/nbackup
 chmod 750 /etc/nbackup
 
+# Criar diretório de logs
+mkdir -p /var/log/nbackup
+chown nbackup:nbackup /var/log/nbackup
+chmod 750 /var/log/nbackup
+
 # Proteger chaves privadas se existirem
 if ls /etc/nbackup/*-key.pem >/dev/null 2>&1; then
     chmod 640 /etc/nbackup/*-key.pem

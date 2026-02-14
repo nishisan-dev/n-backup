@@ -33,7 +33,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger := logging.NewLogger(cfg.Logging.Level, cfg.Logging.Format)
+	logger, logCloser := logging.NewLogger(cfg.Logging.Level, cfg.Logging.Format, cfg.Logging.File)
+	defer logCloser.Close()
 
 	if *once {
 		// Execução única — roda todos os backups sequencialmente
@@ -69,7 +70,7 @@ func runHealthCheck(address string) {
 		os.Exit(1)
 	}
 
-	logger := logging.NewLogger(cfg.Logging.Level, cfg.Logging.Format)
+	logger, _ := logging.NewLogger(cfg.Logging.Level, cfg.Logging.Format, cfg.Logging.File)
 
 	if err := agent.RunHealthCheck(address, cfg, logger); err != nil {
 		fmt.Fprintf(os.Stderr, "Health check failed: %v\n", err)

@@ -27,7 +27,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger := logging.NewLogger(cfg.Logging.Level, cfg.Logging.Format)
+	logger, logCloser := logging.NewLogger(cfg.Logging.Level, cfg.Logging.Format, cfg.Logging.File)
+	defer logCloser.Close()
 
 	// Context com cancelamento via signal
 	ctx, cancel := context.WithCancel(context.Background())
