@@ -363,7 +363,8 @@ func (d *Dispatcher) reconnectStream(streamIdx int) (int64, error) {
 		return 0, fmt.Errorf("TLS handshake stream %d: %w", streamIdx, err)
 	}
 
-	// Envia ParallelJoin
+	// Envia ParallelJoin com medição de RTT
+	joinStart := time.Now()
 	if err := protocol.WriteParallelJoin(tlsConn, d.sessionID, uint8(streamIdx)); err != nil {
 		tlsConn.Close()
 		return 0, fmt.Errorf("writing ParallelJoin stream %d: %w", streamIdx, err)
@@ -371,10 +372,14 @@ func (d *Dispatcher) reconnectStream(streamIdx int) (int64, error) {
 
 	// Lê ParallelACK com lastOffset
 	ack, err := protocol.ReadParallelACK(tlsConn)
+	reconnectRTT := time.Since(joinStart)
 	if err != nil {
 		tlsConn.Close()
 		return 0, fmt.Errorf("reading ParallelACK stream %d: %w", streamIdx, err)
 	}
+
+	d.logger.Info("reconnect ACK received", "stream", streamIdx, "reconnect_rtt", reconnectRTT)
+
 	if ack.Status != protocol.ParallelStatusOK {
 		tlsConn.Close()
 		return 0, fmt.Errorf("server rejected ParallelJoin stream %d: status=%d", streamIdx, ack.Status)
@@ -458,7 +463,8 @@ func (d *Dispatcher) ActivateStream(streamIdx int) error {
 		return fmt.Errorf("TLS handshake stream %d: %w", streamIdx, err)
 	}
 
-	// Envia ParallelJoin
+	// Envia ParallelJoin com medição de RTT
+	joinStart := time.Now()
 	if err := protocol.WriteParallelJoin(tlsConn, d.sessionID, uint8(streamIdx)); err != nil {
 		tlsConn.Close()
 		return fmt.Errorf("writing ParallelJoin stream %d: %w", streamIdx, err)
@@ -466,10 +472,14 @@ func (d *Dispatcher) ActivateStream(streamIdx int) error {
 
 	// Lê ParallelACK
 	ack, err := protocol.ReadParallelACK(tlsConn)
+	joinRTT := time.Since(joinStart)
 	if err != nil {
 		tlsConn.Close()
 		return fmt.Errorf("reading ParallelACK stream %d: %w", streamIdx, err)
 	}
+
+	d.logger.Info("parallel join ACK received", "stream", streamIdx, "parallel_join_rtt", joinRTT)
+
 	if ack.Status != protocol.ParallelStatusOK {
 		tlsConn.Close()
 		return fmt.Errorf("server rejected ParallelJoin stream %d: status=%d", streamIdx, ack.Status)

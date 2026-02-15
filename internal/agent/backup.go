@@ -54,12 +54,22 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 	tlsCfg.ServerName = host
 
 	// Conecta ao server e faz handshake
-	conn, sessionID, err := initialConnect(ctx, cfg, entry, tlsCfg, logger)
+	conn, sessionID, handshakeRTT, err := initialConnect(ctx, cfg, entry, tlsCfg, logger)
 	if err != nil {
 		return err
 	}
 
 	logger = logger.With("session", sessionID)
+
+	// Persiste RTT do handshake no job para stats reporter
+	if job != nil {
+		job.mu.Lock()
+		if job.LastResult == nil {
+			job.LastResult = &BackupJobResult{}
+		}
+		job.LastResult.HandshakeRTT = handshakeRTT
+		job.mu.Unlock()
+	}
 
 	// Rota paralela: envia ParallelInit e delega para RunParallelBackup
 	if entry.Parallels > 0 {
@@ -231,6 +241,7 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 			"checksum", fmt.Sprintf("%x", producerResult.Checksum),
 		)
 
+		trailerStart := time.Now()
 		if err := protocol.WriteTrailer(conn, producerResult.Checksum, producerResult.Size); err != nil {
 			conn.Close()
 			return fmt.Errorf("writing trailer: %w", err)
@@ -238,10 +249,13 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 
 		// Lê Final ACK diretamente da conn (o ACK reader lerá erro e terminará)
 		finalACK, err := protocol.ReadFinalACK(conn)
+		finalACKRTT := time.Since(trailerStart)
 		if err != nil {
 			conn.Close()
 			return fmt.Errorf("reading final ACK: %w", err)
 		}
+
+		logger.Info("final ACK received", "final_ack_rtt", finalACKRTT)
 
 		conn.Close()
 
@@ -262,53 +276,62 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 }
 
 // initialConnect realiza a conexão inicial e handshake.
-func initialConnect(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, tlsCfg *tls.Config, logger *slog.Logger) (net.Conn, string, error) {
+// Retorna a conexão, sessionID e o RTT do handshake.
+func initialConnect(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, tlsCfg *tls.Config, logger *slog.Logger) (net.Conn, string, time.Duration, error) {
 	conn, err := dialWithContext(ctx, cfg.Server.Address, tlsCfg)
 	if err != nil {
-		return nil, "", fmt.Errorf("connecting to server: %w", err)
+		return nil, "", 0, fmt.Errorf("connecting to server: %w", err)
 	}
 
 	logger.Info("connected to server", "address", cfg.Server.Address)
 
-	// Handshake
+	// Handshake com medição de RTT
+	handshakeStart := time.Now()
 	if err := protocol.WriteHandshake(conn, cfg.Agent.Name, entry.Storage, entry.Name); err != nil {
 		conn.Close()
-		return nil, "", fmt.Errorf("writing handshake: %w", err)
+		return nil, "", 0, fmt.Errorf("writing handshake: %w", err)
 	}
 
 	ack, err := protocol.ReadACK(conn)
+	handshakeRTT := time.Since(handshakeStart)
 	if err != nil {
 		conn.Close()
-		return nil, "", fmt.Errorf("reading handshake ACK: %w", err)
+		return nil, "", 0, fmt.Errorf("reading handshake ACK: %w", err)
 	}
+
+	logger.Info("handshake ACK received", "handshake_rtt", handshakeRTT)
 
 	if ack.Status != protocol.StatusGo {
 		conn.Close()
-		return nil, "", fmt.Errorf("server rejected backup: status=%d message=%q", ack.Status, ack.Message)
+		return nil, "", 0, fmt.Errorf("server rejected backup: status=%d message=%q", ack.Status, ack.Message)
 	}
 
-	return conn, ack.SessionID, nil
+	return conn, ack.SessionID, handshakeRTT, nil
 }
 
 // resumeConnect reconecta e envia RESUME para o server.
-// Retorna a conexão e o lastOffset do server.
+// Retorna a conexão, o lastOffset do server e o RTT do resume.
 func resumeConnect(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, sessionID string, tlsCfg *tls.Config, logger *slog.Logger) (net.Conn, int64, error) {
 	conn, err := dialWithContext(ctx, cfg.Server.Address, tlsCfg)
 	if err != nil {
 		return nil, 0, fmt.Errorf("reconnecting: %w", err)
 	}
 
-	// Envia RESUME
+	// Envia RESUME com medição de RTT
+	resumeStart := time.Now()
 	if err := protocol.WriteResume(conn, sessionID, cfg.Agent.Name, entry.Storage); err != nil {
 		conn.Close()
 		return nil, 0, fmt.Errorf("writing resume: %w", err)
 	}
 
 	rACK, err := protocol.ReadResumeACK(conn)
+	resumeRTT := time.Since(resumeStart)
 	if err != nil {
 		conn.Close()
 		return nil, 0, fmt.Errorf("reading resume ACK: %w", err)
 	}
+
+	logger.Info("resume ACK received", "resume_rtt", resumeRTT)
 
 	if rACK.Status != protocol.ResumeStatusOK {
 		conn.Close()
@@ -455,15 +478,19 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 
 	// Envia Trailer direto pela conn primária (sem ChunkHeader framing).
 	// A conn primária nunca enviou dados, então não há conflito de framing.
+	trailerStart := time.Now()
 	if err := protocol.WriteTrailer(conn, producerResult.Checksum, producerResult.Size); err != nil {
 		return fmt.Errorf("writing trailer: %w", err)
 	}
 
 	// Lê Final ACK
 	finalACK, err := protocol.ReadFinalACK(conn)
+	finalACKRTT := time.Since(trailerStart)
 	if err != nil {
 		return fmt.Errorf("reading final ACK: %w", err)
 	}
+
+	logger.Info("final ACK received", "final_ack_rtt", finalACKRTT)
 
 	switch finalACK.Status {
 	case protocol.FinalStatusOK:

@@ -16,17 +16,18 @@ const statsInterval = 5 * time.Minute
 
 // jobSnapshot captura o estado de um job para o log estruturado.
 type jobSnapshot struct {
-	Name          string  `json:"name"`
-	Schedule      string  `json:"schedule"`
-	Parallels     int     `json:"parallels"`
-	Status        string  `json:"status"`
-	ActiveStreams int     `json:"active_streams,omitempty"`
-	MaxStreams    int     `json:"max_streams,omitempty"`
-	LastStatus    string  `json:"last_status,omitempty"`
-	LastDurationS float64 `json:"last_duration_s,omitempty"`
-	LastBytes     int64   `json:"last_bytes,omitempty"`
-	LastObjects   int64   `json:"last_objects,omitempty"`
-	LastAt        string  `json:"last_at,omitempty"`
+	Name           string  `json:"name"`
+	Schedule       string  `json:"schedule"`
+	Parallels      int     `json:"parallels"`
+	Status         string  `json:"status"`
+	ActiveStreams  int     `json:"active_streams,omitempty"`
+	MaxStreams     int     `json:"max_streams,omitempty"`
+	LastStatus     string  `json:"last_status,omitempty"`
+	LastDurationS  float64 `json:"last_duration_s,omitempty"`
+	LastBytes      int64   `json:"last_bytes,omitempty"`
+	LastObjects    int64   `json:"last_objects,omitempty"`
+	LastAt         string  `json:"last_at,omitempty"`
+	HandshakeRttMs float64 `json:"handshake_rtt_ms,omitempty"`
 }
 
 // StatsReporter emite métricas periódicas do daemon no log.
@@ -120,6 +121,9 @@ func (sr *StatsReporter) report() {
 			snap.LastBytes = lastResult.BytesTransferred
 			snap.LastObjects = lastResult.ObjectsCount
 			snap.LastAt = lastResult.Timestamp.Format(time.RFC3339)
+			if lastResult.HandshakeRTT > 0 {
+				snap.HandshakeRttMs = float64(lastResult.HandshakeRTT.Microseconds()) / 1000.0
+			}
 		}
 
 		snapshots = append(snapshots, snap)

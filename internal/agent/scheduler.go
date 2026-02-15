@@ -18,11 +18,12 @@ import (
 
 // BackupJobResult armazena o resultado do último backup de um job.
 type BackupJobResult struct {
-	Status           string    `json:"status"` // "completed", "failed", "skipped"
-	DurationSeconds  float64   `json:"duration_seconds"`
-	BytesTransferred int64     `json:"bytes_transferred"`
-	ObjectsCount     int64     `json:"objects_count"`
-	Timestamp        time.Time `json:"timestamp"`
+	Status           string        `json:"status"` // "completed", "failed", "skipped"
+	DurationSeconds  float64       `json:"duration_seconds"`
+	BytesTransferred int64         `json:"bytes_transferred"`
+	ObjectsCount     int64         `json:"objects_count"`
+	Timestamp        time.Time     `json:"timestamp"`
+	HandshakeRTT     time.Duration `json:"handshake_rtt,omitempty"`
 }
 
 // BackupJob representa um job de backup com guard de execução.
