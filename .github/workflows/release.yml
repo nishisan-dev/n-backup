@@ -55,10 +55,19 @@ jobs:
           chmod +x packaging/build-deb.sh
           bash packaging/build-deb.sh "${VERSION}" "${{ matrix.debarch }}"
 
+      - name: Create fixed-name .deb aliases (for latest download URLs)
+        run: |
+          cd dist
+          VERSION=${GITHUB_REF_NAME#v}
+          cp nbackup-agent_${VERSION}_${{ matrix.debarch }}.deb nbackup-agent_${{ matrix.debarch }}.deb
+          cp nbackup-server_${VERSION}_${{ matrix.debarch }}.deb nbackup-server_${{ matrix.debarch }}.deb
+
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum nbackup-agent-${{ matrix.suffix }} nbackup-server-${{ matrix.suffix }} > checksums-${{ matrix.suffix }}.txt
+          sha256sum nbackup-agent-${{ matrix.suffix }} nbackup-server-${{ matrix.suffix }} \
+                    nbackup-agent_${{ matrix.debarch }}.deb nbackup-server_${{ matrix.debarch }}.deb \
+                    > checksums-${{ matrix.suffix }}.txt
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -69,6 +78,8 @@ jobs:
             dist/nbackup-server-${{ matrix.suffix }}
             dist/nbackup-agent_*_${{ matrix.debarch }}.deb
             dist/nbackup-server_*_${{ matrix.debarch }}.deb
+            dist/nbackup-agent_${{ matrix.debarch }}.deb
+            dist/nbackup-server_${{ matrix.debarch }}.deb
             dist/checksums-${{ matrix.suffix }}.txt
             dist/checksums-deb-${{ matrix.debarch }}.txt
 

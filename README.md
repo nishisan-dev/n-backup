@@ -61,16 +61,16 @@ Baixe o pacote `.deb` da [página de Releases](https://github.com/nishisan-dev/n
 
 ```bash
 # amd64
-wget https://github.com/nishisan-dev/n-backup/releases/latest/download/nbackup-agent_<VERSION>_amd64.deb
-wget https://github.com/nishisan-dev/n-backup/releases/latest/download/nbackup-server_<VERSION>_amd64.deb
+wget https://github.com/nishisan-dev/n-backup/releases/latest/download/nbackup-agent_amd64.deb
+wget https://github.com/nishisan-dev/n-backup/releases/latest/download/nbackup-server_amd64.deb
 
 # arm64
-wget https://github.com/nishisan-dev/n-backup/releases/latest/download/nbackup-agent_<VERSION>_arm64.deb
-wget https://github.com/nishisan-dev/n-backup/releases/latest/download/nbackup-server_<VERSION>_arm64.deb
+wget https://github.com/nishisan-dev/n-backup/releases/latest/download/nbackup-agent_arm64.deb
+wget https://github.com/nishisan-dev/n-backup/releases/latest/download/nbackup-server_arm64.deb
 
 # Instalar
-sudo dpkg -i nbackup-agent_<VERSION>_amd64.deb
-sudo dpkg -i nbackup-server_<VERSION>_amd64.deb
+sudo dpkg -i nbackup-agent_amd64.deb
+sudo dpkg -i nbackup-server_amd64.deb
 ```
 
 O pacote `.deb` inclui:
@@ -276,10 +276,10 @@ Cada release inclui:
 | `nbackup-agent-linux-arm64` | Binário estático (arm64) |
 | `nbackup-server-linux-amd64` | Binário estático (amd64) |
 | `nbackup-server-linux-arm64` | Binário estático (arm64) |
-| `nbackup-agent_<ver>_amd64.deb` | Pacote Debian (amd64) — inclui systemd + man page |
-| `nbackup-agent_<ver>_arm64.deb` | Pacote Debian (arm64) — inclui systemd + man page |
-| `nbackup-server_<ver>_amd64.deb` | Pacote Debian (amd64) — inclui systemd + man page |
-| `nbackup-server_<ver>_arm64.deb` | Pacote Debian (arm64) — inclui systemd + man page |
+| `nbackup-agent_amd64.deb` | Pacote Debian (amd64) — nome fixo para `latest` URL |
+| `nbackup-agent_arm64.deb` | Pacote Debian (arm64) — nome fixo para `latest` URL |
+| `nbackup-server_amd64.deb` | Pacote Debian (amd64) — nome fixo para `latest` URL |
+| `nbackup-server_arm64.deb` | Pacote Debian (arm64) — nome fixo para `latest` URL |
 | `checksums.txt` | SHA-256 de todos os artefatos |
 
 ---
