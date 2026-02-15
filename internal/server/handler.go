@@ -972,9 +972,7 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 	// --- Cancelamento da goroutine anterior (proteção contra goroutine leak) ---
 	// Se este stream já foi conectado antes (re-join), cancela o contexto da goroutine
 	// anterior para que ela saia imediatamente em vez de esperar o read timeout.
-	isReJoin := false
 	if oldCancel, loaded := pSession.StreamCancels.Load(pj.StreamIndex); loaded {
-		isReJoin = true
 		logger.Info("cancelling previous stream goroutine for re-join", "stream", pj.StreamIndex)
 		oldCancel.(context.CancelFunc)()
 	}
@@ -1016,12 +1014,12 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 	streamCtx, streamCancel := context.WithCancel(ctx)
 	pSession.StreamCancels.Store(pj.StreamIndex, streamCancel)
 
-	// StreamWg.Add(1) apenas na PRIMEIRA conexão deste stream.
-	// Em re-join, a goroutine anterior vai fazer Done() quando detectar o cancelamento,
-	// compensando o Add(1) original. A nova goroutine herda o mesmo slot.
-	if !isReJoin {
-		pSession.StreamWg.Add(1)
-	}
+	// StreamWg.Add(1) SEMPRE — cada goroutine (inclusive a cancelada por re-join)
+	// faz exatamente um Done(). Com cancelamento via contexto, a goroutine antiga
+	// sai rapidamente, então o counter fica consistente:
+	//   join:    Add(1) → counter=1 → Done() → counter=0
+	//   re-join: Add(1) → counter=2 → old Done() → counter=1 → new Done() → counter=0
+	pSession.StreamWg.Add(1)
 
 	// Recebe dados do stream com ChunkHeader framing
 	bytesReceived, err := h.receiveParallelStream(streamCtx, conn, conn, conn, pj.StreamIndex, pSession, logger)

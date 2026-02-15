@@ -14,6 +14,11 @@ import (
 	"sync"
 )
 
+// maxChunkLength é o tamanho máximo aceitável de um chunk.
+// Protege contra headers malformados que poderiam causar OOM.
+// O valor é 2x o ChunkSize máximo configurável (16MB) como margem.
+const maxChunkLength = 32 * 1024 * 1024 // 32MB
+
 // ChunkAssembler gerencia chunks de streams paralelos por sessão.
 // Implementa escrita incremental: chunks in-order são escritos direto no arquivo final.
 // Chunks out-of-order são bufferizados em arquivos temporários individuais e
@@ -72,6 +77,11 @@ func NewChunkAssembler(sessionID, agentDir string, logger *slog.Logger) (*ChunkA
 // - Se globalSeq == nextExpectedSeq → escreve direto no arquivo de saída + flush pendentes.
 // - Se globalSeq > nextExpectedSeq → bufferiza em arquivo temporário (out-of-order).
 func (ca *ChunkAssembler) WriteChunk(globalSeq uint32, data io.Reader, length int64) error {
+	// Proteção contra OOM: rejeita chunks com tamanho absurdo (header malformado).
+	if length <= 0 || length > maxChunkLength {
+		return fmt.Errorf("chunk seq %d has invalid length %d (max %d)", globalSeq, length, maxChunkLength)
+	}
+
 	// Lê dados do TCP FORA do lock — operação potencialmente lenta.
 	// Isso desacopla o I/O de rede do mutex, evitando que um stream lento
 	// bloqueie todos os outros streams que tentam escrever.
@@ -167,6 +177,10 @@ func (ca *ChunkAssembler) saveOutOfOrder(globalSeq uint32, data []byte) error {
 	if err != nil {
 		os.Remove(path)
 		return fmt.Errorf("writing out-of-order chunk seq %d: %w", globalSeq, err)
+	}
+	if n != len(data) {
+		os.Remove(path)
+		return fmt.Errorf("short write on out-of-order chunk seq %d: wrote %d of %d bytes", globalSeq, n, len(data))
 	}
 
 	ca.pendingChunks[globalSeq] = pendingChunk{filePath: path, length: int64(n)}
