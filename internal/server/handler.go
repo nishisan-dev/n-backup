@@ -38,6 +38,7 @@ type PartialSession struct {
 	BackupName   string
 	BaseDir      string
 	CreatedAt    time.Time
+	LastActivity atomic.Int64 // UnixNano do último I/O bem-sucedido
 }
 
 // Handler processa conexões individuais de backup.
@@ -251,14 +252,16 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	}
 
 	// Registra sessão parcial
+	now := time.Now()
 	session := &PartialSession{
 		TmpPath:     tmpPath,
 		AgentName:   agentName,
 		StorageName: storageName,
 		BackupName:  backupName,
 		BaseDir:     storageInfo.BaseDir,
-		CreatedAt:   time.Now(),
+		CreatedAt:   now,
 	}
+	session.LastActivity.Store(now.UnixNano())
 	h.sessions.Store(sessionID, session)
 	defer h.sessions.Delete(sessionID) // limpa quando terminar com sucesso
 
@@ -399,6 +402,7 @@ func (h *Handler) receiveWithSACK(ctx context.Context, reader io.Reader, sackWri
 			}
 			bytesReceived += int64(n)
 			session.BytesWritten += int64(n)
+			session.LastActivity.Store(time.Now().UnixNano())
 			h.TrafficIn.Add(int64(n))
 			h.DiskWrite.Add(int64(n))
 
@@ -634,27 +638,33 @@ func generateSessionID() string {
 }
 
 // CleanupExpiredSessions remove sessões parciais expiradas e seus arquivos .tmp.
+// O critério de expiração é baseado em LastActivity (último I/O bem-sucedido),
+// não em CreatedAt, para evitar matar sessões ativas com backups grandes.
 func CleanupExpiredSessions(sessions *sync.Map, ttl time.Duration, logger *slog.Logger) {
 	sessions.Range(func(key, value any) bool {
 		switch s := value.(type) {
 		case *PartialSession:
-			if time.Since(s.CreatedAt) > ttl {
+			lastAct := time.Unix(0, s.LastActivity.Load())
+			if time.Since(lastAct) > ttl {
 				logger.Info("cleaning expired session",
 					"session", key,
 					"agent", s.AgentName,
 					"storage", s.StorageName,
 					"age", time.Since(s.CreatedAt).Round(time.Second),
+					"idle", time.Since(lastAct).Round(time.Second),
 				)
 				os.Remove(s.TmpPath)
 				sessions.Delete(key)
 			}
 		case *ParallelSession:
-			if time.Since(s.CreatedAt) > ttl {
+			lastAct := time.Unix(0, s.LastActivity.Load())
+			if time.Since(lastAct) > ttl {
 				logger.Info("cleaning expired parallel session",
 					"session", key,
 					"agent", s.AgentName,
 					"storage", s.StorageName,
 					"age", time.Since(s.CreatedAt).Round(time.Second),
+					"idle", time.Since(lastAct).Round(time.Second),
 				)
 				s.Assembler.Cleanup()
 				sessions.Delete(key)
@@ -682,6 +692,7 @@ type ParallelSession struct {
 	streamReadyOnce sync.Once      // garante close único do StreamReady
 	Done            chan struct{}  // sinaliza conclusão
 	CreatedAt       time.Time
+	LastActivity    atomic.Int64 // UnixNano do último I/O bem-sucedido
 }
 
 // handleParallelBackup processa um backup paralelo.
@@ -711,6 +722,7 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	defer assembler.Cleanup()
 
 	// Registra sessão paralela para que handleParallelJoin possa encontrar
+	now := time.Now()
 	pSession := &ParallelSession{
 		SessionID:   sessionID,
 		Assembler:   assembler,
@@ -723,8 +735,9 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		ChunkSize:   pi.ChunkSize,
 		StreamReady: make(chan struct{}),
 		Done:        make(chan struct{}),
-		CreatedAt:   time.Now(),
+		CreatedAt:   now,
 	}
+	pSession.LastActivity.Store(now.UnixNano())
 	h.sessions.Store(sessionID, pSession)
 	defer h.sessions.Delete(sessionID)
 
@@ -812,6 +825,7 @@ func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, read
 		}
 
 		bytesReceived += int64(hdr.Length)
+		session.LastActivity.Store(time.Now().UnixNano())
 		h.TrafficIn.Add(int64(hdr.Length))
 		h.DiskWrite.Add(int64(hdr.Length))
 

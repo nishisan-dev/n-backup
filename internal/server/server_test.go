@@ -187,30 +187,34 @@ func TestCleanupExpiredSessions_MixedTypes(t *testing.T) {
 
 	sessions := &sync.Map{}
 
-	// PartialSession expirada (2h atrás)
-	sessions.Store("partial-expired", &PartialSession{
+	// PartialSession expirada (2h atrás, sem atividade recente)
+	expiredPartial := &PartialSession{
 		TmpPath:     tmpPath,
 		AgentName:   "agent-a",
 		StorageName: "storage-a",
 		BaseDir:     dir,
 		CreatedAt:   time.Now().Add(-2 * time.Hour),
-	})
+	}
+	expiredPartial.LastActivity.Store(time.Now().Add(-2 * time.Hour).UnixNano())
+	sessions.Store("partial-expired", expiredPartial)
 
 	// PartialSession fresh (agora)
-	sessions.Store("partial-fresh", &PartialSession{
+	freshPartial := &PartialSession{
 		TmpPath:     filepath.Join(dir, "fresh.tmp"),
 		AgentName:   "agent-b",
 		StorageName: "storage-b",
 		BaseDir:     dir,
 		CreatedAt:   time.Now(),
-	})
+	}
+	freshPartial.LastActivity.Store(time.Now().UnixNano())
+	sessions.Store("partial-fresh", freshPartial)
 
-	// ParallelSession expirada (2h atrás) — esta causava o panic antes do fix
+	// ParallelSession expirada (2h atrás, sem atividade recente)
 	assembler, err := NewChunkAssembler("par-expired", dir, logger)
 	if err != nil {
 		t.Fatalf("NewChunkAssembler: %v", err)
 	}
-	sessions.Store("parallel-expired", &ParallelSession{
+	expiredParallel := &ParallelSession{
 		SessionID:   "par-expired",
 		Assembler:   assembler,
 		AgentName:   "agent-c",
@@ -218,14 +222,16 @@ func TestCleanupExpiredSessions_MixedTypes(t *testing.T) {
 		MaxStreams:  4,
 		Done:        make(chan struct{}),
 		CreatedAt:   time.Now().Add(-2 * time.Hour),
-	})
+	}
+	expiredParallel.LastActivity.Store(time.Now().Add(-2 * time.Hour).UnixNano())
+	sessions.Store("parallel-expired", expiredParallel)
 
 	// ParallelSession fresh (agora)
 	assembler2, err := NewChunkAssembler("par-fresh", dir, logger)
 	if err != nil {
 		t.Fatalf("NewChunkAssembler: %v", err)
 	}
-	sessions.Store("parallel-fresh", &ParallelSession{
+	freshParallel := &ParallelSession{
 		SessionID:   "par-fresh",
 		Assembler:   assembler2,
 		AgentName:   "agent-d",
@@ -233,7 +239,9 @@ func TestCleanupExpiredSessions_MixedTypes(t *testing.T) {
 		MaxStreams:  4,
 		Done:        make(chan struct{}),
 		CreatedAt:   time.Now(),
-	})
+	}
+	freshParallel.LastActivity.Store(time.Now().UnixNano())
+	sessions.Store("parallel-fresh", freshParallel)
 
 	// Deve NÃO dar panic
 	CleanupExpiredSessions(sessions, 1*time.Hour, logger)
@@ -257,5 +265,59 @@ func TestCleanupExpiredSessions_MixedTypes(t *testing.T) {
 	// Verifica que o tmp file da partial expirada foi removido
 	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
 		t.Error("expired tmp file should have been removed")
+	}
+}
+
+// TestCleanupExpiredSessions_ActiveSessionNotCleaned verifica que uma sessão
+// com CreatedAt antigo mas LastActivity recente NÃO é limpa.
+// Este é o cenário exato do bug: backup de ~42 GB levou >1h mas estava ativo.
+func TestCleanupExpiredSessions_ActiveSessionNotCleaned(t *testing.T) {
+	dir := t.TempDir()
+	logger := slog.Default()
+
+	sessions := &sync.Map{}
+
+	// PartialSession criada 2h atrás, mas com atividade 10s atrás
+	activePartial := &PartialSession{
+		TmpPath:     filepath.Join(dir, "active.tmp"),
+		AgentName:   "agent-active",
+		StorageName: "storage-active",
+		BaseDir:     dir,
+		CreatedAt:   time.Now().Add(-2 * time.Hour),
+	}
+	activePartial.LastActivity.Store(time.Now().Add(-10 * time.Second).UnixNano())
+	os.WriteFile(activePartial.TmpPath, []byte("active data"), 0644)
+	sessions.Store("partial-active", activePartial)
+
+	// ParallelSession criada 3h atrás, mas com atividade 5s atrás
+	assembler, err := NewChunkAssembler("par-active", dir, logger)
+	if err != nil {
+		t.Fatalf("NewChunkAssembler: %v", err)
+	}
+	activeParallel := &ParallelSession{
+		SessionID:   "par-active",
+		Assembler:   assembler,
+		AgentName:   "agent-par-active",
+		StorageName: "storage-par-active",
+		MaxStreams:  12,
+		Done:        make(chan struct{}),
+		CreatedAt:   time.Now().Add(-3 * time.Hour),
+	}
+	activeParallel.LastActivity.Store(time.Now().Add(-5 * time.Second).UnixNano())
+	sessions.Store("parallel-active", activeParallel)
+
+	// Cleanup com TTL de 1h — NÃO deve limpar nenhuma sessão
+	CleanupExpiredSessions(sessions, 1*time.Hour, logger)
+
+	if _, ok := sessions.Load("partial-active"); !ok {
+		t.Error("partial-active should NOT have been cleaned (LastActivity is recent)")
+	}
+	if _, ok := sessions.Load("parallel-active"); !ok {
+		t.Error("parallel-active should NOT have been cleaned (LastActivity is recent)")
+	}
+
+	// Verifica que o tmp file da partial ativa NÃO foi removido
+	if _, err := os.Stat(activePartial.TmpPath); os.IsNotExist(err) {
+		t.Error("active tmp file should NOT have been removed")
 	}
 }
