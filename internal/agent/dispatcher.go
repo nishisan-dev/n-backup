@@ -21,7 +21,9 @@ import (
 
 const (
 	// writeDeadline é o timeout aplicado a cada conn.Write para detectar conexões half-open.
-	writeDeadline = 2 * time.Minute
+	// Deve ser compatível com o streamReadDeadline do server (30s) para que falhas
+	// sejam detectadas rapidamente em ambos os lados.
+	writeDeadline = 30 * time.Second
 
 	// maxRetriesPerStream é o número máximo de tentativas de reconexão por stream.
 	maxRetriesPerStream = 5

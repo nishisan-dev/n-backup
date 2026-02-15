@@ -25,9 +25,17 @@ import (
 // sackInterval define a cada quantos bytes o server envia um SACK.
 const sackInterval = 64 * 1024 * 1024 // 64MB
 
-// readInactivityTimeout é o tempo máximo de inatividade na leitura de dados.
+// readInactivityTimeout é o tempo máximo de inatividade na leitura de dados (single-stream).
 // Se expirar, a conexão é considerada morta e a goroutine é liberada.
-const readInactivityTimeout = 5 * time.Minute
+const readInactivityTimeout = 90 * time.Second
+
+// streamReadDeadline é o deadline de read para streams paralelos.
+// Menor que readInactivityTimeout porque streams paralelos têm reconexão automática:
+// quanto mais rápido detectar a falha, mais rápido o agent pode reconectar.
+const streamReadDeadline = 30 * time.Second
+
+// sackWriteTimeout é o deadline de write para envio de SACKs/ChunkSACKs.
+const sackWriteTimeout = 10 * time.Second
 
 // PartialSession rastreia um backup parcial para resume.
 type PartialSession struct {
@@ -744,6 +752,7 @@ type ParallelSession struct {
 	StreamOffsets   sync.Map // streamIndex (uint8) → *int64 (completed bytes, atômico)
 	StreamTrafficIn sync.Map // streamIndex (uint8) → *atomic.Int64 (bytes recebidos no intervalo, para stats por stream)
 	StreamLastAct   sync.Map // streamIndex (uint8) → *atomic.Int64 (UnixNano último I/O deste stream)
+	StreamCancels   sync.Map // streamIndex (uint8) → context.CancelFunc (cancela goroutine anterior em re-join)
 	MaxStreams      uint8
 	ChunkSize       uint32
 	StreamWg        sync.WaitGroup // barreira para todos os streams
@@ -851,7 +860,7 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 // Cada chunk é precedido por um ChunkHeader (8B: GlobalSeq uint32 + Length uint32).
 // Os dados são escritos incrementalmente no assembler, que decide se escreve direto
 // no arquivo final (in-order) ou bufferiza temporariamente (out-of-order).
-// O stream termina com EOF (CloseWrite do agent) ou io.EOF no reader.
+// O stream termina com EOF (CloseWrite do agent), io.EOF no reader, ou cancelamento do ctx.
 // Atualiza StreamOffsets atomicamente após cada chunk completo para suporte a resume.
 func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, reader io.Reader, sackWriter io.Writer, streamIndex uint8, session *ParallelSession, logger *slog.Logger) (int64, error) {
 	var bytesReceived int64
@@ -866,8 +875,17 @@ func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, read
 	}
 
 	for {
-		// Sliding read deadline: previne goroutine leak em conexões half-open.
-		conn.SetReadDeadline(time.Now().Add(readInactivityTimeout))
+		// Verifica cancelamento do contexto (ex: re-join de outro stream com mesmo index)
+		select {
+		case <-ctx.Done():
+			logger.Info("stream context cancelled", "stream", streamIndex, "bytes", bytesReceived)
+			return bytesReceived, ctx.Err()
+		default:
+		}
+
+		// Sliding read deadline com timeout curto para streams paralelos.
+		// Quanto menor o deadline, mais rápido o agent detecta a falha e reconecta.
+		conn.SetReadDeadline(time.Now().Add(streamReadDeadline))
 
 		// Lê ChunkHeader (8 bytes: GlobalSeq + Length)
 		hdr, err := protocol.ReadChunkHeader(reader)
@@ -900,7 +918,10 @@ func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, read
 		// Atualiza offset atômico — usado por handleParallelJoin para resume
 		atomic.StoreInt64(offsetPtr, bytesReceived)
 
-		// Envia ChunkSACK
+		// Envia ChunkSACK com write timeout para não bloquear se a conn está morta
+		if netConn, ok := sackWriter.(net.Conn); ok {
+			netConn.SetWriteDeadline(time.Now().Add(sackWriteTimeout))
+		}
 		localChunkSeq++
 		if sErr := protocol.WriteChunkSACK(sackWriter, streamIndex, localChunkSeq, uint64(bytesReceived)); sErr != nil {
 			logger.Warn("failed to send ChunkSACK", "error", sErr, "stream", streamIndex, "seq", localChunkSeq)
@@ -913,7 +934,8 @@ func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, read
 }
 
 // handleParallelJoin processa uma conexão secundária de ParallelJoin.
-// Suporta re-join: se o stream já foi conectado antes, responde com lastOffset para resume.
+// Suporta re-join: se o stream já foi conectado antes, cancela a goroutine anterior,
+// fecha a conexão antiga, e inicia nova goroutine usando o mesmo slot do StreamWg.
 func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger *slog.Logger) {
 	// O magic "PJIN" já foi lido pelo HandleConnection
 	pj, err := protocol.ReadParallelJoin(conn)
@@ -947,6 +969,21 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 		return
 	}
 
+	// --- Cancelamento da goroutine anterior (proteção contra goroutine leak) ---
+	// Se este stream já foi conectado antes (re-join), cancela o contexto da goroutine
+	// anterior para que ela saia imediatamente em vez de esperar o read timeout.
+	isReJoin := false
+	if oldCancel, loaded := pSession.StreamCancels.Load(pj.StreamIndex); loaded {
+		isReJoin = true
+		logger.Info("cancelling previous stream goroutine for re-join", "stream", pj.StreamIndex)
+		oldCancel.(context.CancelFunc)()
+	}
+
+	// Fecha a conexão anterior para desbloquear reads pendentes
+	if oldConn, loaded := pSession.StreamConns.Load(pj.StreamIndex); loaded {
+		oldConn.(net.Conn).Close()
+	}
+
 	// Verifica se é re-join (stream já conectou antes) — resume offset
 	var lastOffset uint64
 	if raw, ok := pSession.StreamOffsets.Load(pj.StreamIndex); ok {
@@ -974,14 +1011,28 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 	// Sinaliza que pelo menos 1 stream conectou
 	pSession.streamReadyOnce.Do(func() { close(pSession.StreamReady) })
 
-	// Adiciona ao WaitGroup antes de receber dados
-	pSession.StreamWg.Add(1)
+	// Cria contexto cancelável para esta goroutine específica.
+	// Será cancelado se outro re-join chegar para o mesmo stream index.
+	streamCtx, streamCancel := context.WithCancel(ctx)
+	pSession.StreamCancels.Store(pj.StreamIndex, streamCancel)
+
+	// StreamWg.Add(1) apenas na PRIMEIRA conexão deste stream.
+	// Em re-join, a goroutine anterior vai fazer Done() quando detectar o cancelamento,
+	// compensando o Add(1) original. A nova goroutine herda o mesmo slot.
+	if !isReJoin {
+		pSession.StreamWg.Add(1)
+	}
 
 	// Recebe dados do stream com ChunkHeader framing
-	bytesReceived, err := h.receiveParallelStream(ctx, conn, conn, conn, pj.StreamIndex, pSession, logger)
+	bytesReceived, err := h.receiveParallelStream(streamCtx, conn, conn, conn, pj.StreamIndex, pSession, logger)
 	pSession.StreamWg.Done()
 
 	if err != nil {
+		// context.Canceled é esperado em re-join — não é um erro real
+		if ctx.Err() == nil && streamCtx.Err() == context.Canceled {
+			logger.Info("parallel stream replaced by re-join", "bytes", bytesReceived)
+			return
+		}
 		logger.Error("receiving parallel stream", "error", err, "bytes", bytesReceived)
 		return
 	}

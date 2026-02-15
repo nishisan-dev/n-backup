@@ -67,19 +67,29 @@ func NewChunkAssembler(sessionID, agentDir string, logger *slog.Logger) (*ChunkA
 }
 
 // WriteChunk recebe um chunk com sua sequência global e dados.
+// IMPORTANT: lê os dados do reader FORA do mutex para evitar que I/O TCP lento
+// bloqueie o assembler inteiro. Apenas a escrita local (memória/disco) é protegida.
 // - Se globalSeq == nextExpectedSeq → escreve direto no arquivo de saída + flush pendentes.
 // - Se globalSeq > nextExpectedSeq → bufferiza em arquivo temporário (out-of-order).
 func (ca *ChunkAssembler) WriteChunk(globalSeq uint32, data io.Reader, length int64) error {
+	// Lê dados do TCP FORA do lock — operação potencialmente lenta.
+	// Isso desacopla o I/O de rede do mutex, evitando que um stream lento
+	// bloqueie todos os outros streams que tentam escrever.
+	buf := make([]byte, length)
+	if _, err := io.ReadFull(data, buf); err != nil {
+		return fmt.Errorf("reading chunk seq %d from stream: %w", globalSeq, err)
+	}
+
 	ca.mu.Lock()
 	defer ca.mu.Unlock()
 
 	if globalSeq == ca.nextExpectedSeq {
-		// In-order: escreve direto no arquivo de saída
-		n, err := io.CopyN(ca.outBuf, data, length)
+		// In-order: escreve direto no arquivo de saída (operação local, rápida)
+		n, err := ca.outBuf.Write(buf)
 		if err != nil {
 			return fmt.Errorf("writing chunk seq %d to output: %w", globalSeq, err)
 		}
-		ca.totalBytes += n
+		ca.totalBytes += int64(n)
 		ca.nextExpectedSeq++
 
 		ca.logger.Debug("chunk written in-order", "globalSeq", globalSeq, "bytes", n)
@@ -89,15 +99,13 @@ func (ca *ChunkAssembler) WriteChunk(globalSeq uint32, data io.Reader, length in
 	}
 
 	if globalSeq < ca.nextExpectedSeq {
-		// Chunk duplicado ou atrasado — ignora
+		// Chunk duplicado ou atrasado — ignora (dados já foram lidos acima, sem leak)
 		ca.logger.Warn("ignoring duplicate/late chunk", "globalSeq", globalSeq, "expected", ca.nextExpectedSeq)
-		// Drain os dados para não travar o caller
-		io.Copy(io.Discard, io.LimitReader(data, length))
 		return nil
 	}
 
 	// Out-of-order: salva em arquivo temporário
-	return ca.saveOutOfOrder(globalSeq, data, length)
+	return ca.saveOutOfOrder(globalSeq, buf)
 }
 
 // flushPending descarrega chunks pendentes contíguos no arquivo de saída.
@@ -135,8 +143,9 @@ func (ca *ChunkAssembler) flushPending() error {
 }
 
 // saveOutOfOrder salva um chunk out-of-order em arquivo temporário.
+// Recebe os dados já materializados em memória (lidos fora do mutex).
 // Deve ser chamado com ca.mu held.
-func (ca *ChunkAssembler) saveOutOfOrder(globalSeq uint32, data io.Reader, length int64) error {
+func (ca *ChunkAssembler) saveOutOfOrder(globalSeq uint32, data []byte) error {
 	// Lazy creation do diretório de chunks
 	if !ca.chunkDirExists {
 		if err := os.MkdirAll(ca.chunkDir, 0755); err != nil {
@@ -153,14 +162,14 @@ func (ca *ChunkAssembler) saveOutOfOrder(globalSeq uint32, data io.Reader, lengt
 		return fmt.Errorf("creating out-of-order chunk file seq %d: %w", globalSeq, err)
 	}
 
-	n, err := io.CopyN(f, data, length)
+	n, err := f.Write(data)
 	f.Close()
 	if err != nil {
 		os.Remove(path)
 		return fmt.Errorf("writing out-of-order chunk seq %d: %w", globalSeq, err)
 	}
 
-	ca.pendingChunks[globalSeq] = pendingChunk{filePath: path, length: n}
+	ca.pendingChunks[globalSeq] = pendingChunk{filePath: path, length: int64(n)}
 	ca.logger.Debug("chunk saved out-of-order", "globalSeq", globalSeq, "bytes", n, "pending", len(ca.pendingChunks))
 
 	return nil
