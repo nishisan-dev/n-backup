@@ -81,9 +81,10 @@ type ResumeConfig struct {
 
 // LoggingInfo contém configurações de logging.
 type LoggingInfo struct {
-	Level  string `yaml:"level"`
-	Format string `yaml:"format"`
-	File   string `yaml:"file"` // Caminho para arquivo de log (ex: /var/log/nbackup/agent.log)
+	Level       string `yaml:"level"`
+	Format      string `yaml:"format"`
+	File        string `yaml:"file"`         // Caminho para arquivo de log (ex: /var/log/nbackup/agent.log)
+	StreamStats bool   `yaml:"stream_stats"` // Habilita stats por stream em sessões paralelas (padrão: false)
 }
 
 // LoadAgentConfig lê e valida o arquivo YAML de configuração do agent.

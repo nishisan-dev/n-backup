@@ -22,3 +22,4 @@ logging:
   level: info                      # debug, info, warn, error
   format: json                     # json, text
   file: /var/log/nbackup/server.log # Log file dedicado (opcional)
+  stream_stats: false              # Per-stream stats em sessões paralelas (padrão: false)

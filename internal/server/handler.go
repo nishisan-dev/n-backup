@@ -66,6 +66,7 @@ func NewHandler(cfg *config.ServerConfig, logger *slog.Logger, locks *sync.Map, 
 
 // StartStatsReporter imprime métricas do server a cada 15 segundos:
 // conexões ativas, traffic in (MB/s), disk write (MB/s), sessões abertas.
+// Quando logging.stream_stats=true, imprime também stats por stream.
 func (h *Handler) StartStatsReporter(ctx context.Context) {
 	const interval = 15 * time.Second
 	ticker := time.NewTicker(interval)
@@ -101,8 +102,64 @@ func (h *Handler) StartStatsReporter(ctx context.Context) {
 				"traffic_in_total_MB", fmt.Sprintf("%.1f", float64(trafficIn)/(1024*1024)),
 				"disk_write_total_MB", fmt.Sprintf("%.1f", float64(diskWrite)/(1024*1024)),
 			)
+
+			// Per-stream stats (configurável)
+			if h.cfg.Logging.StreamStats {
+				h.logPerStreamStats(secs)
+			}
 		}
 	}
+}
+
+// streamStat representa stats de um único stream para log estruturado.
+type streamStat struct {
+	Idx     uint8  `json:"idx"`
+	MBps    string `json:"MBps"`
+	IdleSec int64  `json:"idle_s"`
+}
+
+// logPerStreamStats itera sessões paralelas e loga stats por stream.
+func (h *Handler) logPerStreamStats(intervalSecs float64) {
+	h.sessions.Range(func(key, value any) bool {
+		ps, ok := value.(*ParallelSession)
+		if !ok {
+			return true // pula PartialSession
+		}
+
+		var stats []streamStat
+		ps.StreamTrafficIn.Range(func(k, v any) bool {
+			idx := k.(uint8)
+			counter := v.(*atomic.Int64)
+			// Swap-and-reset: lê bytes do intervalo e zera
+			bytes := counter.Swap(0)
+			mbps := float64(bytes) / intervalSecs / (1024 * 1024)
+
+			var idleSec int64
+			if lastAct, ok := ps.StreamLastAct.Load(idx); ok {
+				lastNano := lastAct.(*atomic.Int64).Load()
+				if lastNano > 0 {
+					idleSec = int64(time.Since(time.Unix(0, lastNano)).Seconds())
+				}
+			}
+
+			stats = append(stats, streamStat{
+				Idx:     idx,
+				MBps:    fmt.Sprintf("%.2f", mbps),
+				IdleSec: idleSec,
+			})
+			return true
+		})
+
+		if len(stats) > 0 {
+			h.logger.Info("stream stats",
+				"session", key,
+				"agent", ps.AgentName,
+				"streams", len(stats),
+				"detail", stats,
+			)
+		}
+		return true
+	})
 }
 
 // HandleConnection processa uma conexão individual de backup.
@@ -685,6 +742,8 @@ type ParallelSession struct {
 	BackupName      string
 	StreamConns     sync.Map // streamIndex (uint8) → net.Conn
 	StreamOffsets   sync.Map // streamIndex (uint8) → *int64 (completed bytes, atômico)
+	StreamTrafficIn sync.Map // streamIndex (uint8) → *atomic.Int64 (bytes recebidos no intervalo, para stats por stream)
+	StreamLastAct   sync.Map // streamIndex (uint8) → *atomic.Int64 (UnixNano último I/O deste stream)
 	MaxStreams      uint8
 	ChunkSize       uint32
 	StreamWg        sync.WaitGroup // barreira para todos os streams
@@ -824,10 +883,19 @@ func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, read
 			return bytesReceived, fmt.Errorf("writing chunk seq %d to assembler: %w", hdr.GlobalSeq, err)
 		}
 
+		nowNano := time.Now().UnixNano()
 		bytesReceived += int64(hdr.Length)
-		session.LastActivity.Store(time.Now().UnixNano())
+		session.LastActivity.Store(nowNano)
 		h.TrafficIn.Add(int64(hdr.Length))
 		h.DiskWrite.Add(int64(hdr.Length))
+
+		// Per-stream stats: incrementa tráfego e atualiza last activity
+		if counter, ok := session.StreamTrafficIn.Load(streamIndex); ok {
+			counter.(*atomic.Int64).Add(int64(hdr.Length))
+		}
+		if lastAct, ok := session.StreamLastAct.Load(streamIndex); ok {
+			lastAct.(*atomic.Int64).Store(nowNano)
+		}
 
 		// Atualiza offset atômico — usado por handleParallelJoin para resume
 		atomic.StoreInt64(offsetPtr, bytesReceived)
@@ -894,6 +962,14 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 
 	// Registra conexão do stream
 	pSession.StreamConns.Store(pj.StreamIndex, conn)
+
+	// Inicializa counters per-stream para stats
+	nowNano := time.Now().UnixNano()
+	trafficCounter := &atomic.Int64{}
+	pSession.StreamTrafficIn.LoadOrStore(pj.StreamIndex, trafficCounter)
+	lastActCounter := &atomic.Int64{}
+	lastActCounter.Store(nowNano)
+	pSession.StreamLastAct.LoadOrStore(pj.StreamIndex, lastActCounter)
 
 	// Sinaliza que pelo menos 1 stream conectou
 	pSession.streamReadyOnce.Do(func() { close(pSession.StreamReady) })
