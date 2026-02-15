@@ -7,16 +7,28 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 // ServerConfig representa a configuração completa do nbackup-server.
 type ServerConfig struct {
-	Server   ServerListen           `yaml:"server"`
-	TLS      TLSServer              `yaml:"tls"`
-	Storages map[string]StorageInfo `yaml:"storages"`
-	Logging  LoggingInfo            `yaml:"logging"`
+	Server       ServerListen           `yaml:"server"`
+	TLS          TLSServer              `yaml:"tls"`
+	Storages     map[string]StorageInfo `yaml:"storages"`
+	Logging      LoggingInfo            `yaml:"logging"`
+	FlowRotation FlowRotationConfig     `yaml:"flow_rotation"`
+}
+
+// FlowRotationConfig configura a rotação automática de flows degradados.
+// Quando habilitada, o server fecha conexões de streams com throughput abaixo
+// do threshold por tempo prolongado, forçando o agent a reconectar com nova source port.
+type FlowRotationConfig struct {
+	Enabled    bool          `yaml:"enabled"`     // default: false
+	MinMBps    float64       `yaml:"min_mbps"`    // threshold em MB/s (default: 1.0)
+	EvalWindow time.Duration `yaml:"eval_window"` // janela de avaliação (default: 60m)
+	Cooldown   time.Duration `yaml:"cooldown"`    // cooldown entre rotações (default: 15m)
 }
 
 // ServerListen contém o endereço de escuta do server.
@@ -93,5 +105,19 @@ func (c *ServerConfig) validate() error {
 	if c.Logging.Format == "" {
 		c.Logging.Format = "json"
 	}
+
+	// Flow Rotation defaults
+	if c.FlowRotation.Enabled {
+		if c.FlowRotation.MinMBps <= 0 {
+			c.FlowRotation.MinMBps = 1.0
+		}
+		if c.FlowRotation.EvalWindow <= 0 {
+			c.FlowRotation.EvalWindow = 60 * time.Minute
+		}
+		if c.FlowRotation.Cooldown <= 0 {
+			c.FlowRotation.Cooldown = 15 * time.Minute
+		}
+	}
+
 	return nil
 }

@@ -115,6 +115,11 @@ func (h *Handler) StartStatsReporter(ctx context.Context) {
 			if h.cfg.Logging.StreamStats {
 				h.logPerStreamStats(secs)
 			}
+
+			// Flow Rotation: avalia streams degradados
+			if h.cfg.FlowRotation.Enabled {
+				h.evaluateFlowRotation(secs)
+			}
 		}
 	}
 }
@@ -166,6 +171,70 @@ func (h *Handler) logPerStreamStats(intervalSecs float64) {
 				"detail", stats,
 			)
 		}
+		return true
+	})
+}
+
+// evaluateFlowRotation verifica se streams estão com throughput abaixo do threshold
+// e fecha a conexão dos degradados para forçar reconexão com nova source port.
+func (h *Handler) evaluateFlowRotation(intervalSecs float64) {
+	frCfg := h.cfg.FlowRotation
+
+	h.sessions.Range(func(key, value any) bool {
+		ps, ok := value.(*ParallelSession)
+		if !ok {
+			return true
+		}
+
+		ps.StreamTrafficIn.Range(func(k, v any) bool {
+			idx := k.(uint8)
+			counter := v.(*atomic.Int64)
+
+			// Lê bytes do intervalo SEM resetar (logPerStreamStats já reseta)
+			bytes := counter.Load()
+			mbps := float64(bytes) / intervalSecs / (1024 * 1024)
+
+			now := time.Now()
+
+			if mbps < frCfg.MinMBps {
+				// Stream abaixo do threshold
+				if _, loaded := ps.StreamSlowSince.LoadOrStore(idx, now); loaded {
+					// Já estava marcado — verifica se passou eval_window
+					slowSince, _ := ps.StreamSlowSince.Load(idx)
+					sinceMarked := now.Sub(slowSince.(time.Time))
+
+					// Verifica cooldown
+					var sinceLast time.Duration
+					if lastReset, ok := ps.StreamLastReset.Load(idx); ok {
+						sinceLast = now.Sub(lastReset.(time.Time))
+					} else {
+						sinceLast = frCfg.Cooldown + 1 // nunca resetou, permite
+					}
+
+					if sinceMarked >= frCfg.EvalWindow && sinceLast >= frCfg.Cooldown {
+						// Flow rotation: fecha a conn do stream
+						if conn, ok := ps.StreamConns.Load(idx); ok {
+							h.logger.Info("flow rotation triggered",
+								"session", key,
+								"agent", ps.AgentName,
+								"stream", idx,
+								"mbps", fmt.Sprintf("%.2f", mbps),
+								"slowFor", sinceMarked.String(),
+							)
+							conn.(net.Conn).Close()
+							ps.StreamLastReset.Store(idx, now)
+							ps.StreamSlowSince.Delete(idx)
+						}
+					}
+				}
+			} else {
+				// Stream acima do threshold — limpa marca
+				ps.StreamSlowSince.Delete(idx)
+			}
+
+			return true
+		})
+
 		return true
 	})
 }
@@ -753,6 +822,8 @@ type ParallelSession struct {
 	StreamTrafficIn sync.Map // streamIndex (uint8) → *atomic.Int64 (bytes recebidos no intervalo, para stats por stream)
 	StreamLastAct   sync.Map // streamIndex (uint8) → *atomic.Int64 (UnixNano último I/O deste stream)
 	StreamCancels   sync.Map // streamIndex (uint8) → context.CancelFunc (cancela goroutine anterior em re-join)
+	StreamSlowSince sync.Map // streamIndex (uint8) → time.Time (início de degradação contínua)
+	StreamLastReset sync.Map // streamIndex (uint8) → time.Time (último flow rotation deste stream)
 	MaxStreams      uint8
 	ChunkSize       uint32
 	StreamWg        sync.WaitGroup // barreira para todos os streams
