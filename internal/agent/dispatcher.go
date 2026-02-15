@@ -63,10 +63,17 @@ type Dispatcher struct {
 	// Callback invocado quando streams mudam (ativação/desativação)
 	onStreamChange func(active, max int)
 
+	// DSCP code point para marcar packets (0=desabilitado)
+	dscpValue int
+
 	// Métricas para o auto-scaler
 	producerBytes int64 // atomic — total de bytes recebidos pelo Write
 	lastSampleAt  time.Time
 	mu            sync.Mutex
+
+	// Diagnóstico producer/consumer: identifica gargalo
+	producerBlockedNs int64 // atomic — ns que o producer ficou bloqueado em rb.Write (buffer cheio = rede lenta)
+	senderIdleNs      int64 // atomic — ns que os senders ficaram bloqueados em rb.ReadAt (buffer vazio = producer lento)
 }
 
 // ParallelStream representa um stream individual com seu ring buffer e conexão.
@@ -97,6 +104,7 @@ type DispatcherConfig struct {
 	Logger         *slog.Logger
 	PrimaryConn    net.Conn              // conexão primária (control-only, usada apenas para Trailer+FinalACK)
 	OnStreamChange func(active, max int) // callback para notificar mudanças de streams
+	DSCPValue      int                   // DSCP code point (0=desabilitado)
 }
 
 // NewDispatcher cria um novo Dispatcher.
@@ -113,6 +121,7 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 		storageName:    cfg.StorageName,
 		logger:         cfg.Logger,
 		onStreamChange: cfg.OnStreamChange,
+		dscpValue:      cfg.DSCPValue,
 		lastSampleAt:   time.Now(),
 		pending:        make([]byte, cfg.ChunkSize),
 		pendingLen:     0,
@@ -214,6 +223,8 @@ func (d *Dispatcher) emitChunk(data []byte) error {
 	hdr[6] = byte(l >> 8)
 	hdr[7] = byte(l)
 
+	// Diagnóstico: mede tempo bloqueado em rb.Write (indica buffer cheio = rede lenta)
+	writeStart := time.Now()
 	if _, err := stream.rb.Write(hdr); err != nil {
 		return fmt.Errorf("writing chunk header to stream %d ring buffer: %w", stream.index, err)
 	}
@@ -221,6 +232,9 @@ func (d *Dispatcher) emitChunk(data []byte) error {
 	// Escreve os dados do chunk no ring buffer
 	if _, err := stream.rb.Write(data); err != nil {
 		return fmt.Errorf("writing to stream %d ring buffer: %w", stream.index, err)
+	}
+	if elapsed := time.Since(writeStart); elapsed > time.Millisecond {
+		atomic.AddInt64(&d.producerBlockedNs, elapsed.Nanoseconds())
 	}
 
 	return nil
@@ -242,7 +256,12 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 			offset := stream.sendOffset
 			stream.sendMu.Unlock()
 
+			// Diagnóstico: mede tempo bloqueado em rb.ReadAt (indica buffer vazio = producer lento)
+			readStart := time.Now()
 			n, err := stream.rb.ReadAt(offset, buf)
+			if elapsed := time.Since(readStart); elapsed > time.Millisecond {
+				atomic.AddInt64(&d.senderIdleNs, elapsed.Nanoseconds())
+			}
 			if err != nil {
 				if err == ErrBufferClosed {
 					stream.senderErr <- nil
@@ -329,6 +348,13 @@ func (d *Dispatcher) reconnectStream(streamIdx int) (int64, error) {
 	rawConn, err := dialer.Dial("tcp", d.serverAddr)
 	if err != nil {
 		return 0, fmt.Errorf("connecting stream %d: %w", streamIdx, err)
+	}
+
+	// Aplica DSCP marking no socket TCP (pré-TLS)
+	if d.dscpValue > 0 {
+		if err := ApplyDSCP(rawConn, d.dscpValue); err != nil {
+			d.logger.Warn("failed to set DSCP on reconnect", "stream", streamIdx, "error", err)
+		}
 	}
 
 	tlsConn := tls.Client(rawConn, d.tlsCfg)
@@ -419,6 +445,13 @@ func (d *Dispatcher) ActivateStream(streamIdx int) error {
 		return fmt.Errorf("connecting stream %d: %w", streamIdx, err)
 	}
 
+	// Aplica DSCP marking no socket TCP (pré-TLS)
+	if d.dscpValue > 0 {
+		if err := ApplyDSCP(rawConn, d.dscpValue); err != nil {
+			d.logger.Warn("failed to set DSCP", "stream", streamIdx, "error", err)
+		}
+	}
+
 	tlsConn := tls.Client(rawConn, d.tlsCfg)
 	if err := tlsConn.Handshake(); err != nil {
 		rawConn.Close()
@@ -490,8 +523,10 @@ func (d *Dispatcher) notifyStreamChange() {
 // RateSample contém as taxas calculadas em um único ponto no tempo.
 // Elimina a race condition de calcular elapsed separadamente para cada métrica.
 type RateSample struct {
-	ProducerBps float64 // bytes/s do produtor
-	DrainBps    float64 // bytes/s drenados (soma de todos os streams)
+	ProducerBps       float64 // bytes/s do produtor
+	DrainBps          float64 // bytes/s drenados (soma de todos os streams)
+	ProducerBlockedMs int64   // ms que o producer ficou bloqueado (buffer cheio = rede lenta)
+	SenderIdleMs      int64   // ms que os senders ficaram ociosos (buffer vazio = producer lento)
 }
 
 // SampleRates captura as taxas do produtor e drain em um único instante,
@@ -509,6 +544,8 @@ func (d *Dispatcher) SampleRates() RateSample {
 
 	// Swap-and-reset dos contadores atômicos
 	producerBytes := atomic.SwapInt64(&d.producerBytes, 0)
+	producerBlockedNs := atomic.SwapInt64(&d.producerBlockedNs, 0)
+	senderIdleNs := atomic.SwapInt64(&d.senderIdleNs, 0)
 
 	var totalDrain int64
 	for i := 0; i < d.maxStreams; i++ {
@@ -518,8 +555,10 @@ func (d *Dispatcher) SampleRates() RateSample {
 	}
 
 	return RateSample{
-		ProducerBps: float64(producerBytes) / elapsed,
-		DrainBps:    float64(totalDrain) / elapsed,
+		ProducerBps:       float64(producerBytes) / elapsed,
+		DrainBps:          float64(totalDrain) / elapsed,
+		ProducerBlockedMs: producerBlockedNs / 1e6,
+		SenderIdleMs:      senderIdleNs / 1e6,
 	}
 }
 

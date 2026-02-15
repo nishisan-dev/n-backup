@@ -110,6 +110,14 @@ func (as *AutoScaler) evaluate() {
 	as.lastEfficiency = efficiency
 	as.lastRates = rates
 
+	// Diagnóstico: identifica gargalo producer vs consumer
+	bottleneck := "balanced"
+	if rates.ProducerBlockedMs > rates.SenderIdleMs && rates.ProducerBlockedMs > 100 {
+		bottleneck = "network" // producer bloqueado = rede lenta
+	} else if rates.SenderIdleMs > rates.ProducerBlockedMs && rates.SenderIdleMs > 100 {
+		bottleneck = "producer" // senders ociosos = tar.gz lento
+	}
+
 	as.logger.Debug("auto-scaler evaluation",
 		"efficiency", efficiency,
 		"producerBps", rates.ProducerBps,
@@ -117,6 +125,9 @@ func (as *AutoScaler) evaluate() {
 		"activeStreams", active,
 		"scaleUpCount", as.scaleUpCount,
 		"scaleDownCount", as.scaleDownCount,
+		"producerBlockedMs", rates.ProducerBlockedMs,
+		"senderIdleMs", rates.SenderIdleMs,
+		"bottleneck", bottleneck,
 	)
 
 	switch {
