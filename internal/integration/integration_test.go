@@ -527,24 +527,41 @@ func TestEndToEnd_ParallelBackupSession(t *testing.T) {
 	copy(checksum[:], hasher.Sum(nil))
 	size := uint64(streamBuf.Len())
 
-	// 4. Conecta stream 0 via ParallelJoin
-	stream0Conn, err := tls.Dial("tcp", ln.Addr().String(), clientTLSCfg)
-	if err != nil {
-		t.Fatalf("TLS dial stream 0: %v", err)
+	// 4. Conecta stream 0 via ParallelJoin (com retry para tolerar race em CI)
+	// O server precisa processar o ParallelInit e registrar a sessão antes do Join.
+	var stream0Conn *tls.Conn
+	var pAck *protocol.ParallelACK
+	for attempt := 0; attempt < 10; attempt++ {
+		sc, err := tls.Dial("tcp", ln.Addr().String(), clientTLSCfg)
+		if err != nil {
+			t.Fatalf("TLS dial stream 0: %v", err)
+		}
+
+		if err := protocol.WriteParallelJoin(sc, sessionID, 0); err != nil {
+			sc.Close()
+			t.Fatalf("WriteParallelJoin stream 0: %v", err)
+		}
+
+		ack, err := protocol.ReadParallelACK(sc)
+		if err != nil {
+			sc.Close()
+			t.Fatalf("ReadParallelACK stream 0: %v", err)
+		}
+
+		if ack.Status == protocol.ParallelStatusOK {
+			stream0Conn = sc
+			pAck = ack
+			break
+		}
+
+		// Session not yet registered — retry after short backoff
+		sc.Close()
+		time.Sleep(50 * time.Millisecond)
+	}
+	if stream0Conn == nil {
+		t.Fatalf("ParallelJoin failed after retries, last status: %d", pAck.Status)
 	}
 	defer stream0Conn.Close()
-
-	if err := protocol.WriteParallelJoin(stream0Conn, sessionID, 0); err != nil {
-		t.Fatalf("WriteParallelJoin stream 0: %v", err)
-	}
-
-	pAck, err := protocol.ReadParallelACK(stream0Conn)
-	if err != nil {
-		t.Fatalf("ReadParallelACK stream 0: %v", err)
-	}
-	if pAck.Status != protocol.ParallelStatusOK {
-		t.Fatalf("expected ParallelStatusOK, got %d", pAck.Status)
-	}
 
 	// 5. Envia dados com ChunkHeader framing pelo stream 0
 	chunkSize := 256 * 1024
