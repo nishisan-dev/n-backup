@@ -973,7 +973,7 @@ func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, read
 		}
 
 		nowNano := time.Now().UnixNano()
-		bytesReceived += int64(hdr.Length)
+		bytesReceived += int64(hdr.Length) + protocol.ChunkHeaderSize
 		session.LastActivity.Store(nowNano)
 		h.TrafficIn.Add(int64(hdr.Length))
 		h.DiskWrite.Add(int64(hdr.Length))

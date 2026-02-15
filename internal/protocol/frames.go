@@ -146,6 +146,9 @@ type ChunkSACK struct {
 	Offset      uint64
 }
 
+// ChunkHeaderSize é o tamanho em bytes do ChunkHeader no wire: GlobalSeq(4B) + Length(4B).
+const ChunkHeaderSize = 8
+
 // ChunkHeader precede cada chunk no stream paralelo (Client → Server).
 // Permite ao server reconstruir a ordem global dos chunks.
 // Formato: [GlobalSeq uint32 4B] [Length uint32 4B]

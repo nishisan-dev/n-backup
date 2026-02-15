@@ -212,7 +212,7 @@ func (d *Dispatcher) emitChunk(data []byte) error {
 	}
 
 	// Escreve ChunkHeader (8 bytes) no ring buffer antes dos dados
-	hdr := make([]byte, 8)
+	hdr := make([]byte, protocol.ChunkHeaderSize)
 	hdr[0] = byte(seq >> 24)
 	hdr[1] = byte(seq >> 16)
 	hdr[2] = byte(seq >> 8)
