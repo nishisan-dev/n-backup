@@ -54,6 +54,7 @@ type BackupEntry struct {
 	Sources   []BackupSource `yaml:"sources"`
 	Exclude   []string       `yaml:"exclude"`
 	Parallels int            `yaml:"parallels"` // 0=desabilitado (single stream), 1-255=máx streams paralelos
+	DSCP      string         `yaml:"dscp"`      // DSCP marking (ex: "AF41", "EF"), vazio=desabilitado
 }
 
 // BackupSource representa um diretório de origem para backup.
@@ -146,6 +147,21 @@ func (c *AgentConfig) validate() error {
 		}
 		if b.Parallels < 0 || b.Parallels > 255 {
 			return fmt.Errorf("backups[%d].parallels must be between 0 and 255, got %d", i, b.Parallels)
+		}
+		if b.DSCP != "" {
+			dscp := strings.TrimSpace(strings.ToUpper(b.DSCP))
+			validDSCP := map[string]bool{
+				"EF":   true,
+				"AF11": true, "AF12": true, "AF13": true,
+				"AF21": true, "AF22": true, "AF23": true,
+				"AF31": true, "AF32": true, "AF33": true,
+				"AF41": true, "AF42": true, "AF43": true,
+				"CS0": true, "CS1": true, "CS2": true, "CS3": true,
+				"CS4": true, "CS5": true, "CS6": true, "CS7": true,
+			}
+			if !validDSCP[dscp] {
+				return fmt.Errorf("backups[%d].dscp: unknown value %q (valid: EF, AF11..AF43, CS0..CS7)", i, b.DSCP)
+			}
 		}
 	}
 	if c.Retry.MaxAttempts <= 0 {
