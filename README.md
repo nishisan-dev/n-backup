@@ -16,12 +16,15 @@ Sistema de backup **high-performance** client-server escrito em Go. Streaming di
 | **Zero-Footprint** | Otimizado para baixo consumo de CPU e RAM. Binário estático, sem dependências. |
 | **Segurança mTLS** | Autenticação mútua obrigatória via TLS 1.3. Sem SSH, sem shell remoto. |
 | **Integridade SHA-256** | Hash calculado inline durante streaming. Validação dupla (agent + server). |
-| **Resume Mid-Stream** | Ring buffer em memória (256MB) permite retomar backups interrompidos. |
-| **Parallel Streaming** | Até 8 streams TLS paralelos com AutoScaler para maximizar throughput. |
+| **Resume Mid-Stream** | Ring buffer em memória (configurável, padrão 256MB) permite retomar backups interrompidos. |
+| **Parallel Streaming** | Até 255 streams TLS paralelos com chunk-based dispatch para maximizar throughput. |
 | **Rotação Automática** | Server mantém os N backups mais recentes por agent/storage. |
 | **Retry Exponential** | Reconexão automática com backoff exponencial configurável. |
 | **Named Storages** | Múltiplos storages no server com políticas de rotação independentes. |
 | **Progress Bar** | Visualização de progresso em backups manuais (MB/s, ETA, retries). |
+| **Schedule por Backup** | Cada backup entry possui sua própria cron expression. |
+| **Hot Reload (SIGHUP)** | Recarrega configuração sem downtime via `systemctl reload`. |
+| **Stats Reporter** | Server imprime métricas a cada 15s: conexões, throughput, sessões ativas. |
 
 ---
 
@@ -33,13 +36,19 @@ Sistema de backup **high-performance** client-server escrito em Go. Streaming di
 
 | Componente | Descrição |
 |-----------|-----------|
-| **nbackup-agent** | Daemon que executa backups periodicamente (cron). Lê arquivos, compacta e envia via TCP+mTLS. |
-| **nbackup-server** | Recebe streams, valida integridade (SHA-256), grava atomicamente e faz rotação automática. |
+| **nbackup-agent** | Daemon com scheduler independente por backup entry. Lê arquivos, compacta e envia via TCP+mTLS. Suporta hot reload (SIGHUP). |
+| **nbackup-server** | Recebe streams (single ou paralelo), valida integridade (SHA-256), grava atomicamente e faz rotação automática. Expira sessões inativas (idle-based). |
 
 ### Pipeline de Dados
 
+**Single Stream:**
 ```
 fs.WalkDir → tar.Writer → gzip.Writer → RingBuffer → tls.Conn → Server (io.Copy → disco)
+```
+
+**Parallel Streaming:**
+```
+fs.WalkDir → tar.Writer → gzip.Writer → Dispatcher (round-robin) → N × tls.Conn → Server (ChunkAssembler → disco)
 ```
 
 ---
@@ -149,6 +158,7 @@ storages:
 logging:
   level: info
   format: json
+  file: /var/log/nbackup/server.log   # Opcional
 ```
 
 ```bash
@@ -162,9 +172,6 @@ sudo systemctl start nbackup-server
 agent:
   name: "web-server-01"
 
-daemon:
-  schedule: "0 2 * * *"        # Diário às 02h
-
 server:
   address: "backup.example.com:9847"
 
@@ -176,6 +183,8 @@ tls:
 backups:
   - name: app
     storage: scripts
+    schedule: "0 2 * * *"             # Cron: diário às 02h
+    parallels: 0                      # Single stream
     sources:
       - path: /app/scripts
     exclude:
@@ -183,9 +192,11 @@ backups:
 
   - name: home
     storage: home-dirs
-    parallels: 4
+    schedule: "0 */6 * * *"           # Cron: a cada 6 horas
+    parallels: 12                     # 12 streams paralelos
     sources:
       - path: /home
+      - path: /etc
     exclude:
       - ".git/**"
       - "node_modules/**"
@@ -195,13 +206,21 @@ retry:
   initial_delay: 1s
   max_delay: 5m
 
+resume:
+  buffer_size: 256mb                  # Ring buffer (kb, mb, gb)
+  chunk_size: 1mb                     # Chunk paralelo (64kb-16mb, padrão: 1mb)
+
 logging:
   level: info
   format: json
+  file: /var/log/nbackup/agent.log    # Opcional
 ```
 
 ```bash
 sudo systemctl start nbackup-agent
+
+# Hot reload de configuração (sem downtime)
+sudo systemctl reload nbackup-agent
 ```
 
 ---
@@ -242,8 +261,8 @@ tar xzf backup.tar.gz -C /restore/path home/user/file.txt
 | [Arquitetura](docs/architecture.md) | C4 Model, componentes, fluxos, decisões técnicas |
 | [Guia de Instalação](docs/installation.md) | Build, PKI/mTLS, configuração, systemd |
 | [Guia de Uso](docs/usage.md) | Comandos, daemon, retry, rotação, troubleshooting |
-| [Especificação Técnica](docs/specification.md) | Protocolo binário, frames, sessão, resume |
-| [Diagramas](docs/diagrams/) | PlantUML: arquitetura, protocolo, C4, fluxo de dados |
+| [Especificação Técnica](docs/specification.md) | Protocolo binário, frames, sessão, resume, parallel streaming |
+| [Diagramas](docs/diagrams/) | PlantUML: arquitetura, protocolo, C4, fluxo de dados, sequência paralela |
 
 ---
 
@@ -274,7 +293,7 @@ Cada release inclui:
 | Compactação | gzip (stdlib) |
 | Empacotamento | tar (stdlib) |
 | Configuração | YAML |
-| Logging | slog (JSON) |
+| Logging | slog (JSON/text) |
 | Distribuição | Binário estático + .deb |
 
 ---
