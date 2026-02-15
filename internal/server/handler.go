@@ -85,6 +85,15 @@ func (h *Handler) StartStatsReporter(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			secs := interval.Seconds()
+
+			// Flow Rotation ANTES do reset de counters globais.
+			// evaluateFlowRotation faz Swap(0) nos StreamTrafficIn,
+			// garantindo que lê os bytes reais do intervalo.
+			if h.cfg.FlowRotation.Enabled {
+				h.evaluateFlowRotation(secs)
+			}
+
 			// Swap-and-reset: lê o acumulado e zera
 			trafficIn := h.TrafficIn.Swap(0)
 			diskWrite := h.DiskWrite.Swap(0)
@@ -98,7 +107,6 @@ func (h *Handler) StartStatsReporter(ctx context.Context) {
 			})
 
 			// Calcula taxas em MB/s
-			secs := interval.Seconds()
 			trafficMBps := float64(trafficIn) / secs / (1024 * 1024)
 			diskMBps := float64(diskWrite) / secs / (1024 * 1024)
 
@@ -111,14 +119,10 @@ func (h *Handler) StartStatsReporter(ctx context.Context) {
 				"disk_write_total_MB", fmt.Sprintf("%.1f", float64(diskWrite)/(1024*1024)),
 			)
 
-			// Per-stream stats (configurável)
+			// Per-stream stats (configurável) — usa Load() porque
+			// evaluateFlowRotation já fez Swap(0) nos counters.
 			if h.cfg.Logging.StreamStats {
 				h.logPerStreamStats(secs)
-			}
-
-			// Flow Rotation: avalia streams degradados
-			if h.cfg.FlowRotation.Enabled {
-				h.evaluateFlowRotation(secs)
 			}
 		}
 	}
@@ -143,8 +147,22 @@ func (h *Handler) logPerStreamStats(intervalSecs float64) {
 		ps.StreamTrafficIn.Range(func(k, v any) bool {
 			idx := k.(uint8)
 			counter := v.(*atomic.Int64)
-			// Swap-and-reset: lê bytes do intervalo e zera
-			bytes := counter.Swap(0)
+			// Se flow rotation está habilitado, os contadores já foram
+			// resetados por evaluateFlowRotation (Swap(0)) neste tick.
+			// Caso contrário, precisamos fazer o Swap(0) aqui para
+			// exibir a taxa do intervalo (não acumulativa).
+			var bytes int64
+			if h.cfg.FlowRotation.Enabled {
+				// Em flow rotation, o contador já foi consumido por evaluateFlowRotation.
+				// Usa snapshot do último tick para manter o log fiel ao intervalo.
+				if tickBytes, ok := ps.StreamTickBytes.Load(idx); ok {
+					bytes = tickBytes.(int64)
+				} else {
+					bytes = 0
+				}
+			} else {
+				bytes = counter.Swap(0)
+			}
 			mbps := float64(bytes) / intervalSecs / (1024 * 1024)
 
 			var idleSec int64
@@ -177,7 +195,11 @@ func (h *Handler) logPerStreamStats(intervalSecs float64) {
 
 // evaluateFlowRotation verifica se streams estão com throughput abaixo do threshold
 // e fecha a conexão dos degradados para forçar reconexão com nova source port.
+// Usa Swap(0) para ler os bytes reais do intervalo e resetar o contador.
+// Limita a 1 rotação por tick para evitar tempestade de reconexões.
 func (h *Handler) evaluateFlowRotation(intervalSecs float64) {
+	const maxRotationsPerTick = 1
+
 	frCfg := h.cfg.FlowRotation
 
 	h.sessions.Range(func(key, value any) bool {
@@ -186,15 +208,28 @@ func (h *Handler) evaluateFlowRotation(intervalSecs float64) {
 			return true
 		}
 
+		var rotated int
+
 		ps.StreamTrafficIn.Range(func(k, v any) bool {
 			idx := k.(uint8)
 			counter := v.(*atomic.Int64)
 
-			// Lê bytes do intervalo SEM resetar (logPerStreamStats já reseta)
-			bytes := counter.Load()
-			mbps := float64(bytes) / intervalSecs / (1024 * 1024)
+				// Swap-and-reset: lê bytes reais do intervalo e zera o contador.
+				// Isso garante que o flow rotation veja o throughput real,
+				// independente de quando logPerStreamStats roda.
+				bytes := counter.Swap(0)
+				ps.StreamTickBytes.Store(idx, bytes)
+				mbps := float64(bytes) / intervalSecs / (1024 * 1024)
 
 			now := time.Now()
+
+			// Sem tráfego no intervalo: stream pode estar apenas ocioso
+			// (ex.: fim de pipeline ou producer momentaneamente sem dados).
+			// Não tratar como degradação para evitar rotações desnecessárias.
+			if bytes == 0 {
+				ps.StreamSlowSince.Delete(idx)
+				return true
+			}
 
 			if mbps < frCfg.MinMBps {
 				// Stream abaixo do threshold
@@ -211,7 +246,7 @@ func (h *Handler) evaluateFlowRotation(intervalSecs float64) {
 						sinceLast = frCfg.Cooldown + 1 // nunca resetou, permite
 					}
 
-					if sinceMarked >= frCfg.EvalWindow && sinceLast >= frCfg.Cooldown {
+					if sinceMarked >= frCfg.EvalWindow && sinceLast >= frCfg.Cooldown && rotated < maxRotationsPerTick {
 						// Flow rotation: fecha a conn do stream
 						if conn, ok := ps.StreamConns.Load(idx); ok {
 							h.logger.Info("flow rotation triggered",
@@ -224,6 +259,7 @@ func (h *Handler) evaluateFlowRotation(intervalSecs float64) {
 							conn.(net.Conn).Close()
 							ps.StreamLastReset.Store(idx, now)
 							ps.StreamSlowSince.Delete(idx)
+							rotated++
 						}
 					}
 				}
@@ -820,6 +856,7 @@ type ParallelSession struct {
 	StreamConns     sync.Map // streamIndex (uint8) → net.Conn
 	StreamOffsets   sync.Map // streamIndex (uint8) → *int64 (completed bytes, atômico)
 	StreamTrafficIn sync.Map // streamIndex (uint8) → *atomic.Int64 (bytes recebidos no intervalo, para stats por stream)
+	StreamTickBytes sync.Map // streamIndex (uint8) → int64 (bytes observados no último tick do stats reporter)
 	StreamLastAct   sync.Map // streamIndex (uint8) → *atomic.Int64 (UnixNano último I/O deste stream)
 	StreamCancels   sync.Map // streamIndex (uint8) → context.CancelFunc (cancela goroutine anterior em re-join)
 	StreamSlowSince sync.Map // streamIndex (uint8) → time.Time (início de degradação contínua)
