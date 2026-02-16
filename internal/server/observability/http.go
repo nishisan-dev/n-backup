@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"runtime"
+	"strconv"
 	"time"
 
 	"github.com/nishisan-dev/n-backup/internal/config"
@@ -23,6 +24,8 @@ var Version = "dev"
 // Isso desacopla o pacote observability do server sem expor o Handler inteiro.
 type HandlerMetrics interface {
 	MetricsSnapshot() MetricsData
+	SessionsSnapshot() []SessionSummary
+	SessionDetail(id string) (*SessionDetail, bool)
 }
 
 // MetricsData contém os dados de métricas coletados do Handler.
@@ -30,6 +33,7 @@ type MetricsData struct {
 	TrafficIn   int64
 	DiskWrite   int64
 	ActiveConns int32
+	Sessions    int
 }
 
 // NewRouter cria o http.Handler para a API de observabilidade e SPA.
@@ -40,6 +44,9 @@ func NewRouter(metrics HandlerMetrics, cfg *config.ServerConfig, acl *ACL) http.
 	// API v1
 	mux.HandleFunc("GET /api/v1/health", handleHealth)
 	mux.HandleFunc("GET /api/v1/metrics", makeMetricsHandler(metrics))
+	mux.HandleFunc("GET /api/v1/sessions", makeSessionsHandler(metrics))
+	mux.HandleFunc("GET /api/v1/sessions/{id}", makeSessionDetailHandler(metrics))
+	mux.HandleFunc("GET /api/v1/config/effective", makeConfigHandler(cfg))
 
 	// SPA root (placeholder até Fase 4)
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
@@ -57,11 +64,11 @@ func NewRouter(metrics HandlerMetrics, cfg *config.ServerConfig, acl *ACL) http.
 // handleHealth retorna status do processo, uptime e versão.
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	uptime := time.Since(startTime)
-	resp := map[string]interface{}{
-		"status":  "ok",
-		"uptime":  uptime.String(),
-		"version": Version,
-		"go":      runtime.Version(),
+	resp := HealthResponse{
+		Status:  "ok",
+		Uptime:  uptime.String(),
+		Version: Version,
+		Go:      runtime.Version(),
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -70,10 +77,67 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 func makeMetricsHandler(metrics HandlerMetrics) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		data := metrics.MetricsSnapshot()
-		resp := map[string]interface{}{
-			"traffic_in_bytes": data.TrafficIn,
-			"disk_write_bytes": data.DiskWrite,
-			"active_conns":     data.ActiveConns,
+		resp := MetricsResponse{
+			TrafficInBytes: data.TrafficIn,
+			DiskWriteBytes: data.DiskWrite,
+			ActiveConns:    data.ActiveConns,
+			Sessions:       data.Sessions,
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+// makeSessionsHandler retorna um handler que lista sessões ativas.
+func makeSessionsHandler(metrics HandlerMetrics) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sessions := metrics.SessionsSnapshot()
+		if sessions == nil {
+			sessions = []SessionSummary{}
+		}
+		writeJSON(w, http.StatusOK, sessions)
+	}
+}
+
+// makeSessionDetailHandler retorna um handler para detalhe de uma sessão por ID.
+func makeSessionDetailHandler(metrics HandlerMetrics) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if id == "" {
+			http.Error(w, "missing session id", http.StatusBadRequest)
+			return
+		}
+		detail, found := metrics.SessionDetail(id)
+		if !found {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+			return
+		}
+		writeJSON(w, http.StatusOK, detail)
+	}
+}
+
+// makeConfigHandler retorna um handler com a config efetiva (sem segredos).
+func makeConfigHandler(cfg *config.ServerConfig) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		storages := make(map[string]StorageSafe, len(cfg.Storages))
+		for name, s := range cfg.Storages {
+			storages[name] = StorageSafe{
+				BaseDir:       s.BaseDir,
+				MaxBackups:    s.MaxBackups,
+				AssemblerMode: s.AssemblerMode,
+			}
+		}
+
+		resp := ConfigEffective{
+			ServerListen: cfg.Server.Listen,
+			WebUIListen:  cfg.WebUI.Listen,
+			Storages:     storages,
+			FlowRotation: FlowRotationSafe{
+				Enabled:    cfg.FlowRotation.Enabled,
+				MinMBps:    cfg.FlowRotation.MinMBps,
+				EvalWindow: cfg.FlowRotation.EvalWindow.String(),
+				Cooldown:   cfg.FlowRotation.Cooldown.String(),
+			},
+			LogLevel: cfg.Logging.Level,
 		}
 		writeJSON(w, http.StatusOK, resp)
 	}
@@ -86,4 +150,16 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	enc.Encode(v)
+}
+
+// parseInt é um helper para parsear query params numéricos com default.
+func parseInt(s string, defaultVal int) int {
+	if s == "" {
+		return defaultVal
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil || v < 1 {
+		return defaultVal
+	}
+	return v
 }

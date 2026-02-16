@@ -84,10 +84,189 @@ func NewHandler(cfg *config.ServerConfig, logger *slog.Logger, locks *sync.Map, 
 // MetricsSnapshot retorna uma cópia atômica das métricas observáveis.
 // Implementa observability.HandlerMetrics.
 func (h *Handler) MetricsSnapshot() observability.MetricsData {
+	sessionCount := 0
+	h.sessions.Range(func(_, _ interface{}) bool {
+		sessionCount++
+		return true
+	})
 	return observability.MetricsData{
 		TrafficIn:   h.TrafficIn.Load(),
 		DiskWrite:   h.DiskWrite.Load(),
 		ActiveConns: h.ActiveConns.Load(),
+		Sessions:    sessionCount,
+	}
+}
+
+// SessionsSnapshot retorna lista de sessões ativas como DTOs.
+// Implementa observability.HandlerMetrics.
+func (h *Handler) SessionsSnapshot() []observability.SessionSummary {
+	var sessions []observability.SessionSummary
+
+	h.sessions.Range(func(key, value interface{}) bool {
+		sessionID := key.(string)
+
+		switch s := value.(type) {
+		case *PartialSession:
+			lastAct := time.Unix(0, s.LastActivity.Load())
+			sessions = append(sessions, observability.SessionSummary{
+				SessionID:     sessionID,
+				Agent:         s.AgentName,
+				Storage:       s.StorageName,
+				Backup:        s.BackupName,
+				Mode:          "single",
+				StartedAt:     s.CreatedAt.Format(time.RFC3339),
+				LastActivity:  lastAct.Format(time.RFC3339),
+				BytesReceived: s.BytesWritten,
+				ActiveStreams: 1,
+				Status:        sessionStatus(lastAct),
+			})
+
+		case *ParallelSession:
+			lastAct := time.Unix(0, s.LastActivity.Load())
+			activeStreams := 0
+			var totalOffset int64
+			s.StreamConns.Range(func(_, _ interface{}) bool {
+				activeStreams++
+				return true
+			})
+			s.StreamOffsets.Range(func(_, v interface{}) bool {
+				if ptr, ok := v.(*int64); ok {
+					totalOffset += atomic.LoadInt64(ptr)
+				}
+				return true
+			})
+			sessions = append(sessions, observability.SessionSummary{
+				SessionID:     sessionID,
+				Agent:         s.AgentName,
+				Storage:       s.StorageName,
+				Backup:        s.BackupName,
+				Mode:          "parallel",
+				StartedAt:     s.CreatedAt.Format(time.RFC3339),
+				LastActivity:  lastAct.Format(time.RFC3339),
+				BytesReceived: totalOffset,
+				ActiveStreams: activeStreams,
+				MaxStreams:    int(s.MaxStreams),
+				Status:        sessionStatus(lastAct),
+			})
+		}
+		return true
+	})
+
+	return sessions
+}
+
+// SessionDetail retorna detalhe de uma sessão incluindo streams.
+// Implementa observability.HandlerMetrics.
+func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) {
+	raw, ok := h.sessions.Load(id)
+	if !ok {
+		return nil, false
+	}
+
+	switch s := raw.(type) {
+	case *PartialSession:
+		lastAct := time.Unix(0, s.LastActivity.Load())
+		return &observability.SessionDetail{
+			SessionSummary: observability.SessionSummary{
+				SessionID:     id,
+				Agent:         s.AgentName,
+				Storage:       s.StorageName,
+				Backup:        s.BackupName,
+				Mode:          "single",
+				StartedAt:     s.CreatedAt.Format(time.RFC3339),
+				LastActivity:  lastAct.Format(time.RFC3339),
+				BytesReceived: s.BytesWritten,
+				ActiveStreams: 1,
+				Status:        sessionStatus(lastAct),
+			},
+		}, true
+
+	case *ParallelSession:
+		lastAct := time.Unix(0, s.LastActivity.Load())
+		activeStreams := 0
+		var totalOffset int64
+		var streams []observability.StreamDetail
+
+		s.StreamConns.Range(func(_, _ interface{}) bool {
+			activeStreams++
+			return true
+		})
+
+		s.StreamOffsets.Range(func(k, v interface{}) bool {
+			idx := k.(uint8)
+			var offset int64
+			if ptr, ok := v.(*int64); ok {
+				offset = atomic.LoadInt64(ptr)
+			}
+			totalOffset += offset
+
+			// Throughput por stream (bytes no intervalo / 15s stats interval)
+			var mbps float64
+			if trafficRaw, ok := s.StreamTrafficIn.Load(idx); ok {
+				if ai, ok := trafficRaw.(*atomic.Int64); ok {
+					bytes := ai.Load()
+					mbps = float64(bytes) / 15.0 / (1024 * 1024)
+				}
+			}
+
+			// Idle time
+			var idleSecs int64
+			if lastActRaw, ok := s.StreamLastAct.Load(idx); ok {
+				if ai, ok := lastActRaw.(*atomic.Int64); ok {
+					lastIO := time.Unix(0, ai.Load())
+					idleSecs = int64(time.Since(lastIO).Seconds())
+				}
+			}
+
+			// Slow since
+			var slowSince string
+			if ssRaw, ok := s.StreamSlowSince.Load(idx); ok {
+				if ts, ok := ssRaw.(time.Time); ok && !ts.IsZero() {
+					slowSince = ts.Format(time.RFC3339)
+				}
+			}
+
+			streams = append(streams, observability.StreamDetail{
+				Index:       idx,
+				OffsetBytes: offset,
+				MBps:        mbps,
+				IdleSecs:    idleSecs,
+				SlowSince:   slowSince,
+			})
+			return true
+		})
+
+		return &observability.SessionDetail{
+			SessionSummary: observability.SessionSummary{
+				SessionID:     id,
+				Agent:         s.AgentName,
+				Storage:       s.StorageName,
+				Backup:        s.BackupName,
+				Mode:          "parallel",
+				StartedAt:     s.CreatedAt.Format(time.RFC3339),
+				LastActivity:  lastAct.Format(time.RFC3339),
+				BytesReceived: totalOffset,
+				ActiveStreams: activeStreams,
+				MaxStreams:    int(s.MaxStreams),
+				Status:        sessionStatus(lastAct),
+			},
+			Streams: streams,
+		}, true
+	}
+
+	return nil, false
+}
+
+// sessionStatus determina o status de uma sessão baseado na última atividade.
+func sessionStatus(lastActivity time.Time) string {
+	idle := time.Since(lastActivity)
+	switch {
+	case idle < 10*time.Second:
+		return "running"
+	case idle < 60*time.Second:
+		return "idle"
+	default:
+		return "degraded"
 	}
 }
 
