@@ -313,10 +313,22 @@ storages:
   scripts:
     base_dir: /var/backups/scripts
     max_backups: 5
+    assembler_mode: eager
+    assembler_pending_mem_limit: 8mb
   home-dirs:
     base_dir: /var/backups/home
     max_backups: 10
+    assembler_mode: lazy
+    assembler_pending_mem_limit: 8mb
 ```
+
+Defaults por storage:
+- `assembler_mode`: `eager`
+- `assembler_pending_mem_limit`: `8mb` (8 * 1024 * 1024 bytes)
+
+Comportamento dos modos:
+- `eager`: monta incrementalmente durante a transferência. Chunks fora de ordem ficam em memória até `assembler_pending_mem_limit`; ao exceder, fazem spill para disco.
+- `lazy`: grava os chunks em staging e monta somente no final da sessão. Nesse modo, `assembler_pending_mem_limit` não é usado.
 
 Exemplo com `max_backups: 3` no storage `scripts`:
 
@@ -385,3 +397,53 @@ Exemplo de log JSON do agent:
 | `max resume attempts reached` | 5 tentativas de resume falharam | Verificar estabilidade da rede |
 | `control channel disconnected` | Server caiu ou timeout de keepalive | Canal reconectará automaticamente com backoff |
 | `keepalive_interval must be >= 1s` | Valor inválido na config | Ajustar para ≥ 1s |
+
+---
+
+## Considerações por Tipo de Disco/Storage
+
+O modo do assembler e o limite de memória ideal variam conforme o tipo de disco no server.
+
+### 1. USB/HDD lento (maior variação de latência)
+
+Preferir `assembler_mode: lazy` para reduzir pressão de I/O durante a transferência.
+
+```yaml
+storages:
+  usb-archive:
+    base_dir: /mnt/usb/backups
+    max_backups: 7
+    assembler_mode: lazy
+    assembler_pending_mem_limit: 8mb  # ignorado em lazy
+```
+
+### 2. SSD SATA (equilíbrio)
+
+Usar `eager` com limite moderado para absorver out-of-order sem spill frequente.
+
+```yaml
+storages:
+  sata-fast:
+    base_dir: /var/backups/sata
+    max_backups: 10
+    assembler_mode: eager
+    assembler_pending_mem_limit: 16mb
+```
+
+### 3. NVMe/Storage rápido
+
+Usar `eager` com limite maior para minimizar spill em disco.
+
+```yaml
+storages:
+  nvme-hot:
+    base_dir: /var/backups/nvme
+    max_backups: 20
+    assembler_mode: eager
+    assembler_pending_mem_limit: 64mb
+```
+
+Notas:
+- Defaults por storage: `assembler_mode: eager` e `assembler_pending_mem_limit: 8mb` (`8 * 1024 * 1024` bytes).
+- Em `lazy`, `assembler_pending_mem_limit` não é utilizado.
+- Se houver pressão de memória no host, reduza `assembler_pending_mem_limit` ou mude para `lazy`.

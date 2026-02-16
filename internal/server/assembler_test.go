@@ -139,7 +139,8 @@ func TestChunkAssembler_Cleanup(t *testing.T) {
 	tmpDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	ca, err := NewChunkAssembler("test-cleanup", tmpDir, logger)
+	// Limite baixo para forçar spill em disco no out-of-order deste teste.
+	ca, err := NewChunkAssemblerWithMemLimit("test-cleanup", tmpDir, logger, 1)
 	if err != nil {
 		t.Fatalf("NewChunkAssembler: %v", err)
 	}
@@ -180,6 +181,48 @@ func TestChunkAssembler_ChunkDir(t *testing.T) {
 	expected := filepath.Join(tmpDir, "chunks_my-session")
 	if ca.ChunkDir() != expected {
 		t.Errorf("expected chunkDir=%q, got %q", expected, ca.ChunkDir())
+	}
+}
+
+func TestChunkAssembler_LazyMode_FinalAssembly(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	ca, err := NewChunkAssemblerWithOptions("test-lazy-mode", tmpDir, logger, ChunkAssemblerOptions{
+		Mode: AssemblerModeLazy,
+	})
+	if err != nil {
+		t.Fatalf("NewChunkAssemblerWithOptions: %v", err)
+	}
+	defer ca.Cleanup()
+
+	// Ordem de chegada intencionalmente fora de ordem.
+	if err := ca.WriteChunk(2, bytes.NewReader([]byte("CCCC")), 4); err != nil {
+		t.Fatalf("WriteChunk(2): %v", err)
+	}
+	if err := ca.WriteChunk(0, bytes.NewReader([]byte("AAAA")), 4); err != nil {
+		t.Fatalf("WriteChunk(0): %v", err)
+	}
+	if err := ca.WriteChunk(1, bytes.NewReader([]byte("BBBB")), 4); err != nil {
+		t.Fatalf("WriteChunk(1): %v", err)
+	}
+
+	resultPath, totalBytes, err := ca.Finalize()
+	if err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	defer os.Remove(resultPath)
+
+	if totalBytes != 12 {
+		t.Errorf("expected totalBytes=12, got %d", totalBytes)
+	}
+
+	content, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("reading assembled file: %v", err)
+	}
+	if string(content) != "AAAABBBBCCCC" {
+		t.Errorf("expected %q, got %q", "AAAABBBBCCCC", content)
 	}
 }
 

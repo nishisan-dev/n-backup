@@ -13,10 +13,14 @@ storages:
   scripts:
     base_dir: /var/backups/scripts
     max_backups: 5
+    assembler_mode: eager             # eager|lazy (default: eager)
+    assembler_pending_mem_limit: 8mb  # limite de pending em memória no modo eager
 
   home-dirs:
     base_dir: /var/backups/home
     max_backups: 10
+    assembler_mode: lazy
+    assembler_pending_mem_limit: 8mb
 
 logging:
   level: info                      # debug, info, warn, error

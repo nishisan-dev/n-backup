@@ -85,6 +85,12 @@ func TestLoadServerConfig_ExampleFile(t *testing.T) {
 	if scripts.MaxBackups != 5 {
 		t.Errorf("expected scripts.max_backups 5, got %d", scripts.MaxBackups)
 	}
+	if scripts.AssemblerMode != "eager" {
+		t.Errorf("expected scripts.assembler_mode eager, got %q", scripts.AssemblerMode)
+	}
+	if scripts.AssemblerPendingMemRaw != 8*1024*1024 {
+		t.Errorf("expected scripts.assembler_pending_mem_limit 8mb, got %d", scripts.AssemblerPendingMemRaw)
+	}
 
 	home, ok := cfg.GetStorage("home-dirs")
 	if !ok {
@@ -95,6 +101,9 @@ func TestLoadServerConfig_ExampleFile(t *testing.T) {
 	}
 	if home.MaxBackups != 10 {
 		t.Errorf("expected home-dirs.max_backups 10, got %d", home.MaxBackups)
+	}
+	if home.AssemblerMode != "lazy" {
+		t.Errorf("expected home-dirs.assembler_mode lazy, got %q", home.AssemblerMode)
 	}
 }
 
@@ -318,6 +327,54 @@ storages:
 	s, _ := cfg.GetStorage("default")
 	if s.MaxBackups != 5 {
 		t.Errorf("expected default max_backups 5, got %d", s.MaxBackups)
+	}
+	if s.AssemblerMode != "eager" {
+		t.Errorf("expected default assembler_mode eager, got %q", s.AssemblerMode)
+	}
+	if s.AssemblerPendingMemRaw != 8*1024*1024 {
+		t.Errorf("expected default assembler_pending_mem_limit 8mb, got %d", s.AssemblerPendingMemRaw)
+	}
+}
+
+func TestLoadServerConfig_InvalidAssemblerMode(t *testing.T) {
+	content := `
+server:
+  listen: "0.0.0.0:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  server_cert: /tmp/server.pem
+  server_key: /tmp/server-key.pem
+storages:
+  default:
+    base_dir: /tmp/backups
+    max_backups: 3
+    assembler_mode: "fast"
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadServerConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for invalid assembler_mode")
+	}
+}
+
+func TestLoadServerConfig_InvalidAssemblerPendingMemLimit(t *testing.T) {
+	content := `
+server:
+  listen: "0.0.0.0:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  server_cert: /tmp/server.pem
+  server_key: /tmp/server-key.pem
+storages:
+  default:
+    base_dir: /tmp/backups
+    max_backups: 3
+    assembler_pending_mem_limit: "0mb"
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadServerConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for invalid assembler_pending_mem_limit")
 	}
 }
 

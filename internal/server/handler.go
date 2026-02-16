@@ -895,18 +895,9 @@ func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath
 // validateAndCommitWithTrailer valida e comita um backup paralelo.
 // Diferente de validateAndCommit, o Trailer já foi recebido separadamente
 // pela conn de controle (não embutido no arquivo). O arquivo contém apenas dados.
-func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWriter, tmpPath string, totalBytes int64, trailer *protocol.Trailer, storageInfo config.StorageInfo, logger *slog.Logger) {
+func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWriter, tmpPath string, totalBytes int64, trailer *protocol.Trailer, serverChecksum [32]byte, storageInfo config.StorageInfo, logger *slog.Logger) {
 	if totalBytes == 0 {
 		logger.Error("no data received")
-		writer.Abort(tmpPath)
-		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
-		return
-	}
-
-	// Calcula SHA-256 dos dados (arquivo inteiro = dados puros)
-	serverChecksum, err := hashFile(tmpPath)
-	if err != nil {
-		logger.Error("computing server checksum", "error", err)
 		writer.Abort(tmpPath)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
 		return
@@ -1105,8 +1096,11 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		return
 	}
 
-	// Cria assembler para staging de chunks
-	assembler, err := NewChunkAssembler(sessionID, writer.AgentDir(), logger)
+	// Cria assembler para staging de chunks (configurável por storage)
+	assembler, err := NewChunkAssemblerWithOptions(sessionID, writer.AgentDir(), logger, ChunkAssemblerOptions{
+		Mode:            storageInfo.AssemblerMode,
+		PendingMemLimit: storageInfo.AssemblerPendingMemRaw,
+	})
 	if err != nil {
 		logger.Error("creating chunk assembler", "error", err)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
@@ -1178,7 +1172,13 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	conn.SetReadDeadline(time.Time{}) // limpa deadline
 
 	// Validação do checksum e commit
-	h.validateAndCommitWithTrailer(conn, writer, assembledPath, totalBytes, trailer, storageInfo, logger)
+	serverChecksum, err := assembler.Checksum()
+	if err != nil {
+		logger.Error("getting assembled checksum", "error", err)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+		return
+	}
+	h.validateAndCommitWithTrailer(conn, writer, assembledPath, totalBytes, trailer, serverChecksum, storageInfo, logger)
 }
 
 // receiveParallelStream recebe dados de um stream paralelo usando ChunkHeader framing.

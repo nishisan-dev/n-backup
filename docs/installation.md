@@ -143,14 +143,22 @@ storages:
   scripts:
     base_dir: /var/backups/scripts
     max_backups: 5
+    assembler_mode: eager
+    assembler_pending_mem_limit: 8mb
   home-dirs:
     base_dir: /var/backups/home
     max_backups: 10
+    assembler_mode: lazy
+    assembler_pending_mem_limit: 8mb
 
 logging:
   level: info
   format: json
 ```
+
+Defaults dos novos campos por storage:
+- `assembler_mode: eager`
+- `assembler_pending_mem_limit: 8mb` (8 * 1024 * 1024 bytes)
 
 ### 3.2. Agent
 

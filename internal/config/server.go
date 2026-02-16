@@ -7,6 +7,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -45,8 +46,11 @@ type TLSServer struct {
 
 // StorageInfo contém configurações de armazenamento e rotação de um storage nomeado.
 type StorageInfo struct {
-	BaseDir    string `yaml:"base_dir"`
-	MaxBackups int    `yaml:"max_backups"`
+	BaseDir                string `yaml:"base_dir"`
+	MaxBackups             int    `yaml:"max_backups"`
+	AssemblerMode          string `yaml:"assembler_mode"`              // eager|lazy (default: eager)
+	AssemblerPendingMem    string `yaml:"assembler_pending_mem_limit"` // ex: "8mb" (default: 8mb)
+	AssemblerPendingMemRaw int64  `yaml:"-"`
 }
 
 // GetStorage retorna o StorageInfo pelo nome ou false se não existir.
@@ -96,8 +100,29 @@ func (c *ServerConfig) validate() error {
 		}
 		if s.MaxBackups < 1 {
 			s.MaxBackups = 5
-			c.Storages[name] = s
 		}
+
+		if s.AssemblerMode == "" {
+			s.AssemblerMode = "eager"
+		}
+		s.AssemblerMode = strings.ToLower(strings.TrimSpace(s.AssemblerMode))
+		if s.AssemblerMode != "eager" && s.AssemblerMode != "lazy" {
+			return fmt.Errorf("storages.%s.assembler_mode must be eager or lazy, got %q", name, s.AssemblerMode)
+		}
+
+		if s.AssemblerPendingMem == "" {
+			s.AssemblerPendingMem = "8mb"
+		}
+		parsed, err := ParseByteSize(s.AssemblerPendingMem)
+		if err != nil {
+			return fmt.Errorf("storages.%s.assembler_pending_mem_limit: %w", name, err)
+		}
+		if parsed <= 0 {
+			return fmt.Errorf("storages.%s.assembler_pending_mem_limit must be > 0, got %s", name, s.AssemblerPendingMem)
+		}
+		s.AssemblerPendingMemRaw = parsed
+
+		c.Storages[name] = s
 	}
 	if c.Logging.Level == "" {
 		c.Logging.Level = "info"
