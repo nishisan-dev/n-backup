@@ -300,6 +300,8 @@ func (h *Handler) HandleConnection(ctx context.Context, conn net.Conn) {
 		h.handleResume(ctx, conn, logger)
 	case "PJIN":
 		h.handleParallelJoin(ctx, conn, logger)
+	case "CTRL":
+		h.handleControlChannel(ctx, conn, logger)
 	default:
 		logger.Warn("unknown magic bytes", "magic", string(magic))
 	}
@@ -314,6 +316,51 @@ func (h *Handler) handleHealthCheck(conn net.Conn, logger *slog.Logger) {
 
 	if err := protocol.WriteHealthResponse(conn, protocol.HealthStatusReady, diskFree); err != nil {
 		logger.Error("writing health response", "error", err)
+	}
+}
+
+// handleControlChannel processa uma conexão de canal de controle persistente (CTRL).
+// Responde a ControlPing com ControlPong indefinidamente até que o agent desconecte.
+func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logger *slog.Logger) {
+	logger.Info("control channel established")
+
+	// Deadline de leitura: 2x keepalive_interval típico (60s)
+	readTimeout := 60 * time.Second
+
+	for {
+		select {
+		case <-ctx.Done():
+			logger.Info("control channel closing: server shutting down")
+			return
+		default:
+		}
+
+		conn.SetReadDeadline(time.Now().Add(readTimeout))
+		timestamp, err := protocol.ReadControlPing(conn)
+		if err != nil {
+			logger.Info("control channel closed", "reason", err)
+			return
+		}
+
+		// Calcula server load simples (conexões ativas / 100)
+		activeConns := float32(h.ActiveConns.Load())
+		serverLoad := activeConns / 100.0
+		if serverLoad > 1.0 {
+			serverLoad = 1.0
+		}
+
+		// TODO: implementar disk free real com syscall.Statfs
+		var diskFree uint32 = 0
+
+		if err := protocol.WriteControlPong(conn, timestamp, serverLoad, diskFree); err != nil {
+			logger.Warn("control channel pong write failed", "error", err)
+			return
+		}
+
+		logger.Debug("control channel pong sent",
+			"timestamp", timestamp,
+			"server_load", serverLoad,
+		)
 	}
 }
 
