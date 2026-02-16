@@ -86,8 +86,8 @@ type ParallelStream struct {
 	sendOffset int64
 	sendMu     sync.Mutex
 	drainBytes int64 // atomic — bytes drenados (ACK'd) por este stream
-	active     bool
-	dead       bool // permanentemente morto (esgotou retries)
+	active     atomic.Bool
+	dead       atomic.Bool // permanentemente morto (esgotou retries)
 	senderDone chan struct{}
 	senderErr  chan error
 }
@@ -131,10 +131,9 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 	// Inicializa todos os streams com ring buffers (inativos)
 	for i := 0; i < cfg.MaxStreams; i++ {
 		d.streams[i] = &ParallelStream{
-			index:      uint8(i),
-			rb:         NewRingBuffer(cfg.BufferSize),
-			active:     false,
-			dead:       false,
+			index: uint8(i),
+			rb:    NewRingBuffer(cfg.BufferSize),
+			// active e dead começam como false (zero value de atomic.Bool)
 			senderDone: make(chan struct{}),
 			senderErr:  make(chan error, 1),
 		}
@@ -201,7 +200,7 @@ func (d *Dispatcher) emitChunk(data []byte) error {
 		idx := d.nextStream % d.maxStreams
 		d.nextStream++
 		s := d.streams[idx]
-		if s.active && !s.dead {
+		if s.active.Load() && !s.dead.Load() {
 			stream = s
 			break
 		}
@@ -272,7 +271,7 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 					d.logger.Error("ring buffer offset expired, data already freed — stream irrecoverable",
 						"stream", streamIdx, "offset", offset,
 						"rbTail", stream.rb.Tail(), "rbHead", stream.rb.Head())
-					stream.dead = true
+					stream.dead.Store(true)
 					d.DeactivateStream(streamIdx)
 					stream.senderErr <- fmt.Errorf("stream %d: offset expired (data freed from ring buffer)", streamIdx)
 					return
@@ -297,7 +296,7 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 				if retries >= maxRetriesPerStream {
 					d.logger.Error("stream permanently dead, max retries exceeded",
 						"stream", streamIdx, "retries", retries)
-					stream.dead = true
+					stream.dead.Store(true)
 					d.DeactivateStream(streamIdx)
 					stream.senderErr <- fmt.Errorf("stream %d: max retries (%d) exceeded: %w",
 						streamIdx, maxRetriesPerStream, writeErr)
@@ -328,7 +327,7 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 					d.logger.Error("resume offset no longer in ring buffer — stream irrecoverable",
 						"stream", streamIdx, "resumeOffset", resumeOffset,
 						"rbTail", stream.rb.Tail(), "rbHead", stream.rb.Head())
-					stream.dead = true
+					stream.dead.Store(true)
 					d.DeactivateStream(streamIdx)
 					stream.senderErr <- fmt.Errorf("stream %d: resume offset %d expired from ring buffer", streamIdx, resumeOffset)
 					return
@@ -343,7 +342,7 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 					if readErr != nil || n < protocol.ChunkHeaderSize {
 						d.logger.Error("failed to read chunk header at resume offset",
 							"stream", streamIdx, "offset", resumeOffset, "error", readErr)
-						stream.dead = true
+						stream.dead.Store(true)
 						d.DeactivateStream(streamIdx)
 						stream.senderErr <- fmt.Errorf("stream %d: cannot read header at resume offset %d", streamIdx, resumeOffset)
 						return
@@ -353,7 +352,7 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 						d.logger.Error("chunk header at resume offset has invalid length — desync detected",
 							"stream", streamIdx, "offset", resumeOffset,
 							"hdrLength", hdrLength, "maxChunkSize", d.chunkSize)
-						stream.dead = true
+						stream.dead.Store(true)
 						d.DeactivateStream(streamIdx)
 						stream.senderErr <- fmt.Errorf("stream %d: desync at resume offset %d (invalid chunk length %d)",
 							streamIdx, resumeOffset, hdrLength)
@@ -488,7 +487,7 @@ func (d *Dispatcher) ActivateStream(streamIdx int) error {
 	}
 
 	stream := d.streams[streamIdx]
-	if stream.active {
+	if stream.active.Load() {
 		return nil // já ativo
 	}
 
@@ -538,7 +537,7 @@ func (d *Dispatcher) ActivateStream(streamIdx int) error {
 	stream.conn = tlsConn
 	stream.connMu.Unlock()
 
-	stream.active = true
+	stream.active.Store(true)
 	atomic.AddInt32(&d.activeCount, 1)
 
 	// Inicia sender com retry e ACK reader
@@ -557,11 +556,11 @@ func (d *Dispatcher) DeactivateStream(streamIdx int) {
 	}
 
 	stream := d.streams[streamIdx]
-	if !stream.active {
+	if !stream.active.Load() {
 		return
 	}
 
-	stream.active = false
+	stream.active.Store(false)
 	atomic.AddInt32(&d.activeCount, -1)
 	d.logger.Info("parallel stream deactivated", "stream", streamIdx)
 	d.notifyStreamChange()
@@ -583,7 +582,7 @@ func (d *Dispatcher) DrainStream(streamIdx uint8) {
 	}
 
 	stream := d.streams[streamIdx]
-	if !stream.active {
+	if !stream.active.Load() {
 		d.logger.Info("drain requested for inactive stream, ignoring",
 			"stream", streamIdx)
 		return
@@ -631,7 +630,7 @@ func (d *Dispatcher) SampleRates() RateSample {
 
 	var totalDrain int64
 	for i := 0; i < d.maxStreams; i++ {
-		if d.streams[i].active {
+		if d.streams[i].active.Load() {
 			totalDrain += atomic.SwapInt64(&d.streams[i].drainBytes, 0)
 		}
 	}
@@ -676,11 +675,11 @@ func (d *Dispatcher) WaitAllSenders(ctx context.Context) error {
 
 	go func() {
 		for i := 0; i < d.maxStreams; i++ {
-			if d.streams[i].active || d.streams[i].dead {
+			if d.streams[i].active.Load() || d.streams[i].dead.Load() {
 				if err := d.WaitSender(i); err != nil {
 					// Stream morto após esgotar retries — log mas não aborta imediatamente.
 					// Outros streams podem ainda estar transmitindo.
-					if d.streams[i].dead {
+					if d.streams[i].dead.Load() {
 						d.logger.Warn("dead stream sender finished with error",
 							"stream", i, "error", err)
 						continue

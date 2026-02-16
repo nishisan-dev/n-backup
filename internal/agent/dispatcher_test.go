@@ -40,7 +40,7 @@ func (mc *mockConn) SetWriteDeadline(t time.Time) error { return nil }
 func activateStreamManually(d *Dispatcher, idx int, conn net.Conn) {
 	s := d.streams[idx]
 	s.conn = conn
-	s.active = true
+	s.active.Store(true)
 	atomic.AddInt32(&d.activeCount, 1)
 }
 
@@ -183,8 +183,8 @@ func TestDispatcher_AllDeadStreams(t *testing.T) {
 	// Ativa e marca como mortos
 	activateStreamManually(d, 0, &mockConn{})
 	activateStreamManually(d, 1, &mockConn{})
-	d.streams[0].dead = true
-	d.streams[1].dead = true
+	d.streams[0].dead.Store(true)
+	d.streams[1].dead.Store(true)
 
 	// Write deve retornar ErrAllStreamsDead
 	data := make([]byte, 512)
@@ -215,7 +215,7 @@ func TestDispatcher_SkipDeadStream(t *testing.T) {
 	}
 
 	// Marca stream 1 como morto
-	d.streams[1].dead = true
+	d.streams[1].dead.Store(true)
 
 	// Escreve 4 chunks — devem ir para streams 0 e 2 (skip 1)
 	data := make([]byte, 512)
@@ -342,7 +342,7 @@ func TestSender_ErrOffsetExpired_MarksStreamDead(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
-		if !stream.dead {
+		if !stream.dead.Load() {
 			t.Fatal("stream should be marked as dead after ErrOffsetExpired")
 		}
 	case <-time.After(3 * time.Second):
