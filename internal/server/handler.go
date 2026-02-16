@@ -911,6 +911,9 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 		return
 	}
 
+	// Deadline para leitura do handshake (previne slowloris)
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+
 	// Lê agent name até '\n'
 	agentName, err := readUntilNewline(conn)
 	if err != nil {
@@ -972,6 +975,7 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	}
 
 	// Busca storage nomeado
+	conn.SetReadDeadline(time.Time{}) // limpa deadline do handshake
 	storageInfo, ok := h.cfg.GetStorage(storageName)
 	if !ok {
 		logger.Warn("storage not found")
@@ -1354,7 +1358,12 @@ func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWrit
 	protocol.WriteFinalACK(conn, protocol.FinalStatusOK)
 }
 
+// maxHandshakeFieldLen é o comprimento máximo permitido para campos do handshake
+// (agentName, storageName, backupName, clientVersion).
+const maxHandshakeFieldLen = 512
+
 // readUntilNewline lê bytes até encontrar '\n', retornando a string sem o delimitador.
+// Limitado a maxHandshakeFieldLen bytes para prevenir slowloris/OOM.
 func readUntilNewline(conn net.Conn) (string, error) {
 	var buf []byte
 	oneByte := make([]byte, 1)
@@ -1366,6 +1375,9 @@ func readUntilNewline(conn net.Conn) (string, error) {
 			break
 		}
 		buf = append(buf, oneByte[0])
+		if len(buf) > maxHandshakeFieldLen {
+			return "", fmt.Errorf("handshake field exceeds max length %d", maxHandshakeFieldLen)
+		}
 	}
 	return string(buf), nil
 }
