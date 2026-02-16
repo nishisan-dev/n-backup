@@ -836,8 +836,9 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 					case ackCh.(chan struct{}) <- struct{}{}:
 					default:
 					}
+					return false // encontrou e sinalizou, pode parar
 				}
-				return false // encontrou, não precisa continuar
+				return true // esta sessão não tem RotatePending para este idx, continua
 			})
 
 		case protocol.MagicControlProgress:
