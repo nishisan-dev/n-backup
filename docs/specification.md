@@ -1,12 +1,12 @@
-# StreamGuard Agent — Especificação Técnica
+# n-backup — Especificação Técnica
 
 ## 1. Visão Geral
 
-O **StreamGuard** é um sistema de backup client-server escrito em Go, projetado para realizar streaming de dados diretamente da origem para o destino **sem criar arquivos temporários no disco de origem**. O resultado é um arquivo `.tar.gz` padrão Linux, preservando caminhos, permissões e estrutura de diretórios.
+O **n-backup** é um sistema de backup client-server escrito em Go, projetado para realizar streaming de dados diretamente da origem para o destino **sem criar arquivos temporários no disco de origem**. O resultado é um arquivo `.tar.gz` padrão Linux, preservando caminhos, permissões e estrutura de diretórios.
 
 ### 1.1 Problema
 
-Em servidores com pouco espaço em disco ou discos lentos, o método tradicional ("compactar primeiro, enviar depois") é inviável para grandes volumes. O StreamGuard elimina essa limitação ao fazer `tar | gzip | network` em um único pipeline de streaming.
+Em servidores com pouco espaço em disco ou discos lentos, o método tradicional ("compactar primeiro, enviar depois") é inviável para grandes volumes. O n-backup elimina essa limitação ao fazer `tar | pgzip | network` em um único pipeline de streaming.
 
 ### 1.2 Origem
 
@@ -37,7 +37,7 @@ tar -cvf - -C / app/scripts/ home/ etc/ | gzip | ssh "$REMOTE_HOST" "cat > '$REM
 ### 2.3 Streaming Pipeline
 
 ```
-fs.WalkDir ──▶ tar.Writer ──▶ gzip.Writer ──▶ RingBuffer ──▶ tls.Conn ──▶ Server (io.Copy → disk)
+fs.WalkDir ──▶ tar.Writer ──▶ pgzip.Writer ──▶ RingBuffer ──▶ tls.Conn ──▶ Server (io.Copy → disk)
      │                                    │
      └── excludes/includes (glob)           └── backpressure (bloqueia se cheio)
 ```
@@ -47,6 +47,7 @@ fs.WalkDir ──▶ tar.Writer ──▶ gzip.Writer ──▶ RingBuffer ─�
 - ACK reader processa SACKs do server e avança o tail do buffer.
 - SHA-256 é calculado inline via `io.MultiWriter` sobre o stream compactado.
 - Se a conexão cair, o sender reconecta e retoma do último offset válido.
+- A compressão usa `pgzip` (klauspost) com goroutines paralelas — até 3x mais rápido que gzip stdlib.
 
 ### 2.4 Agent: Daemon Mode
 
@@ -211,7 +212,7 @@ Quando uma conexão cai mid-stream, o agent pode reconectar e retomar de onde pa
 └──────────┴─────────────┘
 ```
 
-Enviado periodicamente pelo server (a cada 64MB) para confirmar recebimento. O agent avança o tail do ring buffer, liberando espaço para novas escritas.
+Enviado periodicamente pelo server (a cada 1MB) para confirmar recebimento. O agent avança o tail do ring buffer, liberando espaço para novas escritas.
 
 ### 3.5 Parallel Streaming
 
@@ -344,6 +345,135 @@ backups:
 - **parallels**: `0` desabilita (single stream), `1-8` define o máximo de streams.
 - O agent usa um **Dispatcher** (round-robin) e um **AutoScaler** (histerese) para distribuir chunks entre streams.
 
+### 3.6 Control Channel Protocol (v1.3.8+)
+
+O agent pode manter uma conexão TLS persistente dedicada ao controle e monitoramento.
+
+#### Estabelecimento
+
+```
+Agent                                     Server
+  │                                          │
+  │──── TLS 1.3 Handshake (mTLS) ──────────▶│
+  │──── CTRL (4B: 0x43 0x54 0x52 0x4C) ────▶│  ← magic de controle
+  │──── KeepAliveInterval (uint32, secs) ──▶│  ← negociação de intervalo
+  │                                          │
+  │──── ControlPing (CPNG + timestamp) ────▶│  ← keep-alive periódico
+  │◀─── ControlPong (CPNG + ts + load +    ─│  ← resposta + status do server
+  │                    diskFree)              │
+  │     ... ping/pong contínuo ...           │
+  │                                          │
+  │◀─── ControlRotate (CROT + streamIdx) ──│  ← server pede drenagem
+  │──── ControlRotateACK (CRAK + streamIdx)▶│  ← agent confirma drenagem
+```
+
+#### Frames de Controle
+
+##### ControlPing (Agent → Server)
+
+```
+┌──────────┬─────────────┐
+│ "CPNG"   │ Timestamp    │
+│ 4 bytes  │ 8B int64     │
+└──────────┴─────────────┘
+```
+
+- **Magic**: `0x43 0x50 0x4E 0x47` ("CPNG")
+- **Timestamp**: `time.Now().UnixNano()` — usado para cálculo de RTT
+
+##### ControlPong (Server → Agent)
+
+```
+┌──────────┬─────────────┬────────────┬──────────┐
+│ "CPNG"   │ Timestamp    │ ServerLoad  │ DiskFree  │
+│ 4 bytes  │ 8B int64     │ 4B float32  │ 4B uint32 │
+└──────────┴─────────────┴────────────┴──────────┘
+```
+
+- **Timestamp**: echo do timestamp do ping (para cálculo de RTT)
+- **ServerLoad**: carga do server (0.0 a 1.0)
+- **DiskFree**: espaço livre em disco (MB)
+
+##### ControlRotate (Server → Agent)
+
+```
+┌──────────┬────────────┐
+│ "CROT"   │ StreamIndex │
+│ 4 bytes  │ 1 byte      │
+└──────────┴────────────┘
+```
+
+- **Magic**: `0x43 0x52 0x4F 0x54` ("CROT")
+- Solicita drenagem graceful do stream indicado
+
+##### ControlRotateACK (Agent → Server)
+
+```
+┌──────────┬────────────┐
+│ "CRAK"   │ StreamIndex │
+│ 4 bytes  │ 1 byte      │
+└──────────┴────────────┘
+```
+
+- **Magic**: `0x43 0x52 0x41 0x4B` ("CRAK")
+- Confirma que o stream foi drenado e pode ser rotacionado
+
+##### ControlAdmit (Server → Agent)
+
+```
+┌──────────┬────────┐
+│ "CADM"   │ SlotID  │
+│ 4 bytes  │ 1 byte  │
+└──────────┴────────┘
+```
+
+Autoriza início de backup em slot específico.
+
+##### ControlDefer (Server → Agent)
+
+```
+┌──────────┬─────────────┐
+│ "CDFE"   │ WaitMinutes  │
+│ 4 bytes  │ 4B uint32    │
+└──────────┴─────────────┘
+```
+
+Solicita que o agent espere antes de iniciar backup.
+
+##### ControlAbort (Server → Agent)
+
+```
+┌──────────┬──────────┐
+│ "CABT"   │ Reason    │
+│ 4 bytes  │ 4B uint32 │
+└──────────┴──────────┘
+```
+
+| Reason | Código | Significado |
+|--------|--------|-------------|
+| DISK_FULL | `1` | Disco cheio no server |
+| SERVER_BUSY | `2` | Server sobrecarregado |
+| MAINTENANCE | `3` | Server em manutenção |
+
+#### RTT EWMA
+
+O RTT é calculado via Exponentially Weighted Moving Average (α = 0.25):
+
+```
+RTT_new = α × sample + (1 - α) × RTT_old
+```
+
+#### Configuração
+
+```yaml
+daemon:
+  control_channel:
+    enabled: true              # default: true
+    keepalive_interval: 30s    # intervalo entre PINGs (≥ 1s)
+    reconnect_delay: 5s        # delay inicial de reconexão
+    max_reconnect_delay: 5m    # delay máximo (exponential backoff)
+```
+
 ---
 
 ## 4. Configuração
@@ -354,9 +484,6 @@ backups:
 agent:
   name: "web-server-01"
 
-daemon:
-  schedule: "0 2 * * *"        # Cron expression (diário às 02h)
-
 server:
   address: "backup.nishisan.dev:9847"
 
@@ -365,26 +492,35 @@ tls:
   client_cert: /etc/nbackup/agent.pem
   client_key: /etc/nbackup/agent-key.pem
 
-backup:
-  sources:
-    - path: /app/scripts
-    - path: /home
-    - path: /etc
-  exclude:
-    - "*/access-logs/"
-    - "*.log"
-    - "*/tmp/sess*"
-    - "node_modules/**"
-    - ".git/**"
+backups:
+  - name: "app"
+    storage: "scripts"
+    schedule: "0 2 * * *"
+    parallels: 0
+    sources:
+      - path: /app/scripts
+    exclude:
+      - "*.log"
 
 retry:
   max_attempts: 5
   initial_delay: 1s
   max_delay: 5m
 
+resume:
+  buffer_size: 256mb
+  chunk_size: 1mb
+
 logging:
-  level: info                  # debug, info, warn, error
-  format: json                 # json, text
+  level: info
+  format: json
+
+daemon:
+  control_channel:
+    enabled: true
+    keepalive_interval: 30s
+    reconnect_delay: 5s
+    max_reconnect_delay: 5m
 ```
 
 ### 4.2 Server (`server.yaml`)
@@ -495,6 +631,17 @@ O daemon responde a `SIGTERM` e `SIGINT`:
 - Se ocioso: shutdown imediato.
 - Se backup em andamento: aguarda conclusão ou timeout configurável antes de abortar.
 
+### 5.6 Control Channel (v1.3.8+)
+
+O agent mantém uma conexão TLS persistente com o server para keep-alive e orquestração:
+
+- **Keep-alive**: PINGs periódicos detectam desconexão antes que o backup comece a falhar
+- **RTT EWMA**: Medição contínua de latência para decisões futuras de escalamento
+- **Graceful Flow Rotation**: Server envia `ControlRotate` → Agent drena stream → Responde `ControlRotateACK` → Zero data loss
+- **Reconexão automática**: Exponential backoff (5s → 5m)
+
+Ver seção 3.6 para detalhes dos frames.
+
 ---
 
 ## 6. Estrutura do Projeto
@@ -502,22 +649,22 @@ O daemon responde a `SIGTERM` e `SIGINT`:
 ```
 n-backup/
 ├── cmd/
-│   ├── nbackup-agent/           # Entrypoint do daemon (client)
+│   ├── nbackup-agent/
 │   │   └── main.go
-│   └── nbackup-server/          # Entrypoint do server
+│   └── nbackup-server/
 │       └── main.go
 ├── internal/
-│   ├── agent/                   # Scanner, streamer, scheduler
-│   ├── server/                  # Receiver, storage, rotação
-│   ├── protocol/                # Frames, handshake, parser
-│   ├── pki/                     # Geração de certificados mTLS
-│   ├── config/                  # Parsing YAML
+│   ├── agent/                   # Scanner, streamer, scheduler, control channel
+│   │   ├── control_channel.go  #   Canal de controle persistente
+│   │   └── ...                 #   backup, daemon, dispatcher, autoscaler, etc.
+│   ├── server/                  # Receiver, storage, rotação, control handler
+│   ├── protocol/                # Frames: data (protocol.go) + control (control.go)
+│   ├── pki/                     # Certificados mTLS
+│   ├── config/                  # Parsing YAML + ControlChannelConfig
 │   └── logging/                 # Logger estruturado
 ├── docs/
 │   ├── specification.md         # Este documento
 │   └── diagrams/
-│       ├── architecture.puml
-│       └── protocol_sequence.puml
 ├── configs/
 │   ├── agent.example.yaml
 │   └── server.example.yaml
@@ -558,7 +705,7 @@ nbackup-agent cert gen-host --name web-server-01
 | Linguagem | Go (Golang) |
 | Transporte | TCP puro sobre TLS 1.3 |
 | Segurança | mTLS (Mutual TLS) |
-| Compactação | gzip (`compress/gzip` stdlib) |
+| Compactação | pgzip (`klauspost/pgzip` — compressão paralela multi-core) |
 | Empacotamento | tar (`archive/tar` stdlib) |
 | Configuração | YAML (`gopkg.in/yaml.v3`) |
 | Logging | `slog` (stdlib Go 1.21+) |

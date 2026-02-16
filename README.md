@@ -18,6 +18,10 @@ Sistema de backup **high-performance** client-server escrito em Go. Streaming di
 | **Integridade SHA-256** | Hash calculado inline durante streaming. Validação dupla (agent + server). |
 | **Resume Mid-Stream** | Ring buffer em memória (configurável, padrão 256MB) permite retomar backups interrompidos. |
 | **Parallel Streaming** | Até 255 streams TLS paralelos com chunk-based dispatch para maximizar throughput. |
+| **Compressão Paralela** | `pgzip` (klauspost) com goroutines paralelas — até 3x mais rápido que gzip stdlib. |
+| **Control Channel** | Conexão TLS persistente para keep-alive (PING/PONG), medição de RTT e orquestração server-side. |
+| **Graceful Flow Rotation** | Server solicita drenagem de streams via ControlRotate — zero data loss em reconexões. |
+| **RTT Metrics** | RTT EWMA contínuo via control channel, com status do server (carga, disco). |
 | **Rotação Automática** | Server mantém os N backups mais recentes por agent/storage. |
 | **Retry Exponential** | Reconexão automática com backoff exponencial configurável. |
 | **Named Storages** | Múltiplos storages no server com políticas de rotação independentes. |
@@ -43,12 +47,17 @@ Sistema de backup **high-performance** client-server escrito em Go. Streaming di
 
 **Single Stream:**
 ```
-fs.WalkDir → tar.Writer → gzip.Writer → RingBuffer → tls.Conn → Server (io.Copy → disco)
+fs.WalkDir → tar.Writer → pgzip.Writer → RingBuffer → tls.Conn → Server (io.Copy → disco)
 ```
 
 **Parallel Streaming:**
 ```
-fs.WalkDir → tar.Writer → gzip.Writer → Dispatcher (round-robin) → N × tls.Conn → Server (ChunkAssembler → disco)
+fs.WalkDir → tar.Writer → pgzip.Writer → Dispatcher (round-robin) → N × tls.Conn → Server (ChunkAssembler → disco)
+```
+
+**Control Channel (persistente):**
+```
+Agent ←→ Server: CTRL magic → ControlPing/Pong (keep-alive + RTT) + ControlRotate/RotateACK (orquestração)
 ```
 
 ---
@@ -214,6 +223,13 @@ logging:
   level: info
   format: json
   file: /var/log/nbackup/agent.log    # Opcional
+
+daemon:
+  control_channel:
+    enabled: true                     # Canal de controle persistente (default: true)
+    keepalive_interval: 30s           # Intervalo entre PINGs (≥ 1s)
+    reconnect_delay: 5s               # Delay inicial de reconexão
+    max_reconnect_delay: 5m           # Delay máximo (exponential backoff)
 ```
 
 ```bash
@@ -290,7 +306,7 @@ Cada release inclui:
 |---------|-----------|
 | Linguagem | Go |
 | Transporte | TCP + TLS 1.3 (mTLS) |
-| Compactação | gzip (stdlib) |
+| Compactação | pgzip (klauspost/pgzip — compressão paralela multi-core) |
 | Empacotamento | tar (stdlib) |
 | Configuração | YAML |
 | Logging | slog (JSON/text) |

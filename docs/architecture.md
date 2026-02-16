@@ -72,10 +72,10 @@ O **n-backup** é um sistema de backup client-server de alta performance escrito
 │                                                                 │
 │  ┌───────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐   │
 │  │ Scheduler │─▶│ Scanner  │─▶│ Streamer │─▶│ RingBuffer   │   │
-│  │ (cron)    │  │(WalkDir) │  │(tar+gzip)│  │(backpressure)│   │
-│  └───────────┘  └──────────┘  └──────────┘  └──────┬───────┘   │
+│  │ (cron)    │  │(WalkDir) │  │(tar+pgz)│  │(backpressure)│   │
+│  └───────────┘  └──────────┘  └──────────┘  └───────┬──────┘   │
 │                                                     │           │
-│  ┌───────────┐  ┌──────────┐  ┌──────────┐  ┌──────▼───────┐   │
+│  ┌───────────┐  ┌──────────┐  ┌──────────┐  ┌───────▼──────┐   │
 │  │ Config    │  │ Logger   │  │  Retry   │  │  TLS/Proto   │   │
 │  │ (YAML)   │  │ (slog)   │  │(backoff) │  │  (mTLS)      │   │
 │  └───────────┘  └──────────┘  └──────────┘  └──────────────┘   │
@@ -85,6 +85,12 @@ O **n-backup** é um sistema de backup client-server de alta performance escrito
 │  │ (--once)  │  │ (round-robin)│  │ (hysteresis scaling) │     │
 │  └───────────┘  └──────────────┘  └──────────────────────┘     │
 │                                                                 │
+│  ┌──────────────────────┐                                       │
+│  │ ControlChannel       │                                       │
+│  │ (keep-alive + RTT +  │                                       │
+│  │  flow rotation ctrl) │                                       │
+│  └──────────────────────┘                                       │
+│                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -93,12 +99,13 @@ O **n-backup** é um sistema de backup client-server de alta performance escrito
 | **Scheduler** | `internal/agent/scheduler.go` | Agenda execuções via cron expression (`robfig/cron`), timeout de 24h por job |
 | **Daemon** | `internal/agent/daemon.go` | Loop principal, graceful shutdown (`SIGTERM`/`SIGINT`), hot-reload via `SIGHUP` |
 | **Scanner** | `internal/agent/scanner.go` | `fs.WalkDir` com glob include/exclude, gera lista de arquivos para tar |
-| **Streamer** | `internal/agent/streamer.go` | Pipeline `tar.Writer → gzip.Writer → io.Pipe`, calcula SHA-256 inline |
+| **Streamer** | `internal/agent/streamer.go` | Pipeline `tar.Writer → pgzip.Writer → io.Pipe`, calcula SHA-256 inline |
 | **RingBuffer** | `internal/agent/ringbuffer.go` | Buffer circular em memória (default 256MB), backpressure, suporte a resume |
 | **Backup** | `internal/agent/backup.go` | Orquestrador: conecta, handshake, decide single/parallel, conn primária control-only (parallel) |
 | **Dispatcher** | `internal/agent/dispatcher.go` | Round-robin de chunks, retry/reconnect por stream com backoff, dead stream marking |
 | **AutoScaler** | `internal/agent/autoscaler.go` | Escala streams dinamicamente com histerese baseada em eficiência |
 | **Progress** | `internal/agent/progress.go` | Barra de progresso para modo `--once --progress` (MB/s, ETA, retries) |
+| **ControlChannel** | `internal/agent/control_channel.go` | Conexão TLS persistente com keep-alive (PING/PONG), RTT EWMA, recepção de ControlRotate para drenagem graceful de streams |
 
 ### 3.2. nbackup-server
 
@@ -135,8 +142,8 @@ O **n-backup** é um sistema de backup client-server de alta performance escrito
 
 | Módulo | Pacote | Responsabilidade |
 |--------|--------|-----------------|
-| **Config** | `internal/config/` | Parsing YAML, validação, defaults, `ParseByteSize` |
-| **Protocol** | `internal/protocol/` | Frames binários (Handshake, ACK, SACK, Resume, Parallel), reader/writer |
+| **Config** | `internal/config/` | Parsing YAML, validação, defaults, `ParseByteSize`, `ControlChannelConfig` |
+| **Protocol** | `internal/protocol/` | Frames binários (Handshake, ACK, SACK, Resume, Parallel, Control) |
 | **PKI** | `internal/pki/` | Configuração TLS client/server, carregamento de certificados |
 | **Logging** | `internal/logging/` | Factory de `slog.Logger` (JSON/text, nível configurável) |
 
@@ -149,7 +156,7 @@ O **n-backup** é um sistema de backup client-server de alta performance escrito
 ### Pipeline de Streaming (Single Stream)
 
 ```
-fs.WalkDir ──▶ tar.Writer ──▶ gzip.Writer ──▶ RingBuffer ──▶ tls.Conn ──▶ Server (io.Copy → disk)
+fs.WalkDir ──▶ tar.Writer ──▶ pgzip.Writer ──▶ RingBuffer ──▶ tls.Conn ──▶ Server (io.Copy → disk)
      │                                    │
      └── excludes/includes (glob)          └── backpressure (bloqueia se cheio)
 ```
@@ -161,6 +168,8 @@ fs.WalkDir ──▶ tar.Writer ──▶ gzip.Writer ──▶ RingBuffer ─�
 5. **RingBuffer** aplica backpressure — bloqueia o producer se cheio (256MB default)
 6. **Sender goroutine** lê do buffer por offset absoluto e envia para a conexão TLS
 7. **ACK reader** processa SACKs do server e avança o tail do buffer
+
+> **Nota:** A compressão usa `pgzip` (klauspost) com goroutines paralelas, obtendo throughput até 3x superior ao `compress/gzip` da stdlib.
 
 ### Pipeline Paralelo (v1.2.3+)
 
@@ -216,6 +225,13 @@ Agent                                      Server
 | ChunkSACK | `CSAK` | S→C | 17 bytes |
 | Health (PING) | `PING` | C→S | 4 bytes |
 | Health (PONG) | — | S→C | 10 bytes |
+| ControlPing | `CPNG` | C→S | 12 bytes |
+| ControlPong | `CPNG` | S→C | 20 bytes |
+| ControlRotate | `CROT` | S→C | 5 bytes |
+| ControlRotateACK | `CRAK` | C→S | 5 bytes |
+| ControlAdmit | `CADM` | S→C | 5 bytes |
+| ControlDefer | `CDFE` | S→C | 8 bytes |
+| ControlAbort | `CABT` | S→C | 8 bytes |
 
 Para detalhes completos dos frames, veja a [Especificação Técnica](specification.md).
 
@@ -268,7 +284,7 @@ Tentativa N → falha → aguarda min(2^N × initial_delay, max_delay)
 #### Single Stream
 
 1. Agent mantém **ring buffer** em memória (256MB default, até 1GB)
-2. Server envia **SACK** a cada 64MB
+2. Server envia **SACK** a cada 1MB
 3. Se conexão cair: agent reconecta, envia `RESUME` com `sessionID`
 4. Server responde com último offset gravado
 5. Agent retoma do offset (se ainda no buffer)
@@ -292,6 +308,27 @@ O scheduler configura `context.WithTimeout(24h)` por job, prevenindo zombie jobs
 - Se ocioso: shutdown imediato
 - Se backup em andamento: aguarda conclusão antes de encerrar
 
+### Control Channel (v1.3.8+)
+
+O agent mantém uma conexão TLS persistente com o server (magic `CTRL`) para:
+
+1. **Keep-alive**: PINGs periódicos configuráveis (`keepalive_interval`, default 30s)
+2. **RTT EWMA**: Medição contínua de latência (Exponentially Weighted Moving Average)
+3. **Status do server**: Carga (CPU) e espaço livre em disco no ControlPong
+4. **Graceful Flow Rotation**: Server envia `ControlRotate(streamIndex)` → Agent drena o stream e responde `ControlRotateACK` — zero data loss
+5. **Orquestração futura**: Frames `ControlAdmit`, `ControlDefer`, `ControlAbort` já definidos no protocolo
+
+O canal reconecta automaticamente com exponential backoff (`reconnect_delay` até `max_reconnect_delay`).
+
+```yaml
+daemon:
+  control_channel:
+    enabled: true
+    keepalive_interval: 30s
+    reconnect_delay: 5s
+    max_reconnect_delay: 5m
+```
+
 ---
 
 ## 8. Estrutura do Projeto
@@ -305,23 +342,26 @@ n-backup/
 │   ├── agent/                        # Scanner, streamer, scheduler, ringbuffer
 │   │   ├── autoscaler.go            #   AutoScaler de streams paralelos
 │   │   ├── backup.go                #   Orquestrador de backup
+│   │   ├── control_channel.go       #   Canal de controle persistente (PING/PONG, RTT, ControlRotate)
 │   │   ├── daemon.go                #   Daemon loop com graceful shutdown
 │   │   ├── dispatcher.go            #   Round-robin de chunks
 │   │   ├── progress.go              #   Progress bar (--once)
 │   │   ├── ringbuffer.go            #   Ring buffer para resume
 │   │   ├── scanner.go               #   fs.WalkDir com glob
 │   │   ├── scheduler.go             #   Cron scheduler wrapper
-│   │   └── streamer.go              #   Pipeline tar → gzip → rede
+│   │   └── streamer.go              #   Pipeline tar → pgzip → rede
 │   ├── config/                       # Parsing YAML + validação
-│   │   ├── agent.go                 #   AgentConfig
+│   │   ├── agent.go                 #   AgentConfig + ControlChannelConfig
 │   │   └── server.go                #   ServerConfig
 │   ├── integration/                  # Testes de integração
 │   ├── logging/                      # Factory de slog.Logger
 │   ├── pki/                          # Configuração TLS client/server
 │   ├── protocol/                     # Frames binários, reader, writer
+│   │   ├── protocol.go              #   Frames data (Handshake, ACK, SACK, Resume, Parallel)
+│   │   └── control.go               #   Frames de controle (CPNG, CROT, CRAK, CADM, CDFE, CABT)
 │   └── server/                       # Receiver, handler, storage, assembler
 │       ├── assembler.go             #   Reassembly de chunks paralelos
-│       ├── handler.go               #   Protocolo handler
+│       ├── handler.go               #   Protocolo handler + handleControlChannel
 │       ├── server.go                #   TLS listener
 │       └── storage.go               #   Escrita atômica + rotação
 ├── configs/                          # Exemplos de configuração
@@ -353,7 +393,7 @@ n-backup/
 |---|---------|--------------------------|---------------|
 | 1 | **TCP puro + mTLS** em vez de HTTP/2 ou gRPC | HTTP/2, gRPC, SSH pipe | Fluxo unidirecional sem necessidade de multiplexação HTTP. Zero overhead por byte transferido. |
 | 2 | **Protocolo binário customizado** | Protocol Buffers, JSON-RPC | Header mínimo (~60 bytes/sessão). O payload é stream raw — qualquer envelope adicional seria overhead puro. |
-| 3 | **gzip** em vez de Zstd | Zstd, LZ4, sem compressão | Stdlib Go, universalmente compatível (`tar xzf`). Zstd planejado para v2. |
+| 3 | **pgzip** em vez de gzip stdlib | gzip stdlib, Zstd, LZ4 | Compressão paralela multi-core (klauspost/pgzip). Compatível com `tar xzf`. Até 3x mais rápido que stdlib. Zstd planejado para v2. |
 | 4 | **Ring buffer em memória** | Write-ahead log em disco, sem resume | Simplicidade e performance. Disco seria mais resiliente mas adicionaria I/O na origem — contradiz o princípio zero-footprint. |
 | 5 | **Escrita atômica** (`.tmp` + rename) | Escrita direta, journaling | Rename é atômico no Linux (mesmo inode). Garante que um backup parcial nunca substitui um completo. |
 | 6 | **Rotação por índice** (N mais recentes) | Rotação por tempo, GFS | Simplicade. Rotação por tempo pode ser implementada no v2. |

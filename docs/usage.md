@@ -224,7 +224,7 @@ resume:
 |----------|---------|----------|
 | `resume.buffer_size` | `256mb` | Tamanho do ring buffer |
 | `resume.chunk_size` | `1mb` | Tamanho de cada chunk paralelo (64kb-16mb) |
-| SACK interval (fixo) | 64MB | Server confirma a cada 64MB |
+| SACK interval (fixo) | 1MB | Server confirma a cada 1MB |
 | Max resume attempts (fixo) | 5 | Tentativas antes de reiniciar |
 | Session TTL (fixo) | 1h | Tempo máximo para reconectar |
 
@@ -271,6 +271,36 @@ backups:
 
 > [!NOTE]
 > O AutoScaler adiciona streams gradualmente com base na eficiência observada (razão producer/drain), evitando overhead desnecessário.
+
+---
+
+## Control Channel
+
+O agent mantém uma conexão TLS persistente com o server para keep-alive, medição de RTT e orquestração:
+
+```yaml
+daemon:
+  control_channel:
+    enabled: true                # Ativar canal de controle (default: true)
+    keepalive_interval: 30s      # Intervalo entre PINGs (≥ 1s)
+    reconnect_delay: 5s          # Delay inicial de reconexão
+    max_reconnect_delay: 5m      # Delay máximo (exponential backoff)
+```
+
+### Funções
+
+| Função | Descrição |
+|--------|----------|
+| **Keep-alive** | PINGs periódicos detectam desconexão proativamente |
+| **RTT EWMA** | Medição contínua de latência via EWMA (α = 0.25) |
+| **Status do Server** | Carga de CPU e espaço livre em disco reportados no Pong |
+| **Graceful Flow Rotation** | Server solicita drenagem de stream via `ControlRotate` — zero data loss |
+
+> [!NOTE]
+> O control channel opera independentemente dos streams de dados. Se desabilitado (`enabled: false`), o agent funciona normalmente mas sem keep-alive e sem flow rotation graceful.
+
+> [!TIP]
+> Em links WAN com latência alta, aumente o `keepalive_interval` para 60s ou mais para reduzir overhead.
 
 ---
 
@@ -353,3 +383,5 @@ Exemplo de log JSON do agent:
 | `offset no longer in buffer` | Ring buffer overflow durante resume | Aumentar `resume.buffer_size` ou melhorar rede |
 | `session not found for resume` | Sessão expirou no server (>1h) | O backup reiniciará automaticamente |
 | `max resume attempts reached` | 5 tentativas de resume falharam | Verificar estabilidade da rede |
+| `control channel disconnected` | Server caiu ou timeout de keepalive | Canal reconectará automaticamente com backoff |
+| `keepalive_interval must be >= 1s` | Valor inválido na config | Ajustar para ≥ 1s |
