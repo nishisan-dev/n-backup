@@ -225,6 +225,9 @@ func (c *AgentConfig) validate() error {
 	if cc.KeepaliveInterval <= 0 {
 		cc.KeepaliveInterval = 30 * time.Second
 	}
+	if cc.KeepaliveInterval < time.Second {
+		return fmt.Errorf("daemon.control_channel.keepalive_interval must be >= 1s, got %s", cc.KeepaliveInterval)
+	}
 	if cc.ReconnectDelay <= 0 {
 		cc.ReconnectDelay = 5 * time.Second
 	}

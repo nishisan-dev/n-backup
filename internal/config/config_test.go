@@ -332,6 +332,33 @@ func TestLoadAgentConfig_DefaultRetry(t *testing.T) {
 	}
 }
 
+func TestLoadAgentConfig_ControlChannelKeepaliveTooLow(t *testing.T) {
+	content := `
+agent:
+  name: "test-agent"
+server:
+  address: "localhost:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  client_cert: /tmp/client.pem
+  client_key: /tmp/client-key.pem
+daemon:
+  control_channel:
+    keepalive_interval: 500ms
+backups:
+  - name: "test"
+    storage: "default"
+    schedule: "0 2 * * *"
+    sources:
+      - path: /tmp
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadAgentConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for keepalive_interval < 1s")
+	}
+}
+
 func TestLoadAgentConfig_FileNotFound(t *testing.T) {
 	_, err := LoadAgentConfig("/nonexistent/path/agent.yaml")
 	if err == nil {
