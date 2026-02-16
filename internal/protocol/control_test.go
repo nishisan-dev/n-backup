@@ -125,6 +125,7 @@ func TestReadControlMagic(t *testing.T) {
 		{"CADM", MagicControlAdmit},
 		{"CDFE", MagicControlDefer},
 		{"CABT", MagicControlAbort},
+		{"CPRG", MagicControlProgress},
 	}
 
 	for _, tt := range tests {
@@ -361,5 +362,81 @@ func TestControlPing_PayloadAfterMagic(t *testing.T) {
 	}
 	if got != ts {
 		t.Errorf("timestamp: want %d, got %d", ts, got)
+	}
+}
+
+func TestControlProgress_RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	total := uint32(15000)
+	sent := uint32(3200)
+
+	if err := WriteControlProgress(&buf, total, sent, true); err != nil {
+		t.Fatalf("WriteControlProgress failed: %v", err)
+	}
+	if buf.Len() != 13 {
+		t.Fatalf("expected 13 bytes, got %d", buf.Len())
+	}
+
+	got, err := ReadControlProgress(&buf)
+	if err != nil {
+		t.Fatalf("ReadControlProgress failed: %v", err)
+	}
+	if got.TotalObjects != total {
+		t.Errorf("total_objects: want %d, got %d", total, got.TotalObjects)
+	}
+	if got.ObjectsSent != sent {
+		t.Errorf("objects_sent: want %d, got %d", sent, got.ObjectsSent)
+	}
+	if !got.WalkComplete {
+		t.Error("walk_complete: want true, got false")
+	}
+}
+
+func TestControlProgress_WalkIncomplete(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteControlProgress(&buf, 500, 100, false); err != nil {
+		t.Fatalf("WriteControlProgress failed: %v", err)
+	}
+
+	got, err := ReadControlProgress(&buf)
+	if err != nil {
+		t.Fatalf("ReadControlProgress failed: %v", err)
+	}
+	if got.WalkComplete {
+		t.Error("walk_complete: want false, got true")
+	}
+}
+
+func TestControlProgress_InvalidMagic(t *testing.T) {
+	buf := bytes.NewBufferString("BAD!123456789")
+	_, err := ReadControlProgress(buf)
+	if err == nil {
+		t.Fatal("expected error for invalid magic")
+	}
+}
+
+func TestControlProgress_PayloadAfterMagic(t *testing.T) {
+	var buf bytes.Buffer
+	total := uint32(8000)
+	sent := uint32(4500)
+	WriteControlProgress(&buf, total, sent, true)
+
+	magic, _ := ReadControlMagic(&buf)
+	if magic != MagicControlProgress {
+		t.Fatalf("expected CPRG magic, got %q", magic)
+	}
+
+	got, err := ReadControlProgressPayload(&buf)
+	if err != nil {
+		t.Fatalf("ReadControlProgressPayload failed: %v", err)
+	}
+	if got.TotalObjects != total {
+		t.Errorf("total: want %d, got %d", total, got.TotalObjects)
+	}
+	if got.ObjectsSent != sent {
+		t.Errorf("sent: want %d, got %d", sent, got.ObjectsSent)
+	}
+	if !got.WalkComplete {
+		t.Error("walk_complete: want true, got false")
 	}
 }

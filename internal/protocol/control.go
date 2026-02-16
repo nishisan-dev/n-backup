@@ -32,6 +32,9 @@ var MagicControlDefer = [4]byte{'C', 'D', 'F', 'E'}
 // MagicControlAbort é o magic para frames ControlAbort (Server → Agent).
 var MagicControlAbort = [4]byte{'C', 'A', 'B', 'T'}
 
+// MagicControlProgress é o magic para frames ControlProgress (Agent → Server).
+var MagicControlProgress = [4]byte{'C', 'P', 'R', 'G'}
+
 // ControlPing é enviado pelo agent para o server no canal de controle.
 // Formato: [Magic "CPNG" 4B] [Timestamp int64 8B]
 type ControlPing struct {
@@ -82,6 +85,15 @@ const (
 	AbortReasonServerBusy  uint32 = 2
 	AbortReasonMaintenance uint32 = 3
 )
+
+// ControlProgress é enviado pelo agent ao server para reportar progresso do backup.
+// Formato: [Magic "CPRG" 4B] [TotalObjects uint32 4B] [ObjectsSent uint32 4B] [Flags uint8 1B]
+// Flags: bit 0 = WalkComplete (1 = prescan finalizado, total confiável)
+type ControlProgress struct {
+	TotalObjects uint32
+	ObjectsSent  uint32
+	WalkComplete bool
+}
 
 // ReadControlMagic lê os 4 bytes de magic do canal de controle.
 // Usado pelo dispatcher full-duplex para determinar o tipo de frame antes de parsear.
@@ -280,4 +292,47 @@ func ReadControlAbortPayload(r io.Reader) (uint32, error) {
 		return 0, fmt.Errorf("reading control abort payload: %w", err)
 	}
 	return binary.BigEndian.Uint32(buf), nil
+}
+
+// WriteControlProgress escreve o frame ControlProgress (Agent → Server).
+func WriteControlProgress(w io.Writer, totalObjects, objectsSent uint32, walkComplete bool) error {
+	buf := make([]byte, 13) // 4B magic + 4B total + 4B sent + 1B flags
+	copy(buf[0:4], MagicControlProgress[:])
+	binary.BigEndian.PutUint32(buf[4:8], totalObjects)
+	binary.BigEndian.PutUint32(buf[8:12], objectsSent)
+	if walkComplete {
+		buf[12] = 1
+	}
+	_, err := w.Write(buf)
+	return err
+}
+
+// ReadControlProgressPayload lê o payload de ControlProgress (9B) após o magic já ter sido lido.
+func ReadControlProgressPayload(r io.Reader) (*ControlProgress, error) {
+	buf := make([]byte, 9)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return nil, fmt.Errorf("reading control progress payload: %w", err)
+	}
+	return &ControlProgress{
+		TotalObjects: binary.BigEndian.Uint32(buf[0:4]),
+		ObjectsSent:  binary.BigEndian.Uint32(buf[4:8]),
+		WalkComplete: buf[8]&1 != 0,
+	}, nil
+}
+
+// ReadControlProgress lê o frame ControlProgress completo (magic + payload).
+func ReadControlProgress(r io.Reader) (*ControlProgress, error) {
+	buf := make([]byte, 13)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return nil, fmt.Errorf("reading control progress: %w", err)
+	}
+	if buf[0] != MagicControlProgress[0] || buf[1] != MagicControlProgress[1] ||
+		buf[2] != MagicControlProgress[2] || buf[3] != MagicControlProgress[3] {
+		return nil, fmt.Errorf("%w: expected CPRG, got %q", ErrInvalidMagic, string(buf[0:4]))
+	}
+	return &ControlProgress{
+		TotalObjects: binary.BigEndian.Uint32(buf[4:8]),
+		ObjectsSent:  binary.BigEndian.Uint32(buf[8:12]),
+		WalkComplete: buf[12]&1 != 0,
+	}, nil
 }
