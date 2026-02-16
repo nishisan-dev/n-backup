@@ -35,7 +35,7 @@ type ParallelACK struct {
 }
 
 // ProtocolVersion é a versão atual do protocolo.
-const ProtocolVersion byte = 0x02
+const ProtocolVersion byte = 0x03
 
 // Status codes para ACK (Server → Client após Handshake).
 const (
@@ -76,10 +76,11 @@ var (
 
 // Handshake representa o frame de handshake enviado pelo client.
 type Handshake struct {
-	Version     byte
-	AgentName   string
-	StorageName string
-	BackupName  string
+	Version       byte
+	AgentName     string
+	StorageName   string
+	BackupName    string
+	ClientVersion string
 }
 
 // ACK representa a resposta do server ao handshake.

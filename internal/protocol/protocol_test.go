@@ -15,8 +15,9 @@ func TestHandshake_RoundTrip(t *testing.T) {
 	agentName := "web-server-01"
 	storageName := "scripts"
 	backupName := "app"
+	clientVersion := "v1.2.3"
 
-	if err := WriteHandshake(&buf, agentName, storageName, backupName); err != nil {
+	if err := WriteHandshake(&buf, agentName, storageName, backupName, clientVersion); err != nil {
 		t.Fatalf("WriteHandshake: %v", err)
 	}
 
@@ -36,6 +37,9 @@ func TestHandshake_RoundTrip(t *testing.T) {
 	}
 	if hs.BackupName != backupName {
 		t.Errorf("expected backup name %q, got %q", backupName, hs.BackupName)
+	}
+	if hs.ClientVersion != clientVersion {
+		t.Errorf("expected client version %q, got %q", clientVersion, hs.ClientVersion)
 	}
 }
 
@@ -231,12 +235,14 @@ func TestHandshake_FrameSize(t *testing.T) {
 	storageName := "scripts"
 	backupName := "app"
 
-	if err := WriteHandshake(&buf, agentName, storageName, backupName); err != nil {
+	clientVersion := "v1.0.0"
+
+	if err := WriteHandshake(&buf, agentName, storageName, backupName, clientVersion); err != nil {
 		t.Fatalf("WriteHandshake: %v", err)
 	}
 
-	// Magic(4) + Version(1) + AgentName(14) + Delimiter(1) + StorageName(7) + Delimiter(1) + BackupName(3) + Delimiter(1) = 32 bytes
-	expected := 4 + 1 + len(agentName) + 1 + len(storageName) + 1 + len(backupName) + 1
+	// Magic(4) + Version(1) + AgentName(14) + Delimiter(1) + StorageName(7) + Delimiter(1) + BackupName(3) + Delimiter(1) + ClientVersion(6) + Delimiter(1) = 39 bytes
+	expected := 4 + 1 + len(agentName) + 1 + len(storageName) + 1 + len(backupName) + 1 + len(clientVersion) + 1
 	if buf.Len() != expected {
 		t.Errorf("expected handshake size %d, got %d", expected, buf.Len())
 	}
