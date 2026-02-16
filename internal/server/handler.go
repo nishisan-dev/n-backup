@@ -61,10 +61,10 @@ type Handler struct {
 	locks    *sync.Map // Mapa de locks por "agent:storage"
 	sessions *sync.Map // Mapa de sessões parciais por sessionID
 
-	// Control channel registry: agentName → net.Conn
+	// Control channel registry: agentName → *ControlConnInfo
 	// Registrado em handleControlChannel, usado por evaluateFlowRotation
-	// para enviar ControlRotate graceful.
-	controlConns   sync.Map // agentName (string) → net.Conn
+	// para enviar ControlRotate graceful, e por ConnectedAgents para observabilidade.
+	controlConns   sync.Map // agentName (string) → *ControlConnInfo
 	controlConnsMu sync.Map // agentName (string) → *sync.Mutex (protege writes na conn)
 
 	// Métricas observáveis pelo stats reporter
@@ -74,6 +74,14 @@ type Handler struct {
 
 	// Events ring buffer para observabilidade (nil quando WebUI desabilitada).
 	Events *observability.EventRing
+}
+
+// ControlConnInfo armazena metadata de um control channel conectado.
+type ControlConnInfo struct {
+	Conn        net.Conn
+	ConnectedAt time.Time
+	RemoteAddr  string
+	KeepaliveS  uint32
 }
 
 // NewHandler cria um novo Handler.
@@ -100,6 +108,51 @@ func (h *Handler) MetricsSnapshot() observability.MetricsData {
 		ActiveConns: h.ActiveConns.Load(),
 		Sessions:    sessionCount,
 	}
+}
+
+// ConnectedAgents retorna lista de agentes conectados via control channel.
+// Implementa observability.HandlerMetrics.
+func (h *Handler) ConnectedAgents() []observability.AgentInfo {
+	var agents []observability.AgentInfo
+
+	h.controlConns.Range(func(key, value interface{}) bool {
+		agentName := key.(string)
+		cci := value.(*ControlConnInfo)
+
+		// Verifica se há sessão ativa para este agent e extrai client version
+		hasSession := false
+		clientVersion := ""
+		h.sessions.Range(func(_, sv interface{}) bool {
+			switch s := sv.(type) {
+			case *PartialSession:
+				if s.AgentName == agentName {
+					hasSession = true
+					clientVersion = s.ClientVersion
+					return false
+				}
+			case *ParallelSession:
+				if s.AgentName == agentName {
+					hasSession = true
+					clientVersion = s.ClientVersion
+					return false
+				}
+			}
+			return true
+		})
+
+		agents = append(agents, observability.AgentInfo{
+			Name:          agentName,
+			RemoteAddr:    cci.RemoteAddr,
+			ConnectedAt:   cci.ConnectedAt.Format(time.RFC3339),
+			ConnectedFor:  time.Since(cci.ConnectedAt).Truncate(time.Second).String(),
+			KeepaliveS:    cci.KeepaliveS,
+			HasSession:    hasSession,
+			ClientVersion: clientVersion,
+		})
+		return true
+	})
+
+	return agents
 }
 
 // SessionsSnapshot retorna lista de sessões ativas como DTOs.
@@ -565,7 +618,7 @@ func (h *Handler) rotateStream(sessionKey any, ps *ParallelSession, idx uint8, m
 	}
 
 	// Tenta graceful rotation via control channel
-	ctrlConn, hasCtrl := h.controlConns.Load(ps.AgentName)
+	ctrlInfo, hasCtrl := h.controlConns.Load(ps.AgentName)
 	if hasCtrl {
 		// Cria canal para esperar ACK do agent
 		ackCh := make(chan struct{}, 1)
@@ -577,7 +630,7 @@ func (h *Handler) rotateStream(sessionKey any, ps *ParallelSession, idx uint8, m
 		if muRaw, ok := h.controlConnsMu.Load(ps.AgentName); ok {
 			mu := muRaw.(*sync.Mutex)
 			mu.Lock()
-			err := protocol.WriteControlRotate(ctrlConn.(net.Conn), idx)
+			err := protocol.WriteControlRotate(ctrlInfo.(*ControlConnInfo).Conn, idx)
 			mu.Unlock()
 			writeOK = (err == nil)
 			if err != nil {
@@ -696,7 +749,13 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 
 	// Registra control conn e mutex de write para este agent
 	writeMu := &sync.Mutex{}
-	h.controlConns.Store(agentName, conn)
+	cci := &ControlConnInfo{
+		Conn:        conn,
+		ConnectedAt: time.Now(),
+		RemoteAddr:  conn.RemoteAddr().String(),
+		KeepaliveS:  intervalSecs,
+	}
+	h.controlConns.Store(agentName, cci)
 	h.controlConnsMu.Store(agentName, writeMu)
 	defer h.controlConns.Delete(agentName)
 	defer h.controlConnsMu.Delete(agentName)

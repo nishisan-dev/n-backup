@@ -151,7 +151,7 @@ func TestEvaluateFlowRotation_GracefulWithControlChannel(t *testing.T) {
 	// Registra control conn para o agent
 	ctrlConn := &controlTestConn{}
 	mu := &sync.Mutex{}
-	h.controlConns.Store("agent-test", ctrlConn)
+	h.controlConns.Store("agent-test", &ControlConnInfo{Conn: ctrlConn, RemoteAddr: "test:1234", KeepaliveS: 30})
 	h.controlConnsMu.Store("agent-test", mu)
 
 	// Simula ACK chegando quase imediatamente em goroutine separada
@@ -222,7 +222,7 @@ func TestEvaluateFlowRotation_FallbackOnACKTimeout(t *testing.T) {
 	// Registra control conn mas NÃO envia ACK
 	ctrlConn := &controlTestConn{}
 	mu := &sync.Mutex{}
-	h.controlConns.Store("agent-test", ctrlConn)
+	h.controlConns.Store("agent-test", &ControlConnInfo{Conn: ctrlConn, RemoteAddr: "test:1234", KeepaliveS: 30})
 	h.controlConnsMu.Store("agent-test", mu)
 
 	// evaluateFlowRotation vai enviar ControlRotate, esperar ACK por rotateACKTimeout (10s),

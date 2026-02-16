@@ -136,6 +136,28 @@ const Components = {
     },
 
     // Renderiza tabela resumida de sessões no overview
+    renderOverviewAgents(agents) {
+        const card = document.getElementById('overview-agents-card');
+        const body = document.getElementById('overview-agents-body');
+
+        if (!agents || agents.length === 0) {
+            card.style.display = 'none';
+            return;
+        }
+
+        card.style.display = '';
+        body.innerHTML = agents.map(a => `
+            <tr>
+                <td><strong>${this.escapeHtml(a.name)}</strong></td>
+                <td>${this.escapeHtml(a.remote_addr)}</td>
+                <td>${this.escapeHtml(a.connected_for)}</td>
+                <td>${a.keepalive_s}s</td>
+                <td>${a.client_version ? `<span class="badge badge-neutral text-xs">${this.escapeHtml(a.client_version)}</span>` : '<span class="text-muted">—</span>'}</td>
+                <td>${a.has_session ? '<span class="badge badge-running">backup</span>' : '<span class="badge badge-connected">idle</span>'}</td>
+            </tr>
+        `).join('');
+    },
+
     renderOverviewSessions(sessions) {
         const card = document.getElementById('overview-sessions-card');
         const body = document.getElementById('overview-sessions-body');
@@ -170,7 +192,13 @@ const Components = {
         container.innerHTML = sessions.map(s => `
             <div class="session-card" data-session="${s.session_id}">
                 <div class="session-card-info">
-                    <span class="session-agent">${this.escapeHtml(s.agent)} — ${this.escapeHtml(s.backup || s.storage)}</span>
+                    <div class="session-card-header">
+                        <div class="session-card-title">
+                            <span class="session-agent">${this.escapeHtml(s.agent)}</span>
+                            ${s.client_version ? `<span class="badge badge-neutral text-xs">${this.escapeHtml(s.client_version)}</span>` : ''}
+                            <span class="session-backup">${this.escapeHtml(s.backup || s.storage)}</span>
+                        </div>
+                    </div>
                     <div class="session-meta">
                         ${this.modeBadge(s.mode)}
                         ${this.statusBadge(s.status)}
@@ -220,6 +248,7 @@ const Components = {
             <div class="info-item"><span class="info-label">Início</span><span class="info-value">${this.formatDateTime(detail.started_at)}</span></div>
             <div class="info-item"><span class="info-label">Último I/O</span><span class="info-value">${this.formatDateTime(detail.last_activity)}</span></div>
             ${detail.eta ? `<div class="info-item"><span class="info-label">ETA</span><span class="info-value">${detail.eta}</span></div>` : ''}
+            ${detail.client_version ? `<div class="info-item"><span class="info-label">Client Version</span><span class="info-value">${this.escapeHtml(detail.client_version)}</span></div>` : ''}
             ${progressHtml}
         `;
 

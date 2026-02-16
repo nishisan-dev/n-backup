@@ -26,6 +26,7 @@ type HandlerMetrics interface {
 	MetricsSnapshot() MetricsData
 	SessionsSnapshot() []SessionSummary
 	SessionDetail(id string) (*SessionDetail, bool)
+	ConnectedAgents() []AgentInfo
 }
 
 // MetricsData contém os dados de métricas coletados do Handler.
@@ -46,6 +47,7 @@ func NewRouter(metrics HandlerMetrics, cfg *config.ServerConfig, acl *ACL, event
 	mux.HandleFunc("GET /api/v1/metrics", makeMetricsHandler(metrics))
 	mux.HandleFunc("GET /api/v1/sessions", makeSessionsHandler(metrics))
 	mux.HandleFunc("GET /api/v1/sessions/{id}", makeSessionDetailHandler(metrics))
+	mux.HandleFunc("GET /api/v1/agents", makeAgentsHandler(metrics))
 	mux.HandleFunc("GET /api/v1/config/effective", makeConfigHandler(cfg))
 
 	// Events endpoint (se ring fornecido)
@@ -151,6 +153,17 @@ func makeEventsHandler(ring *EventRing) http.HandlerFunc {
 		limit := parseInt(r.URL.Query().Get("limit"), 50)
 		events := ring.Recent(limit)
 		writeJSON(w, http.StatusOK, events)
+	}
+}
+
+// makeAgentsHandler retorna um handler que lista agentes conectados via control channel.
+func makeAgentsHandler(metrics HandlerMetrics) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		agents := metrics.ConnectedAgents()
+		if agents == nil {
+			agents = []AgentInfo{}
+		}
+		writeJSON(w, http.StatusOK, agents)
 	}
 }
 

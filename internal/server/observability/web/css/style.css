@@ -437,6 +437,11 @@ body {
     color: #fb923c;
 }
 
+.badge-connected {
+    background: rgba(56, 189, 248, 0.15);
+    color: #38bdf8;
+}
+
 .badge-degraded {
     background: rgba(244, 63, 94, 0.15);
     color: var(--accent-rose);

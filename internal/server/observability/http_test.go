@@ -20,6 +20,7 @@ type mockMetrics struct {
 	data     MetricsData
 	sessions []SessionSummary
 	details  map[string]*SessionDetail
+	agents   []AgentInfo
 }
 
 func (m *mockMetrics) MetricsSnapshot() MetricsData       { return m.data }
@@ -31,11 +32,13 @@ func (m *mockMetrics) SessionDetail(id string) (*SessionDetail, bool) {
 	d, ok := m.details[id]
 	return d, ok
 }
+func (m *mockMetrics) ConnectedAgents() []AgentInfo { return m.agents }
 
 func newMockMetrics() *mockMetrics {
 	return &mockMetrics{
 		sessions: []SessionSummary{},
 		details:  map[string]*SessionDetail{},
+		agents:   []AgentInfo{},
 	}
 }
 
@@ -295,4 +298,61 @@ func mustParseCIDR(s string) *net.IPNet {
 		panic(err)
 	}
 	return cidr
+}
+
+func TestAgents_EmptyList(t *testing.T) {
+	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t))
+
+	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var resp []AgentInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if len(resp) != 0 {
+		t.Errorf("expected empty agents, got %d", len(resp))
+	}
+}
+
+func TestAgents_WithData(t *testing.T) {
+	mock := newMockMetrics()
+	mock.agents = []AgentInfo{
+		{Name: "web-01", RemoteAddr: "10.0.0.1:54321", ConnectedAt: "2025-01-01T00:00:00Z", ConnectedFor: "1h0m0s", KeepaliveS: 30, HasSession: true, ClientVersion: "1.7.2"},
+		{Name: "db-01", RemoteAddr: "10.0.0.2:54322", ConnectedAt: "2025-01-01T00:00:00Z", ConnectedFor: "30m0s", KeepaliveS: 15, HasSession: false},
+	}
+	router := NewRouter(mock, testCfg(), localhostACL(t))
+
+	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var resp []AgentInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if len(resp) != 2 {
+		t.Fatalf("expected 2 agents, got %d", len(resp))
+	}
+	// Verifica pelo menos um campo
+	found := false
+	for _, a := range resp {
+		if a.Name == "web-01" && a.HasSession && a.ClientVersion == "1.7.2" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected agent web-01 with session and version 1.7.2")
+	}
 }

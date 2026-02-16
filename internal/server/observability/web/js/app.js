@@ -50,16 +50,18 @@
 
     async function fetchOverview() {
         try {
-            const [health, metrics, sessions] = await Promise.all([
+            const [health, metrics, sessions, agents] = await Promise.all([
                 API.health(),
                 API.metrics(),
                 API.sessions(),
+                API.agents(),
             ]);
 
             updateConnectionStatus('connected');
 
             Components.renderServerInfo(health);
             Components.renderOverviewMetrics(metrics);
+            Components.renderOverviewAgents(agents);
             Components.renderOverviewSessions(sessions);
 
             // Atualiza topbar

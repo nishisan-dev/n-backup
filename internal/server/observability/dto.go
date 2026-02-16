@@ -96,3 +96,14 @@ type FlowRotationSafe struct {
 	EvalWindow string  `json:"eval_window,omitempty"`
 	Cooldown   string  `json:"cooldown,omitempty"`
 }
+
+// AgentInfo representa um agente conectado via control channel.
+type AgentInfo struct {
+	Name          string `json:"name"`
+	RemoteAddr    string `json:"remote_addr"`
+	ConnectedAt   string `json:"connected_at"`
+	ConnectedFor  string `json:"connected_for"` // duração legível (ex: "1h23m")
+	KeepaliveS    uint32 `json:"keepalive_s"`
+	HasSession    bool   `json:"has_session"`
+	ClientVersion string `json:"client_version,omitempty"` // extraído da sessão, se houver
+}
