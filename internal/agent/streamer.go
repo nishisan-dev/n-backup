@@ -7,13 +7,15 @@ package agent
 import (
 	"archive/tar"
 	"bufio"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"fmt"
 	"hash"
 	"io"
 	"os"
+	"runtime"
+
+	"github.com/klauspost/pgzip"
 )
 
 // StreamResult contém o resultado de uma operação de streaming.
@@ -35,10 +37,13 @@ func Stream(ctx context.Context, scanner *Scanner, dest io.Writer, progress *Pro
 	hasher := sha256.New()
 	counter := &countWriter{w: io.MultiWriter(bufDest, hasher), progress: progress}
 
-	// Pipeline: tar → gzip → buffer → (dest + hasher)
-	gzWriter, err := gzip.NewWriterLevel(counter, gzip.BestSpeed)
+	// Pipeline: tar → gzip(paralelo) → buffer → (dest + hasher)
+	gzWriter, err := pgzip.NewWriterLevel(counter, pgzip.BestSpeed)
 	if err != nil {
 		return nil, fmt.Errorf("creating gzip writer: %w", err)
+	}
+	if err := gzWriter.SetConcurrency(1<<20, runtime.GOMAXPROCS(0)); err != nil {
+		return nil, fmt.Errorf("configuring gzip concurrency: %w", err)
 	}
 
 	tw := tar.NewWriter(gzWriter)
