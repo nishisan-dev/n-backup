@@ -103,7 +103,7 @@ func TestStream_ProducesValidTarGz(t *testing.T) {
 	scanner := NewScanner([]string{dir}, []string{"*.log", ".git/**"})
 
 	var buf bytes.Buffer
-	result, err := Stream(context.Background(), scanner, &buf, nil)
+	result, err := Stream(context.Background(), scanner, &buf, nil, nil)
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestStream_ChecksumConsistency(t *testing.T) {
 	scanner := NewScanner([]string{dir}, nil)
 
 	var buf bytes.Buffer
-	result, err := Stream(context.Background(), scanner, &buf, nil)
+	result, err := Stream(context.Background(), scanner, &buf, nil, nil)
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}

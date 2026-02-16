@@ -28,8 +28,9 @@ type StreamResult struct {
 // Scanner → tar.Writer → gzip.Writer → io.Writer (conexão de rede).
 // O SHA-256 é calculado inline sobre o stream gzip compactado.
 // Se progress não for nil, alimenta contadores de bytes e objetos.
+// Se onObject não for nil, é chamado após cada objeto processado (usado para contadores externos).
 // Retorna o checksum e total de bytes escritos no destino.
-func Stream(ctx context.Context, scanner *Scanner, dest io.Writer, progress *ProgressReporter) (*StreamResult, error) {
+func Stream(ctx context.Context, scanner *Scanner, dest io.Writer, progress *ProgressReporter, onObject func()) (*StreamResult, error) {
 	// Buffer de escrita para reduzir syscalls na conexão TLS
 	bufDest := bufio.NewWriterSize(dest, 256*1024) // 256KB
 
@@ -62,6 +63,9 @@ func Stream(ctx context.Context, scanner *Scanner, dest io.Writer, progress *Pro
 		}
 		if progress != nil {
 			progress.AddObject()
+		}
+		if onObject != nil {
+			onObject()
 		}
 		return nil
 	})

@@ -39,7 +39,7 @@ const MaxBackupDuration = 24 * time.Hour
 //
 // Se a conexão cair, o sender reconecta, envia RESUME,
 // e continua de onde parou (se o offset ainda estiver no buffer).
-func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, logger *slog.Logger, progress *ProgressReporter, job *BackupJob) error {
+func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, logger *slog.Logger, progress *ProgressReporter, job *BackupJob, controlCh *ControlChannel) error {
 	logger = logger.With("backup", entry.Name, "storage", entry.Storage)
 	logger.Info("starting backup session", "server", cfg.Server.Address)
 
@@ -85,7 +85,7 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 			return fmt.Errorf("writing ParallelInit: %w", err)
 		}
 
-		return runParallelBackup(ctx, cfg, entry, conn, sessionID, tlsCfg, logger, progress, job)
+		return runParallelBackup(ctx, cfg, entry, conn, sessionID, tlsCfg, logger, progress, job, controlCh)
 	}
 
 	logger.Info("handshake successful, starting resumable pipeline")
@@ -113,7 +113,7 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 
 	go func() {
 		defer close(producerDone)
-		producerResult, producerErr = Stream(ctx, scanner, rb, progress)
+		producerResult, producerErr = Stream(ctx, scanner, rb, progress, nil)
 		rb.Close() // sinaliza EOF para o sender
 	}()
 
@@ -290,7 +290,14 @@ func initialConnect(ctx context.Context, cfg *config.AgentConfig, entry config.B
 
 	// Handshake com medição de RTT
 	handshakeStart := time.Now()
-	if err := protocol.WriteHandshake(conn, cfg.Agent.Name, entry.Storage, entry.Name); err != nil {
+	// Envia handshake
+	// TODO: obter versão real do build (por enquanto hardcoded ou via var global se acessível)
+	// Como o pacote main não exporta Version, vamos usar uma string fixa ou injetada.
+	// O ideal seria mover Version para um pacote interno compartilhado ou configs.
+	// Por hora, vou usar "v1.x.x" placeholder ou tentar ler de config se existir.
+	// Assumindo que o agente sabe sua versão. Vamos usar "dev" ou similar por enquanto.
+	agentVersion := "dev"
+	if err := protocol.WriteHandshake(conn, cfg.Agent.Name, entry.Storage, entry.Name, agentVersion); err != nil {
 		conn.Close()
 		return nil, "", 0, fmt.Errorf("writing handshake: %w", err)
 	}
@@ -373,7 +380,7 @@ func dialWithContext(ctx context.Context, address string, tlsCfg *tls.Config) (*
 // runParallelBackup executa o pipeline de backup com streams paralelos.
 // A conn primária é usada apenas como canal de controle (Trailer + FinalACK).
 // Todas as N streams de dados conectam ao server via ParallelJoin.
-func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, conn net.Conn, sessionID string, tlsCfg *tls.Config, logger *slog.Logger, progress *ProgressReporter, job *BackupJob) error {
+func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, conn net.Conn, sessionID string, tlsCfg *tls.Config, logger *slog.Logger, progress *ProgressReporter, job *BackupJob, controlCh *ControlChannel) error {
 	defer conn.Close()
 
 	// Callback para atualizar o progress reporter e job metrics com streams ativos
@@ -442,9 +449,45 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 	var producerErr error
 	producerDone := make(chan struct{})
 
+	// Contadores atômicos para progresso enviado ao server via ControlChannel.
+	// O PreScan roda em goroutine paralela para não bloquear o início dos streams.
+	var totalObj, sentObj atomic.Uint32
+	var walkDone atomic.Int32
+
+	// onObject callback: incrementa sentObj a cada objeto processado pelo Stream()
+	var onObject func()
+
+	if controlCh != nil {
+		onObject = func() {
+			sentObj.Add(1)
+		}
+
+		// PreScan em goroutine para calcular total de objetos sem bloquear o backup
+		go func() {
+			preScanSources := make([]string, len(entry.Sources))
+			for i, s := range entry.Sources {
+				preScanSources[i] = s.Path
+			}
+			preScanScanner := NewScanner(preScanSources, entry.Exclude)
+			stats, err := preScanScanner.PreScan(ctx)
+			if err != nil {
+				logger.Warn("pre-scan for progress failed", "error", err)
+				return
+			}
+			totalObj.Store(uint32(stats.TotalObjects))
+			walkDone.Store(1)
+			logger.Info("pre-scan for progress complete", "total_objects", stats.TotalObjects)
+		}()
+
+		controlCh.SetProgressProvider(func() (uint32, uint32, bool) {
+			return totalObj.Load(), sentObj.Load(), walkDone.Load() != 0
+		})
+		defer controlCh.SetProgressProvider(nil)
+	}
+
 	go func() {
 		defer close(producerDone)
-		producerResult, producerErr = Stream(ctx, scanner, dispatcher, progress)
+		producerResult, producerErr = Stream(ctx, scanner, dispatcher, progress, onObject)
 		dispatcher.Flush() // emite chunk parcial pendente no buffer de acumulação
 		dispatcher.Close() // sinaliza EOF para todos os senders
 	}()
