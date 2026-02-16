@@ -136,8 +136,15 @@ body {
 }
 
 @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.4;
+    }
 }
 
 .version-badge {
@@ -214,8 +221,15 @@ body {
 }
 
 @keyframes fadeIn {
-    from { opacity: 0; transform: translateY(4px); }
-    to { opacity: 1; transform: translateY(0); }
+    from {
+        opacity: 0;
+        transform: translateY(4px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
 }
 
 /* ============ Cards ============ */
@@ -259,10 +273,25 @@ body {
     flex-shrink: 0;
 }
 
-.traffic-icon { background: rgba(99, 102, 241, 0.15); color: var(--accent-blue); }
-.disk-icon { background: rgba(6, 182, 212, 0.15); color: var(--accent-cyan); }
-.conn-icon { background: rgba(16, 185, 129, 0.15); color: var(--accent-emerald); }
-.session-icon { background: rgba(245, 158, 11, 0.15); color: var(--accent-amber); }
+.traffic-icon {
+    background: rgba(99, 102, 241, 0.15);
+    color: var(--accent-blue);
+}
+
+.disk-icon {
+    background: rgba(6, 182, 212, 0.15);
+    color: var(--accent-cyan);
+}
+
+.conn-icon {
+    background: rgba(16, 185, 129, 0.15);
+    color: var(--accent-emerald);
+}
+
+.session-icon {
+    background: rgba(245, 158, 11, 0.15);
+    color: var(--accent-amber);
+}
 
 .card-body {
     display: flex;
@@ -393,15 +422,50 @@ body {
     letter-spacing: 0.04em;
 }
 
-.badge-running { background: rgba(16, 185, 129, 0.15); color: var(--accent-emerald); }
-.badge-idle { background: rgba(245, 158, 11, 0.15); color: var(--accent-amber); }
-.badge-degraded { background: rgba(244, 63, 94, 0.15); color: var(--accent-rose); }
-.badge-single { background: rgba(99, 102, 241, 0.15); color: var(--accent-blue); }
-.badge-parallel { background: rgba(6, 182, 212, 0.15); color: var(--accent-cyan); }
+.badge-running {
+    background: rgba(16, 185, 129, 0.15);
+    color: var(--accent-emerald);
+}
 
-.badge-info { background: rgba(99, 102, 241, 0.15); color: var(--accent-blue); }
-.badge-warn { background: rgba(245, 158, 11, 0.15); color: var(--accent-amber); }
-.badge-error { background: rgba(244, 63, 94, 0.15); color: var(--accent-rose); }
+.badge-idle {
+    background: rgba(245, 158, 11, 0.15);
+    color: var(--accent-amber);
+}
+
+.badge-degraded {
+    background: rgba(244, 63, 94, 0.15);
+    color: var(--accent-rose);
+}
+
+.badge-inactive {
+    background: rgba(148, 163, 184, 0.2);
+    color: var(--text-muted);
+}
+
+.badge-single {
+    background: rgba(99, 102, 241, 0.15);
+    color: var(--accent-blue);
+}
+
+.badge-parallel {
+    background: rgba(6, 182, 212, 0.15);
+    color: var(--accent-cyan);
+}
+
+.badge-info {
+    background: rgba(99, 102, 241, 0.15);
+    color: var(--accent-blue);
+}
+
+.badge-warn {
+    background: rgba(245, 158, 11, 0.15);
+    color: var(--accent-amber);
+}
+
+.badge-error {
+    background: rgba(244, 63, 94, 0.15);
+    color: var(--accent-rose);
+}
 
 /* ============ Sessions List ============ */
 
@@ -558,17 +622,133 @@ body {
     color: var(--text-muted);
 }
 
+/* ============ Sparklines ============ */
+
+.sparkline-section {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin: 20px 0;
+}
+
+.sparkline-card {
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 12px 16px;
+    position: relative;
+}
+
+.sparkline-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+
+.sparkline-label {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 500;
+}
+
+.sparkline-value {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.sparkline-canvas {
+    width: 100%;
+    height: 60px;
+    display: block;
+}
+
+/* Mini sparkline inline na lista de sessões */
+.mini-sparkline {
+    width: 100px;
+    height: 28px;
+    display: block;
+}
+
+.session-card-stats {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+}
+
+/* Progress bar para ETA */
+.progress-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 4px;
+}
+
+.progress-bar-wrap {
+    flex: 1;
+    height: 6px;
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.progress-bar-fill {
+    height: 100%;
+    background: var(--gradient-hero);
+    border-radius: 3px;
+    transition: width 0.5s ease;
+}
+
+.progress-text {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+@media (max-width: 768px) {
+    .sparkline-section {
+        grid-template-columns: 1fr;
+    }
+}
+
 /* ============ Responsive ============ */
 
 @media (max-width: 768px) {
-    .topbar { padding: 0 16px; }
-    .content { padding: 16px; }
-    .cards-grid { grid-template-columns: repeat(2, 1fr); }
-    .nav-tabs { overflow-x: auto; padding: 0 16px; }
-    .nav-tab { padding: 8px 12px; font-size: 0.8rem; }
+    .topbar {
+        padding: 0 16px;
+    }
+
+    .content {
+        padding: 16px;
+    }
+
+    .cards-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .nav-tabs {
+        overflow-x: auto;
+        padding: 0 16px;
+    }
+
+    .nav-tab {
+        padding: 8px 12px;
+        font-size: 0.8rem;
+    }
 }
 
 @media (max-width: 480px) {
-    .cards-grid { grid-template-columns: 1fr; }
-    .topbar-subtitle { display: none; }
+    .cards-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .topbar-subtitle {
+        display: none;
+    }
 }

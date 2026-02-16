@@ -4,10 +4,15 @@
     'use strict';
 
     const POLL_INTERVAL = 2000;
+    const SPARK_MAX_POINTS = 1800; // 1 hora @ 2s poll
     let pollTimer = null;
     let currentView = 'overview';
     let selectedSessionId = null;
     let isVisible = true;
+
+    // Ring buffer de dados de throughput por sessão
+    // Chave: session_id → { net: number[], disk: number[], lastBytes: number, lastDisk: number }
+    const sparkHistory = {};
 
     // ============ Navigation ============
 
@@ -69,7 +74,20 @@
         try {
             const sessions = await API.sessions();
             updateConnectionStatus('connected');
+
+            // Atualiza ring buffers para cada sessão
+            sessions.forEach(s => updateSparkHistory(s));
+
             Components.renderSessionsList(sessions);
+
+            // Desenha mini sparklines após render
+            sessions.forEach(s => {
+                const canvas = document.getElementById(`mini-spark-${s.session_id}`);
+                const hist = sparkHistory[s.session_id];
+                if (canvas && hist && hist.net.length > 1) {
+                    Components.drawSparkline(canvas, hist.net, '#6366f1');
+                }
+            });
         } catch (err) {
             updateConnectionStatus('error');
             console.error('fetchSessions error:', err);
@@ -80,7 +98,11 @@
         try {
             const detail = await API.session(id);
             updateConnectionStatus('connected');
+            updateSparkHistory(detail);
             Components.renderSessionDetail(detail);
+
+            // Desenha sparklines após render
+            drawSessionSparklines(id);
         } catch (err) {
             updateConnectionStatus('error');
             console.error('fetchSessionDetail error:', err);
@@ -211,6 +233,51 @@
             fetchCurrentView(); // Fetch imediato ao voltar
         }
     });
+
+    // ============ Sparkline Data ============
+
+    function updateSparkHistory(session) {
+        const id = session.session_id;
+        if (!sparkHistory[id]) {
+            sparkHistory[id] = { net: [], disk: [], lastBytes: session.bytes_received, lastDisk: session.disk_write_bytes || 0 };
+            return;
+        }
+
+        const h = sparkHistory[id];
+        const intervalSecs = POLL_INTERVAL / 1000;
+
+        // Calcula delta em MB/s para rede
+        const netDelta = Math.max(0, session.bytes_received - h.lastBytes);
+        const netMBps = netDelta / (1024 * 1024) / intervalSecs;
+        h.net.push(netMBps);
+        h.lastBytes = session.bytes_received;
+
+        // Calcula delta em MB/s para disco
+        const diskBytes = session.disk_write_bytes || 0;
+        const diskDelta = Math.max(0, diskBytes - h.lastDisk);
+        const diskMBps = diskDelta / (1024 * 1024) / intervalSecs;
+        h.disk.push(diskMBps);
+        h.lastDisk = diskBytes;
+
+        // Trim to max points
+        if (h.net.length > SPARK_MAX_POINTS) h.net.shift();
+        if (h.disk.length > SPARK_MAX_POINTS) h.disk.shift();
+    }
+
+    function drawSessionSparklines(sessionId) {
+        const hist = sparkHistory[sessionId];
+        if (!hist) return;
+
+        const netCanvas = document.getElementById('spark-net');
+        const diskCanvas = document.getElementById('spark-disk');
+
+        if (netCanvas && hist.net.length > 1) {
+            Components.drawSparkline(netCanvas, hist.net, '#6366f1');
+        }
+        if (diskCanvas && hist.disk.length > 1) {
+            Components.drawSparkline(diskCanvas, hist.disk, '#10b981');
+        }
+    }
 
     // ============ Init ============
 

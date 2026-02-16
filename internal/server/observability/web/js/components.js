@@ -1,6 +1,61 @@
 // components.js — Render functions para os componentes da SPA
 
 const Components = {
+    // Desenha um sparkline no canvas usando Canvas 2D nativo.
+    // dataPoints: array de números, color: cor da linha (hex/hsl)
+    drawSparkline(canvas, dataPoints, color = '#6366f1') {
+        if (!canvas || !dataPoints || dataPoints.length < 2) return;
+
+        const ctx = canvas.getContext('2d');
+        const dpr = window.devicePixelRatio || 1;
+        const rect = canvas.getBoundingClientRect();
+        canvas.width = rect.width * dpr;
+        canvas.height = rect.height * dpr;
+        ctx.scale(dpr, dpr);
+
+        const w = rect.width;
+        const h = rect.height;
+        const pad = 2;
+        const plotW = w - pad * 2;
+        const plotH = h - pad * 2;
+
+        const max = Math.max(...dataPoints, 0.01);
+        const step = plotW / (dataPoints.length - 1);
+
+        // Gradient fill
+        const gradient = ctx.createLinearGradient(0, pad, 0, h);
+        gradient.addColorStop(0, color + '33'); // 20% opacity
+        gradient.addColorStop(1, color + '00'); // transparent
+
+        ctx.clearRect(0, 0, w, h);
+
+        // Build path
+        ctx.beginPath();
+        ctx.moveTo(pad, h - pad - (dataPoints[0] / max) * plotH);
+        for (let i = 1; i < dataPoints.length; i++) {
+            const x = pad + i * step;
+            const y = h - pad - (dataPoints[i] / max) * plotH;
+            ctx.lineTo(x, y);
+        }
+
+        // Fill area
+        ctx.lineTo(pad + (dataPoints.length - 1) * step, h - pad);
+        ctx.lineTo(pad, h - pad);
+        ctx.closePath();
+        ctx.fillStyle = gradient;
+        ctx.fill();
+
+        // Stroke line
+        ctx.beginPath();
+        ctx.moveTo(pad, h - pad - (dataPoints[0] / max) * plotH);
+        for (let i = 1; i < dataPoints.length; i++) {
+            ctx.lineTo(pad + i * step, h - pad - (dataPoints[i] / max) * plotH);
+        }
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.lineJoin = 'round';
+        ctx.stroke();
+    },
     // Formata bytes para exibição legível
     formatBytes(bytes) {
         if (bytes === 0 || bytes == null) return '0 B';
@@ -121,11 +176,13 @@ const Components = {
                         ${this.statusBadge(s.status)}
                         <span>Início: ${this.formatTime(s.started_at)}</span>
                         <span>Último I/O: ${this.formatTime(s.last_activity)}</span>
+                        ${s.eta ? `<span>ETA: ${s.eta}</span>` : ''}
                     </div>
                 </div>
                 <div class="session-card-stats">
                     <span class="session-bytes">${this.formatBytes(s.bytes_received)}</span>
                     <span class="session-streams">${s.active_streams}${s.max_streams ? '/' + s.max_streams : ''} streams</span>
+                    <canvas class="mini-sparkline" id="mini-spark-${s.session_id}"></canvas>
                 </div>
             </div>
         `).join('');
@@ -136,16 +193,65 @@ const Components = {
         document.getElementById('detail-title').textContent =
             `${detail.agent} — ${detail.backup || detail.storage}`;
 
+        // Progress bar para objetos (se disponível)
+        let progressHtml = '';
+        if (detail.total_objects && detail.total_objects > 0) {
+            const pct = Math.min(100, Math.round((detail.objects_sent / detail.total_objects) * 100));
+            progressHtml = `
+                <div class="progress-row" style="grid-column: 1 / -1;">
+                    <div class="progress-bar-wrap">
+                        <div class="progress-bar-fill" style="width: ${pct}%"></div>
+                    </div>
+                    <span class="progress-text">
+                        ${detail.objects_sent} / ${detail.total_objects} objetos (${pct}%)
+                        ${detail.walk_complete ? '' : ' — scanning…'}
+                        ${detail.eta ? ' — ETA: ' + detail.eta : ''}
+                    </span>
+                </div>`;
+        }
+
         const infoGrid = document.getElementById('detail-info');
         infoGrid.innerHTML = `
             <div class="info-item"><span class="info-label">Session ID</span><span class="info-value">${detail.session_id}</span></div>
             <div class="info-item"><span class="info-label">Modo</span><span class="info-value">${this.modeBadge(detail.mode)}</span></div>
             <div class="info-item"><span class="info-label">Status</span><span class="info-value">${this.statusBadge(detail.status)}</span></div>
             <div class="info-item"><span class="info-label">Recebido</span><span class="info-value">${this.formatBytes(detail.bytes_received)}</span></div>
+            <div class="info-item"><span class="info-label">Disk Write</span><span class="info-value">${this.formatBytes(detail.disk_write_bytes)}</span></div>
             <div class="info-item"><span class="info-label">Início</span><span class="info-value">${this.formatDateTime(detail.started_at)}</span></div>
             <div class="info-item"><span class="info-label">Último I/O</span><span class="info-value">${this.formatDateTime(detail.last_activity)}</span></div>
-            ${detail.total_objects ? `<div class="info-item"><span class="info-label">Objetos</span><span class="info-value">${detail.objects_sent || 0} / ${detail.total_objects}${detail.walk_complete ? '' : ' (scanning...)'}</span></div>` : ''}
             ${detail.eta ? `<div class="info-item"><span class="info-label">ETA</span><span class="info-value">${detail.eta}</span></div>` : ''}
+            ${progressHtml}
+        `;
+
+        // Sparklines section (rede + disk I/O)
+        let sparkSection = document.getElementById('detail-sparklines');
+        if (!sparkSection) {
+            sparkSection = document.createElement('div');
+            sparkSection.id = 'detail-sparklines';
+            sparkSection.className = 'sparkline-section';
+            const detailCard = document.getElementById('session-detail');
+            const streamsTitle = document.getElementById('detail-streams-title');
+            detailCard.insertBefore(sparkSection, streamsTitle);
+        }
+
+        // Calcula throughput agregado
+        const totalMbps = (detail.streams || []).reduce((sum, st) => sum + (st.mbps || 0), 0);
+
+        sparkSection.innerHTML = `
+            <div class="sparkline-card">
+                <div class="sparkline-header">
+                    <span class="sparkline-label">Network In</span>
+                    <span class="sparkline-value" id="spark-net-val">${totalMbps.toFixed(2)} MB/s</span>
+                </div>
+                <canvas class="sparkline-canvas" id="spark-net"></canvas>
+            </div>
+            <div class="sparkline-card">
+                <div class="sparkline-header">
+                    <span class="sparkline-label">Disk Write</span>
+                    <span class="sparkline-value" id="spark-disk-val">${this.formatBytes(detail.disk_write_bytes)}</span>
+                </div>
+                <canvas class="sparkline-canvas" id="spark-disk"></canvas>
+            </div>
         `;
 
         // Streams
@@ -157,10 +263,7 @@ const Components = {
             streamsTitle.style.display = '';
             streamsWrap.style.display = '';
             streamsBody.innerHTML = detail.streams.map(st => {
-                let streamStatus = 'running';
-                if (st.idle_secs > 60) streamStatus = 'degraded';
-                else if (st.idle_secs > 10) streamStatus = 'idle';
-                if (st.slow_since) streamStatus = 'degraded';
+                const streamStatus = st.status || (st.active ? 'running' : 'inactive');
 
                 return `
                     <tr>
