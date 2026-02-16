@@ -21,6 +21,7 @@ import (
 
 	"github.com/nishisan-dev/n-backup/internal/config"
 	"github.com/nishisan-dev/n-backup/internal/protocol"
+	"github.com/nishisan-dev/n-backup/internal/server/observability"
 )
 
 // sackInterval define a cada quantos bytes o server envia um SACK.
@@ -77,6 +78,16 @@ func NewHandler(cfg *config.ServerConfig, logger *slog.Logger, locks *sync.Map, 
 		logger:   logger,
 		locks:    locks,
 		sessions: sessions,
+	}
+}
+
+// MetricsSnapshot retorna uma cópia atômica das métricas observáveis.
+// Implementa observability.HandlerMetrics.
+func (h *Handler) MetricsSnapshot() observability.MetricsData {
+	return observability.MetricsData{
+		TrafficIn:   h.TrafficIn.Load(),
+		DiskWrite:   h.DiskWrite.Load(),
+		ActiveConns: h.ActiveConns.Load(),
 	}
 }
 

@@ -27,3 +27,14 @@ logging:
   format: json                     # json, text
   file: /var/log/nbackup/server.log # Log file dedicado (opcional)
   stream_stats: false              # Per-stream stats em sessões paralelas (padrão: false)
+
+# SPA de Observabilidade — listener HTTP separado
+web_ui:
+  enabled: false                   # Habilita a interface web de observabilidade
+  listen: "127.0.0.1:9848"        # Bind interno por padrão (segurança)
+  read_timeout: 5s
+  write_timeout: 15s
+  idle_timeout: 60s
+  allow_origins:                   # ACL por IP/CIDR (obrigatória quando enabled)
+    - "127.0.0.1/32"
+    # - "10.0.0.0/8"              # Descomente para rede interna

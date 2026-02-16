@@ -11,11 +11,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 
 	"github.com/nishisan-dev/n-backup/internal/config"
 	"github.com/nishisan-dev/n-backup/internal/pki"
+	"github.com/nishisan-dev/n-backup/internal/server/observability"
 )
 
 // sessionTTL é o tempo máximo que uma sessão parcial pode ficar ativa sem resume (1h).
@@ -59,6 +61,11 @@ func Run(ctx context.Context, cfg *config.ServerConfig, logger *slog.Logger) err
 			}
 		}
 	}()
+
+	// Web UI HTTP server (observabilidade)
+	if cfg.WebUI.Enabled {
+		startWebUI(ctx, cfg, handler, logger)
+	}
 
 	// Stats reporter — imprime métricas a cada 15s
 	go handler.StartStatsReporter(ctx)
@@ -118,6 +125,11 @@ func RunWithListener(ctx context.Context, ln net.Listener, cfg *config.ServerCon
 		}
 	}()
 
+	// Web UI HTTP server (observabilidade)
+	if cfg.WebUI.Enabled {
+		startWebUI(ctx, cfg, handler, logger)
+	}
+
 	// Stats reporter
 	go handler.StartStatsReporter(ctx)
 
@@ -150,4 +162,38 @@ func RunWithListener(ctx context.Context, ln net.Listener, cfg *config.ServerCon
 		consecutiveErrors = 0
 		go handler.HandleConnection(ctx, conn)
 	}
+}
+
+// startWebUI inicia o listener HTTP da SPA de observabilidade em background.
+// O server é encerrado gracefully quando o context é cancelado.
+func startWebUI(ctx context.Context, cfg *config.ServerConfig, handler *Handler, logger *slog.Logger) {
+	acl := observability.NewACL(cfg.WebUI.ParsedCIDRs)
+	router := observability.NewRouter(handler, cfg, acl)
+
+	webSrv := &http.Server{
+		Addr:              cfg.WebUI.Listen,
+		Handler:           router,
+		ReadTimeout:       cfg.WebUI.ReadTimeout,
+		ReadHeaderTimeout: 2 * time.Second,
+		WriteTimeout:      cfg.WebUI.WriteTimeout,
+		IdleTimeout:       cfg.WebUI.IdleTimeout,
+		MaxHeaderBytes:    1 << 20, // 1MB
+	}
+
+	go func() {
+		logger.Info("web UI listening", "address", cfg.WebUI.Listen)
+		if err := webSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("web UI server error", "error", err)
+		}
+	}()
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := webSrv.Shutdown(shutdownCtx); err != nil {
+			logger.Error("web UI shutdown error", "error", err)
+		}
+		logger.Info("web UI shutdown complete")
+	}()
 }

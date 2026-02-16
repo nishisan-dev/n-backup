@@ -6,6 +6,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -20,6 +21,20 @@ type ServerConfig struct {
 	Storages     map[string]StorageInfo `yaml:"storages"`
 	Logging      LoggingInfo            `yaml:"logging"`
 	FlowRotation FlowRotationConfig     `yaml:"flow_rotation"`
+	WebUI        WebUIConfig            `yaml:"web_ui"`
+}
+
+// WebUIConfig configura o listener HTTP da SPA de observabilidade.
+type WebUIConfig struct {
+	Enabled      bool          `yaml:"enabled"`
+	Listen       string        `yaml:"listen"`        // default: "127.0.0.1:9848"
+	ReadTimeout  time.Duration `yaml:"read_timeout"`  // default: 5s
+	WriteTimeout time.Duration `yaml:"write_timeout"` // default: 15s
+	IdleTimeout  time.Duration `yaml:"idle_timeout"`  // default: 60s
+	AllowOrigins []string      `yaml:"allow_origins"` // IP ou CIDR (deny-by-default)
+
+	// Parsed é preenchido em validate(); não vem do YAML.
+	ParsedCIDRs []*net.IPNet `yaml:"-"`
 }
 
 // FlowRotationConfig configura a rotação automática de flows degradados.
@@ -141,6 +156,41 @@ func (c *ServerConfig) validate() error {
 		}
 		if c.FlowRotation.Cooldown <= 0 {
 			c.FlowRotation.Cooldown = 15 * time.Minute
+		}
+	}
+
+	// Web UI defaults e validação
+	if c.WebUI.Enabled {
+		if c.WebUI.Listen == "" {
+			c.WebUI.Listen = "127.0.0.1:9848"
+		}
+		if c.WebUI.ReadTimeout <= 0 {
+			c.WebUI.ReadTimeout = 5 * time.Second
+		}
+		if c.WebUI.WriteTimeout <= 0 {
+			c.WebUI.WriteTimeout = 15 * time.Second
+		}
+		if c.WebUI.IdleTimeout <= 0 {
+			c.WebUI.IdleTimeout = 60 * time.Second
+		}
+		if len(c.WebUI.AllowOrigins) == 0 {
+			return fmt.Errorf("web_ui.allow_origins is required when web_ui is enabled (deny-by-default)")
+		}
+		for _, origin := range c.WebUI.AllowOrigins {
+			_, cidr, err := net.ParseCIDR(origin)
+			if err != nil {
+				// Tenta como IP único → converte para /32 ou /128
+				ip := net.ParseIP(strings.TrimSpace(origin))
+				if ip == nil {
+					return fmt.Errorf("web_ui.allow_origins: %q is not a valid IP or CIDR", origin)
+				}
+				if ip.To4() != nil {
+					_, cidr, _ = net.ParseCIDR(ip.String() + "/32")
+				} else {
+					_, cidr, _ = net.ParseCIDR(ip.String() + "/128")
+				}
+			}
+			c.WebUI.ParsedCIDRs = append(c.WebUI.ParsedCIDRs, cidr)
 		}
 	}
 

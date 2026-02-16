@@ -443,6 +443,121 @@ func TestGetStorage_NotFound(t *testing.T) {
 	}
 }
 
+// --- WebUI Config Tests ---
+
+const validServerYAMLBase = `
+server:
+  listen: "0.0.0.0:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  server_cert: /tmp/server.pem
+  server_key: /tmp/server-key.pem
+storages:
+  default:
+    base_dir: /tmp/backups
+    max_backups: 3
+`
+
+func TestLoadServerConfig_WebUI_EnabledNoOrigins(t *testing.T) {
+	content := validServerYAMLBase + `
+web_ui:
+  enabled: true
+  allow_origins: []
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadServerConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for web_ui enabled with empty allow_origins")
+	}
+}
+
+func TestLoadServerConfig_WebUI_EnabledWithCIDR(t *testing.T) {
+	content := validServerYAMLBase + `
+web_ui:
+  enabled: true
+  allow_origins:
+    - "10.0.0.0/8"
+    - "192.168.1.0/24"
+`
+	cfgPath := writeTempConfig(t, content)
+	cfg, err := LoadServerConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.WebUI.Enabled {
+		t.Error("expected web_ui.enabled true")
+	}
+	if cfg.WebUI.Listen != "127.0.0.1:9848" {
+		t.Errorf("expected default listen '127.0.0.1:9848', got %q", cfg.WebUI.Listen)
+	}
+	if len(cfg.WebUI.ParsedCIDRs) != 2 {
+		t.Fatalf("expected 2 parsed CIDRs, got %d", len(cfg.WebUI.ParsedCIDRs))
+	}
+	if cfg.WebUI.ReadTimeout.Seconds() != 5 {
+		t.Errorf("expected read_timeout 5s, got %v", cfg.WebUI.ReadTimeout)
+	}
+	if cfg.WebUI.WriteTimeout.Seconds() != 15 {
+		t.Errorf("expected write_timeout 15s, got %v", cfg.WebUI.WriteTimeout)
+	}
+	if cfg.WebUI.IdleTimeout.Seconds() != 60 {
+		t.Errorf("expected idle_timeout 60s, got %v", cfg.WebUI.IdleTimeout)
+	}
+}
+
+func TestLoadServerConfig_WebUI_PureIP(t *testing.T) {
+	content := validServerYAMLBase + `
+web_ui:
+  enabled: true
+  allow_origins:
+    - "192.168.1.10"
+`
+	cfgPath := writeTempConfig(t, content)
+	cfg, err := LoadServerConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.WebUI.ParsedCIDRs) != 1 {
+		t.Fatalf("expected 1 parsed CIDR, got %d", len(cfg.WebUI.ParsedCIDRs))
+	}
+	// IP puro deve virar /32
+	if cfg.WebUI.ParsedCIDRs[0].String() != "192.168.1.10/32" {
+		t.Errorf("expected 192.168.1.10/32, got %s", cfg.WebUI.ParsedCIDRs[0].String())
+	}
+}
+
+func TestLoadServerConfig_WebUI_InvalidOrigin(t *testing.T) {
+	content := validServerYAMLBase + `
+web_ui:
+  enabled: true
+  allow_origins:
+    - "not-an-ip"
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadServerConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for invalid allow_origins entry")
+	}
+}
+
+func TestLoadServerConfig_WebUI_Disabled(t *testing.T) {
+	content := validServerYAMLBase + `
+web_ui:
+  enabled: false
+`
+	cfgPath := writeTempConfig(t, content)
+	cfg, err := LoadServerConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.WebUI.Enabled {
+		t.Error("expected web_ui.enabled false")
+	}
+	// Quando disabled, nenhum CIDR é parseado
+	if len(cfg.WebUI.ParsedCIDRs) != 0 {
+		t.Errorf("expected 0 parsed CIDRs when disabled, got %d", len(cfg.WebUI.ParsedCIDRs))
+	}
+}
+
 func writeTempConfig(t *testing.T, content string) string {
 	t.Helper()
 	dir := t.TempDir()
