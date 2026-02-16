@@ -113,3 +113,253 @@ func TestControlPong_MaxLoad(t *testing.T) {
 		t.Errorf("disk_free: want max uint32, got %d", got.DiskFree)
 	}
 }
+
+func TestReadControlMagic(t *testing.T) {
+	tests := []struct {
+		name  string
+		magic [4]byte
+	}{
+		{"CPNG", MagicControlPing},
+		{"CROT", MagicControlRotate},
+		{"CRAK", MagicControlRotateACK},
+		{"CADM", MagicControlAdmit},
+		{"CDFE", MagicControlDefer},
+		{"CABT", MagicControlAbort},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := bytes.NewBuffer(tt.magic[:])
+			got, err := ReadControlMagic(buf)
+			if err != nil {
+				t.Fatalf("ReadControlMagic failed: %v", err)
+			}
+			if got != tt.magic {
+				t.Errorf("magic mismatch: want %q, got %q", tt.magic, got)
+			}
+		})
+	}
+}
+
+func TestControlRotate_RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	streamIdx := uint8(3)
+
+	if err := WriteControlRotate(&buf, streamIdx); err != nil {
+		t.Fatalf("WriteControlRotate failed: %v", err)
+	}
+
+	if buf.Len() != 5 {
+		t.Fatalf("expected 5 bytes, got %d", buf.Len())
+	}
+
+	got, err := ReadControlRotate(&buf)
+	if err != nil {
+		t.Fatalf("ReadControlRotate failed: %v", err)
+	}
+
+	if got != streamIdx {
+		t.Errorf("stream index: want %d, got %d", streamIdx, got)
+	}
+}
+
+func TestControlRotate_InvalidMagic(t *testing.T) {
+	buf := bytes.NewBufferString("BAD!X")
+	_, err := ReadControlRotate(buf)
+	if err == nil {
+		t.Fatal("expected error for invalid magic")
+	}
+}
+
+func TestControlRotateACK_RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	streamIdx := uint8(7)
+
+	if err := WriteControlRotateACK(&buf, streamIdx); err != nil {
+		t.Fatalf("WriteControlRotateACK failed: %v", err)
+	}
+
+	if buf.Len() != 5 {
+		t.Fatalf("expected 5 bytes, got %d", buf.Len())
+	}
+
+	got, err := ReadControlRotateACK(&buf)
+	if err != nil {
+		t.Fatalf("ReadControlRotateACK failed: %v", err)
+	}
+
+	if got != streamIdx {
+		t.Errorf("stream index: want %d, got %d", streamIdx, got)
+	}
+}
+
+func TestControlRotateACK_InvalidMagic(t *testing.T) {
+	buf := bytes.NewBufferString("BAD!X")
+	_, err := ReadControlRotateACK(buf)
+	if err == nil {
+		t.Fatal("expected error for invalid magic")
+	}
+}
+
+func TestControlRotate_PayloadAfterMagic(t *testing.T) {
+	var buf bytes.Buffer
+	streamIdx := uint8(5)
+	WriteControlRotate(&buf, streamIdx)
+
+	// Lê magic separado
+	magic, err := ReadControlMagic(&buf)
+	if err != nil {
+		t.Fatalf("ReadControlMagic failed: %v", err)
+	}
+	if magic != MagicControlRotate {
+		t.Fatalf("expected CROT magic, got %q", magic)
+	}
+
+	// Lê payload
+	got, err := ReadControlRotatePayload(&buf)
+	if err != nil {
+		t.Fatalf("ReadControlRotatePayload failed: %v", err)
+	}
+	if got != streamIdx {
+		t.Errorf("stream index: want %d, got %d", streamIdx, got)
+	}
+}
+
+func TestControlRotateACK_PayloadAfterMagic(t *testing.T) {
+	var buf bytes.Buffer
+	streamIdx := uint8(2)
+	WriteControlRotateACK(&buf, streamIdx)
+
+	magic, _ := ReadControlMagic(&buf)
+	if magic != MagicControlRotateACK {
+		t.Fatalf("expected CRAK magic, got %q", magic)
+	}
+
+	got, err := ReadControlRotateACKPayload(&buf)
+	if err != nil {
+		t.Fatalf("ReadControlRotateACKPayload failed: %v", err)
+	}
+	if got != streamIdx {
+		t.Errorf("stream index: want %d, got %d", streamIdx, got)
+	}
+}
+
+func TestControlAdmit_RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	slotID := uint8(4)
+
+	if err := WriteControlAdmit(&buf, slotID); err != nil {
+		t.Fatalf("WriteControlAdmit failed: %v", err)
+	}
+	if buf.Len() != 5 {
+		t.Fatalf("expected 5 bytes, got %d", buf.Len())
+	}
+
+	magic, _ := ReadControlMagic(&buf)
+	if magic != MagicControlAdmit {
+		t.Fatalf("expected CADM magic, got %q", magic)
+	}
+	got, err := ReadControlAdmitPayload(&buf)
+	if err != nil {
+		t.Fatalf("ReadControlAdmitPayload failed: %v", err)
+	}
+	if got != slotID {
+		t.Errorf("slot ID: want %d, got %d", slotID, got)
+	}
+}
+
+func TestControlDefer_RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	waitMin := uint32(15)
+
+	if err := WriteControlDefer(&buf, waitMin); err != nil {
+		t.Fatalf("WriteControlDefer failed: %v", err)
+	}
+	if buf.Len() != 8 {
+		t.Fatalf("expected 8 bytes, got %d", buf.Len())
+	}
+
+	magic, _ := ReadControlMagic(&buf)
+	if magic != MagicControlDefer {
+		t.Fatalf("expected CDFE magic, got %q", magic)
+	}
+	got, err := ReadControlDeferPayload(&buf)
+	if err != nil {
+		t.Fatalf("ReadControlDeferPayload failed: %v", err)
+	}
+	if got != waitMin {
+		t.Errorf("wait minutes: want %d, got %d", waitMin, got)
+	}
+}
+
+func TestControlAbort_RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	reason := AbortReasonDiskFull
+
+	if err := WriteControlAbort(&buf, reason); err != nil {
+		t.Fatalf("WriteControlAbort failed: %v", err)
+	}
+	if buf.Len() != 8 {
+		t.Fatalf("expected 8 bytes, got %d", buf.Len())
+	}
+
+	magic, _ := ReadControlMagic(&buf)
+	if magic != MagicControlAbort {
+		t.Fatalf("expected CABT magic, got %q", magic)
+	}
+	got, err := ReadControlAbortPayload(&buf)
+	if err != nil {
+		t.Fatalf("ReadControlAbortPayload failed: %v", err)
+	}
+	if got != reason {
+		t.Errorf("reason: want %d, got %d", reason, got)
+	}
+}
+
+func TestControlPong_PayloadAfterMagic(t *testing.T) {
+	var buf bytes.Buffer
+	ts := int64(1739700000000000000)
+	load := float32(0.75)
+	disk := uint32(50000)
+
+	WriteControlPong(&buf, ts, load, disk)
+
+	magic, _ := ReadControlMagic(&buf)
+	if magic != MagicControlPing {
+		t.Fatalf("expected CPNG magic, got %q", magic)
+	}
+
+	got, err := ReadControlPongPayload(&buf)
+	if err != nil {
+		t.Fatalf("ReadControlPongPayload failed: %v", err)
+	}
+	if got.Timestamp != ts {
+		t.Errorf("timestamp: want %d, got %d", ts, got.Timestamp)
+	}
+	if got.ServerLoad != load {
+		t.Errorf("server_load: want %f, got %f", load, got.ServerLoad)
+	}
+	if got.DiskFree != disk {
+		t.Errorf("disk_free: want %d, got %d", disk, got.DiskFree)
+	}
+}
+
+func TestControlPing_PayloadAfterMagic(t *testing.T) {
+	var buf bytes.Buffer
+	ts := int64(1739700000000000000)
+
+	WriteControlPing(&buf, ts)
+
+	magic, _ := ReadControlMagic(&buf)
+	if magic != MagicControlPing {
+		t.Fatalf("expected CPNG magic, got %q", magic)
+	}
+
+	got, err := ReadControlPingPayload(&buf)
+	if err != nil {
+		t.Fatalf("ReadControlPingPayload failed: %v", err)
+	}
+	if got != ts {
+		t.Errorf("timestamp: want %d, got %d", ts, got)
+	}
+}
