@@ -272,3 +272,42 @@ func TestRingBuffer_HeadTail(t *testing.T) {
 		t.Fatalf("after advance: tail=%d (expected 3)", rb.Tail())
 	}
 }
+
+func TestRingBuffer_ContainsRange(t *testing.T) {
+	rb := NewRingBuffer(256)
+
+	rb.Write([]byte("0123456789")) // head=10, tail=0
+
+	// Faixa completa disponível
+	if !rb.ContainsRange(0, 10) {
+		t.Fatal("expected ContainsRange(0,10) = true")
+	}
+
+	// Faixa parcial disponível
+	if !rb.ContainsRange(5, 5) {
+		t.Fatal("expected ContainsRange(5,5) = true")
+	}
+
+	// Faixa além do head
+	if rb.ContainsRange(5, 10) {
+		t.Fatal("expected ContainsRange(5,10) = false (exceeds head)")
+	}
+
+	// Avança tail — dados antigos liberados
+	rb.Advance(6)
+
+	// Faixa que começa antes do tail
+	if rb.ContainsRange(3, 4) {
+		t.Fatal("expected ContainsRange(3,4) = false (before tail)")
+	}
+
+	// Faixa dentro do intervalo válido
+	if !rb.ContainsRange(6, 4) {
+		t.Fatal("expected ContainsRange(6,4) = true")
+	}
+
+	// Faixa de tamanho zero (edge case)
+	if !rb.ContainsRange(6, 0) {
+		t.Fatal("expected ContainsRange(6,0) = true (zero length)")
+	}
+}

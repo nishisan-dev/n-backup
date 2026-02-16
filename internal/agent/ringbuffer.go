@@ -159,6 +159,15 @@ func (rb *RingBuffer) Contains(offset int64) bool {
 	return offset >= rb.tail && offset < rb.head
 }
 
+// ContainsRange verifica se uma faixa completa [offset, offset+length) está no buffer.
+// Retorna true se todos os bytes da faixa estão disponíveis para leitura.
+func (rb *RingBuffer) ContainsRange(offset, length int64) bool {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+
+	return offset >= rb.tail && (offset+length) <= rb.head
+}
+
 // Head retorna o offset absoluto da próxima posição de escrita.
 func (rb *RingBuffer) Head() int64 {
 	rb.mu.Lock()

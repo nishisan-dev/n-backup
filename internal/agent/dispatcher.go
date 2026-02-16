@@ -7,6 +7,7 @@ package agent
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -267,6 +268,15 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 					stream.senderErr <- nil
 					return
 				}
+				if err == ErrOffsetExpired {
+					d.logger.Error("ring buffer offset expired, data already freed — stream irrecoverable",
+						"stream", streamIdx, "offset", offset,
+						"rbTail", stream.rb.Tail(), "rbHead", stream.rb.Head())
+					stream.dead = true
+					d.DeactivateStream(streamIdx)
+					stream.senderErr <- fmt.Errorf("stream %d: offset expired (data freed from ring buffer)", streamIdx)
+					return
+				}
 				stream.senderErr <- err
 				return
 			}
@@ -313,12 +323,51 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 				}
 
 				// Resume: ajusta sendOffset para o lastOffset do server
+				// Valida que o RingBuffer ainda contém os dados no resumeOffset
+				if resumeOffset > 0 && !stream.rb.ContainsRange(resumeOffset, protocol.ChunkHeaderSize) {
+					d.logger.Error("resume offset no longer in ring buffer — stream irrecoverable",
+						"stream", streamIdx, "resumeOffset", resumeOffset,
+						"rbTail", stream.rb.Tail(), "rbHead", stream.rb.Head())
+					stream.dead = true
+					d.DeactivateStream(streamIdx)
+					stream.senderErr <- fmt.Errorf("stream %d: resume offset %d expired from ring buffer", streamIdx, resumeOffset)
+					return
+				}
+
+				// Valida alinhamento: os primeiros bytes no resumeOffset devem
+				// formar um ChunkHeader válido (GlobalSeq + Length <= chunkSize).
+				// Se não, houve dessincronização — dados corrompidos.
+				if resumeOffset > 0 {
+					hdrBuf := make([]byte, protocol.ChunkHeaderSize)
+					n, readErr := stream.rb.ReadAt(resumeOffset, hdrBuf)
+					if readErr != nil || n < protocol.ChunkHeaderSize {
+						d.logger.Error("failed to read chunk header at resume offset",
+							"stream", streamIdx, "offset", resumeOffset, "error", readErr)
+						stream.dead = true
+						d.DeactivateStream(streamIdx)
+						stream.senderErr <- fmt.Errorf("stream %d: cannot read header at resume offset %d", streamIdx, resumeOffset)
+						return
+					}
+					hdrLength := binary.BigEndian.Uint32(hdrBuf[4:8])
+					if hdrLength > uint32(d.chunkSize) {
+						d.logger.Error("chunk header at resume offset has invalid length — desync detected",
+							"stream", streamIdx, "offset", resumeOffset,
+							"hdrLength", hdrLength, "maxChunkSize", d.chunkSize)
+						stream.dead = true
+						d.DeactivateStream(streamIdx)
+						stream.senderErr <- fmt.Errorf("stream %d: desync at resume offset %d (invalid chunk length %d)",
+							streamIdx, resumeOffset, hdrLength)
+						return
+					}
+				}
+
 				stream.sendMu.Lock()
 				stream.sendOffset = resumeOffset
 				stream.sendMu.Unlock()
 
 				d.logger.Info("stream reconnected, resuming from offset",
-					"stream", streamIdx, "offset", resumeOffset)
+					"stream", streamIdx, "offset", resumeOffset,
+					"rbTail", stream.rb.Tail(), "rbHead", stream.rb.Head())
 				continue
 			}
 

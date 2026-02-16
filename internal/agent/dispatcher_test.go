@@ -306,3 +306,75 @@ func TestAutoScaler_Hysteresis(t *testing.T) {
 		t.Errorf("expected 1 active stream (no data), got %d", d.ActiveStreams())
 	}
 }
+
+func TestSender_ErrOffsetExpired_MarksStreamDead(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	d := NewDispatcher(DispatcherConfig{
+		MaxStreams:  1,
+		BufferSize:  1024,
+		ChunkSize:   256,
+		SessionID:   "test-expired",
+		ServerAddr:  "localhost:9847",
+		AgentName:   "test-agent",
+		StorageName: "test-storage",
+		Logger:      logger,
+		PrimaryConn: nil,
+	})
+
+	activateStreamManually(d, 0, &mockConn{})
+	stream := d.streams[0]
+
+	// Escreve dados no ring buffer
+	data := make([]byte, 256)
+	stream.rb.Write(data)
+
+	// Avança o tail além de onde o sender está (offset=0)
+	// Isso simula o cenário onde SACKs avançaram o RB e dados foram liberados
+	stream.rb.Advance(256)
+
+	// Sender deve obter ErrOffsetExpired ao ler do offset 0
+	// Marca o stream como dead e envia erro no senderErr
+	d.startSenderWithRetry(0)
+
+	select {
+	case err := <-stream.senderErr:
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !stream.dead {
+			t.Fatal("stream should be marked as dead after ErrOffsetExpired")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("sender did not return within timeout")
+	}
+}
+
+func TestSender_ResumeValidation_ContainsRange(t *testing.T) {
+	// Testa que ContainsRange detecta quando o RB não contém mais
+	// os dados no resumeOffset — cenário de flow rotation com dados perdidos
+	rb := NewRingBuffer(128)
+
+	// Escreve 64 bytes e avança tail
+	data := make([]byte, 64)
+	rb.Write(data)
+	rb.Advance(64)
+
+	// Escreve mais 64 bytes (head=128, tail=64)
+	rb.Write(data)
+
+	// Offset 0 não está mais no buffer — ContainsRange deve retornar false
+	if rb.ContainsRange(0, 8) {
+		t.Fatal("expected ContainsRange(0,8) = false after Advance(64)")
+	}
+
+	// Offset 64 está disponível
+	if !rb.ContainsRange(64, 8) {
+		t.Fatal("expected ContainsRange(64,8) = true")
+	}
+
+	// Offset 120 + 16 bytes = 136 excede head (128) — false
+	if rb.ContainsRange(120, 16) {
+		t.Fatal("expected ContainsRange(120,16) = false (exceeds head)")
+	}
+}
