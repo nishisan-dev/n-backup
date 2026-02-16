@@ -168,7 +168,9 @@ func RunWithListener(ctx context.Context, ln net.Listener, cfg *config.ServerCon
 // O server é encerrado gracefully quando o context é cancelado.
 func startWebUI(ctx context.Context, cfg *config.ServerConfig, handler *Handler, logger *slog.Logger) {
 	acl := observability.NewACL(cfg.WebUI.ParsedCIDRs)
-	router := observability.NewRouter(handler, cfg, acl)
+	events := observability.NewEventRing(1000)
+	handler.Events = events
+	router := observability.NewRouter(handler, cfg, acl, events)
 
 	webSrv := &http.Server{
 		Addr:              cfg.WebUI.Listen,

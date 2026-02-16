@@ -38,7 +38,7 @@ type MetricsData struct {
 
 // NewRouter cria o http.Handler para a API de observabilidade e SPA.
 // Aplica middleware ACL em todas as rotas.
-func NewRouter(metrics HandlerMetrics, cfg *config.ServerConfig, acl *ACL) http.Handler {
+func NewRouter(metrics HandlerMetrics, cfg *config.ServerConfig, acl *ACL, events ...*EventRing) http.Handler {
 	mux := http.NewServeMux()
 
 	// API v1
@@ -47,6 +47,11 @@ func NewRouter(metrics HandlerMetrics, cfg *config.ServerConfig, acl *ACL) http.
 	mux.HandleFunc("GET /api/v1/sessions", makeSessionsHandler(metrics))
 	mux.HandleFunc("GET /api/v1/sessions/{id}", makeSessionDetailHandler(metrics))
 	mux.HandleFunc("GET /api/v1/config/effective", makeConfigHandler(cfg))
+
+	// Events endpoint (se ring fornecido)
+	if len(events) > 0 && events[0] != nil {
+		mux.HandleFunc("GET /api/v1/events", makeEventsHandler(events[0]))
+	}
 
 	// SPA root (placeholder até Fase 4)
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
@@ -140,6 +145,15 @@ func makeConfigHandler(cfg *config.ServerConfig) http.HandlerFunc {
 			LogLevel: cfg.Logging.Level,
 		}
 		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+// makeEventsHandler retorna um handler que serve os últimos eventos do ring buffer.
+func makeEventsHandler(ring *EventRing) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		limit := parseInt(r.URL.Query().Get("limit"), 50)
+		events := ring.Recent(limit)
+		writeJSON(w, http.StatusOK, events)
 	}
 }
 

@@ -69,6 +69,9 @@ type Handler struct {
 	TrafficIn   atomic.Int64 // bytes recebidos da rede (acumulado desde último reset)
 	DiskWrite   atomic.Int64 // bytes escritos em disco (acumulado desde último reset)
 	ActiveConns atomic.Int32 // conexões ativas no momento
+
+	// Events ring buffer para observabilidade (nil quando WebUI desabilitada).
+	Events *observability.EventRing
 }
 
 // NewHandler cria um novo Handler.
