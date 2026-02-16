@@ -402,6 +402,13 @@ func (ca *ChunkAssembler) Cleanup() error {
 	ca.mu.Lock()
 	defer ca.mu.Unlock()
 
+	// Se não foi finalizado, fecha e remove o arquivo de saída parcial
+	if ca.outFile != nil && !ca.finalized {
+		ca.outFile.Close()
+		ca.outFile = nil
+		os.Remove(ca.outPath)
+	}
+
 	if ca.chunkDirExists {
 		os.RemoveAll(ca.chunkDir)
 	}
