@@ -47,3 +47,10 @@ logging:
   level: info                      # debug, info, warn, error
   format: json                     # json, text
   file: /var/log/nbackup/agent.log # Log file dedicado (opcional)
+
+daemon:
+  control_channel:
+    enabled: true                    # Ativa canal de controle persistente com o server
+    keepalive_interval: 30s          # Intervalo entre PINGs
+    reconnect_delay: 5s              # Delay inicial de reconexão
+    max_reconnect_delay: 5m          # Delay máximo de reconexão (exponential backoff)
