@@ -43,14 +43,15 @@ const sackWriteTimeout = 10 * time.Second
 
 // PartialSession rastreia um backup parcial para resume.
 type PartialSession struct {
-	TmpPath      string
-	BytesWritten int64
-	AgentName    string
-	StorageName  string
-	BackupName   string
-	BaseDir      string
-	CreatedAt    time.Time
-	LastActivity atomic.Int64 // UnixNano do último I/O bem-sucedido
+	TmpPath       string
+	BytesWritten  int64
+	AgentName     string
+	StorageName   string
+	BackupName    string
+	BaseDir       string
+	CreatedAt     time.Time
+	LastActivity  atomic.Int64 // UnixNano do último I/O bem-sucedido
+	ClientVersion string       // Versão do client (protocolo v3+)
 }
 
 // Handler processa conexões individuais de backup.
@@ -269,7 +270,7 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 				IdleSecs:    idleSecs,
 				SlowSince:   slowSince,
 				Active:      active,
-				Status:      streamStatus(active, idleSecs, slowSince),
+				Status:      streamStatus(active, idleSecs, slowSince, h.cfg.FlowRotation.EvalWindow),
 			})
 			return true
 		})
@@ -333,12 +334,17 @@ func sessionStatus(lastActivity time.Time) string {
 	}
 }
 
-func streamStatus(active bool, idleSecs int64, slowSince string) string {
+func streamStatus(active bool, idleSecs int64, slowSince string, evalWindow time.Duration) string {
 	if !active {
 		return "inactive"
 	}
 	if slowSince != "" {
-		return "degraded"
+		if t, err := time.Parse(time.RFC3339, slowSince); err == nil {
+			if time.Since(t) >= evalWindow {
+				return "degraded"
+			}
+		}
+		return "slow"
 	}
 	switch {
 	case idleSecs < 10:
@@ -866,7 +872,20 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 		return
 	}
 
-	logger = logger.With("agent", agentName, "storage", storageName, "backup", backupName)
+	// Protocolo v3+: Ler Client Version
+	var clientVersion string
+	if versionBuf[0] >= 0x03 {
+		ver, err := readUntilNewline(conn)
+		if err != nil {
+			logger.Error("reading client version", "error", err)
+			return
+		}
+		clientVersion = ver
+	} else {
+		clientVersion = "unknown (legacy)"
+	}
+
+	logger = logger.With("agent", agentName, "storage", storageName, "backup", backupName, "client_ver", clientVersion)
 	logger.Info("backup handshake received")
 
 	// Busca storage nomeado
@@ -914,7 +933,7 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 		}
 		logger.Info("parallel mode detected", "maxStreams", pi.MaxStreams, "chunkSize", pi.ChunkSize)
 
-		h.handleParallelBackup(ctx, conn, br, sessionID, agentName, storageName, backupName, storageInfo, pi, lockKey, logger)
+		h.handleParallelBackup(ctx, conn, br, sessionID, agentName, storageName, backupName, clientVersion, storageInfo, pi, lockKey, logger)
 		return
 	}
 
@@ -938,12 +957,13 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	// Registra sessão parcial
 	now := time.Now()
 	session := &PartialSession{
-		TmpPath:     tmpPath,
-		AgentName:   agentName,
-		StorageName: storageName,
-		BackupName:  backupName,
-		BaseDir:     storageInfo.BaseDir,
-		CreatedAt:   now,
+		TmpPath:       tmpPath,
+		AgentName:     agentName,
+		StorageName:   storageName,
+		BackupName:    backupName,
+		BaseDir:       storageInfo.BaseDir,
+		CreatedAt:     now,
+		ClientVersion: clientVersion,
 	}
 	session.LastActivity.Store(now.UnixNano())
 	h.sessions.Store(sessionID, session)
@@ -1379,12 +1399,13 @@ type ParallelSession struct {
 	TotalObjects    atomic.Uint32 // Total de objetos a enviar (recebido via ControlProgress)
 	ObjectsSent     atomic.Uint32 // Objetos já enviados (recebido via ControlProgress)
 	WalkComplete    atomic.Int32  // 1 = prescan concluído, total confiável (via ControlProgress)
+	ClientVersion   string        // Versão do client (protocolo v3+)
 }
 
 // handleParallelBackup processa um backup paralelo.
 // A conexão primária é usada apenas como canal de controle (Trailer + FinalACK).
 // Todos os dados são recebidos via streams secundários (ParallelJoin).
-func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io.Reader, sessionID, agentName, storageName, backupName string, storageInfo config.StorageInfo, pi *protocol.ParallelInit, lockKey string, logger *slog.Logger) {
+func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io.Reader, sessionID, agentName, storageName, backupName, clientVersion string, storageInfo config.StorageInfo, pi *protocol.ParallelInit, lockKey string, logger *slog.Logger) {
 	defer h.locks.Delete(lockKey)
 
 	logger = logger.With("session", sessionID, "mode", "parallel", "maxStreams", pi.MaxStreams)
@@ -1413,18 +1434,19 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	// Registra sessão paralela para que handleParallelJoin possa encontrar
 	now := time.Now()
 	pSession := &ParallelSession{
-		SessionID:   sessionID,
-		Assembler:   assembler,
-		Writer:      writer,
-		StorageInfo: storageInfo,
-		AgentName:   agentName,
-		StorageName: storageName,
-		BackupName:  backupName,
-		MaxStreams:  pi.MaxStreams,
-		ChunkSize:   pi.ChunkSize,
-		StreamReady: make(chan struct{}),
-		Done:        make(chan struct{}),
-		CreatedAt:   now,
+		SessionID:     sessionID,
+		Assembler:     assembler,
+		Writer:        writer,
+		StorageInfo:   storageInfo,
+		AgentName:     agentName,
+		StorageName:   storageName,
+		BackupName:    backupName,
+		ClientVersion: clientVersion,
+		MaxStreams:    pi.MaxStreams,
+		ChunkSize:     pi.ChunkSize,
+		StreamReady:   make(chan struct{}),
+		Done:          make(chan struct{}),
+		CreatedAt:     now,
 	}
 	pSession.LastActivity.Store(now.UnixNano())
 	h.sessions.Store(sessionID, pSession)

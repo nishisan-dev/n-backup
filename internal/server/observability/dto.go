@@ -28,7 +28,8 @@ type SessionSummary struct {
 	Agent          string `json:"agent"`
 	Storage        string `json:"storage"`
 	Backup         string `json:"backup,omitempty"`
-	Mode           string `json:"mode"` // single | parallel
+	ClientVersion  string `json:"client_version"` // Versão do client
+	Mode           string `json:"mode"`           // single | parallel
 	StartedAt      string `json:"started_at"`
 	LastActivity   string `json:"last_activity"`
 	BytesReceived  int64  `json:"bytes_received"`
@@ -59,7 +60,7 @@ type StreamDetail struct {
 	IdleSecs    int64   `json:"idle_secs"`
 	SlowSince   string  `json:"slow_since,omitempty"`
 	Active      bool    `json:"active"`
-	Status      string  `json:"status"` // running | idle | degraded | inactive
+	Status      string  `json:"status"` // running | idle | slow | degraded | inactive
 }
 
 // EventEntry representa um evento operacional no ring buffer.

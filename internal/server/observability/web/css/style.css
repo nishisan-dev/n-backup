@@ -432,6 +432,11 @@ body {
     color: var(--accent-amber);
 }
 
+.badge-slow {
+    background: rgba(251, 146, 60, 0.15);
+    color: #fb923c;
+}
+
 .badge-degraded {
     background: rgba(244, 63, 94, 0.15);
     color: var(--accent-rose);
@@ -465,6 +470,16 @@ body {
 .badge-error {
     background: rgba(244, 63, 94, 0.15);
     color: var(--accent-rose);
+}
+
+.badge-neutral {
+    background: rgba(148, 163, 184, 0.1);
+    color: var(--text-secondary);
+}
+
+.text-xs {
+    font-size: 0.65rem;
+    padding: 1px 6px;
 }
 
 /* ============ Sessions List ============ */
@@ -672,13 +687,6 @@ body {
     width: 100px;
     height: 28px;
     display: block;
-}
-
-.session-card-stats {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 4px;
 }
 
 /* Progress bar para ETA */
