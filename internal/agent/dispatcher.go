@@ -572,6 +572,29 @@ func (d *Dispatcher) ActiveStreams() int {
 	return int(atomic.LoadInt32(&d.activeCount))
 }
 
+// DrainStream prepara um stream para flow rotation graceful.
+// Chamado pelo control channel quando o server envia ControlRotate(idx).
+// O fluxo é: server envia ControlRotate → agent DrainStream → agent envia ACK →
+// server fecha data conn → sender detecta e reconecta automaticamente.
+// Atualmente apenas loga a intenção — o sender com retry+resume cuida da reconexão.
+func (d *Dispatcher) DrainStream(streamIdx uint8) {
+	if int(streamIdx) >= d.maxStreams {
+		return
+	}
+
+	stream := d.streams[streamIdx]
+	if !stream.active {
+		d.logger.Info("drain requested for inactive stream, ignoring",
+			"stream", streamIdx)
+		return
+	}
+
+	d.logger.Info("stream drain requested for graceful rotation",
+		"stream", streamIdx,
+		"sendOffset", atomic.LoadInt64(&stream.drainBytes),
+	)
+}
+
 // notifyStreamChange invoca o callback de mudança de streams, se configurado.
 func (d *Dispatcher) notifyStreamChange() {
 	if d.onStreamChange != nil {

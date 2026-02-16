@@ -33,7 +33,8 @@ const maxMissedPings = 3
 const ewmaAlpha = 0.25
 
 // ControlChannel gerencia uma conexão TLS persistente com o server para
-// keep-alive (PING/PONG), medição contínua de RTT e pre-flight check.
+// keep-alive (PING/PONG), medição contínua de RTT, pre-flight check,
+// e recepção de comandos do server (ControlRotate para flow rotation graceful).
 type ControlChannel struct {
 	cfg    *config.AgentConfig
 	logger *slog.Logger
@@ -41,6 +42,10 @@ type ControlChannel struct {
 	// Conexão gerenciada
 	conn   net.Conn
 	connMu sync.Mutex
+
+	// Mutex de write: protege writes concorrentes na conn
+	// (pingWriter e SendRotateACK podem escrever simultaneamente)
+	writeMu sync.Mutex
 
 	// State machine (atômico para reads lock-free)
 	state atomic.Value // string
@@ -51,6 +56,10 @@ type ControlChannel struct {
 	// Server metrics
 	serverLoad atomic.Value // float32
 	diskFree   atomic.Value // uint32
+
+	// Callback chamado quando o server envia ControlRotate.
+	// A função deve drenar o stream e retornar.
+	onRotate func(streamIndex uint8)
 
 	// Lifecycle
 	stopCh chan struct{}
@@ -68,6 +77,33 @@ func NewControlChannel(cfg *config.AgentConfig, logger *slog.Logger) *ControlCha
 	cc.serverLoad.Store(float32(0))
 	cc.diskFree.Store(uint32(0))
 	return cc
+}
+
+// SetOnRotate define o callback chamado quando o server envia ControlRotate.
+// Deve ser chamado antes de Start().
+func (cc *ControlChannel) SetOnRotate(fn func(streamIndex uint8)) {
+	cc.onRotate = fn
+}
+
+// SendRotateACK envia ControlRotateACK ao server pelo canal de controle.
+// Thread-safe via writeMu.
+func (cc *ControlChannel) SendRotateACK(streamIndex uint8) error {
+	cc.connMu.Lock()
+	conn := cc.conn
+	cc.connMu.Unlock()
+
+	if conn == nil {
+		return nil // sem conexão, ignora
+	}
+
+	cc.writeMu.Lock()
+	err := protocol.WriteControlRotateACK(conn, streamIndex)
+	cc.writeMu.Unlock()
+
+	if err != nil {
+		cc.logger.Warn("failed to send ControlRotateACK", "error", err, "stream", streamIndex)
+	}
+	return err
 }
 
 // Start inicia a goroutine de manutenção do canal de controle.
@@ -222,79 +258,143 @@ func (cc *ControlChannel) connect() error {
 	return nil
 }
 
-// pingLoop envia ControlPing periodicamente e lê ControlPong.
+// pingLoop roda em full-duplex: um ping writer envia pings periódicos,
+// e um frame reader lê respostas e comandos assíncronos do server.
 // Retorna quando detecta desconexão, erro ou stop signal.
 func (cc *ControlChannel) pingLoop() {
+	cc.connMu.Lock()
+	conn := cc.conn
+	cc.connMu.Unlock()
+
+	if conn == nil {
+		return
+	}
+
 	ccCfg := cc.cfg.Daemon.ControlChannel
+
+	// Canal para sinalizar que o reader ou writer terminou
+	done := make(chan struct{})
+
+	// --- Frame Reader goroutine ---
+	// Lê qualquer frame do server (PONG, ControlRotate) e despacha.
+	go func() {
+		defer func() {
+			select {
+			case done <- struct{}{}:
+			default:
+			}
+		}()
+
+		readTimeout := ccCfg.KeepaliveInterval + 5*time.Second
+		missedPings := 0
+
+		for {
+			select {
+			case <-cc.stopCh:
+				return
+			default:
+			}
+
+			conn.SetReadDeadline(time.Now().Add(readTimeout))
+
+			// Lê magic de 4 bytes para determinar o tipo de frame
+			magic, err := protocol.ReadControlMagic(conn)
+			if err != nil {
+				missedPings++
+				if missedPings >= maxMissedPings {
+					cc.state.Store(StateDegraded)
+					cc.logger.Error("control channel degraded: max missed reads",
+						"missed", missedPings, "error", err)
+				} else {
+					cc.logger.Warn("control channel read failed",
+						"error", err, "missed", missedPings)
+				}
+				return
+			}
+
+			switch magic {
+			case protocol.MagicControlPing:
+				// Server respondeu PONG (mesmo magic CPNG)
+				pong, err := protocol.ReadControlPongPayload(conn)
+				if err != nil {
+					cc.logger.Warn("control channel: reading pong payload", "error", err)
+					return
+				}
+
+				// Calcula RTT
+				rttSample := time.Duration(time.Now().UnixNano() - pong.Timestamp)
+				if rttSample < 0 {
+					rttSample = 0
+				}
+				cc.updateRTT(rttSample)
+
+				// Atualiza métricas do server
+				cc.serverLoad.Store(pong.ServerLoad)
+				cc.diskFree.Store(pong.DiskFree)
+
+				missedPings = 0
+
+				cc.logger.Debug("control channel pong received",
+					"rtt", rttSample,
+					"ewma_rtt", cc.RTT(),
+					"server_load", pong.ServerLoad,
+					"disk_free_mb", pong.DiskFree,
+				)
+
+			case protocol.MagicControlRotate:
+				// Server solicitou rotação graceful de um stream
+				streamIdx, err := protocol.ReadControlRotatePayload(conn)
+				if err != nil {
+					cc.logger.Warn("control channel: reading rotate payload", "error", err)
+					return
+				}
+
+				cc.logger.Info("control channel: received ControlRotate",
+					"stream", streamIdx)
+
+				// Chama callback em goroutine para não bloquear o reader
+				if cc.onRotate != nil {
+					go func(idx uint8) {
+						cc.onRotate(idx)
+						// Envia ACK após drain
+						cc.SendRotateACK(idx)
+						cc.logger.Info("control channel: sent ControlRotateACK",
+							"stream", idx)
+					}(streamIdx)
+				}
+
+			default:
+				cc.logger.Warn("control channel: unknown magic from server",
+					"magic", string(magic[:]))
+				return
+			}
+		}
+	}()
+
+	// --- Ping Writer ---
+	// Envia ControlPing periódico no mesmo loop de controle.
 	ticker := time.NewTicker(ccCfg.KeepaliveInterval)
 	defer ticker.Stop()
-
-	missedPings := 0
-	pongDeadline := ccCfg.KeepaliveInterval + 5*time.Second // margem para o pong
 
 	for {
 		select {
 		case <-cc.stopCh:
 			return
+		case <-done:
+			// Reader terminou (erro ou timeout) — sai do loop
+			return
 		case <-ticker.C:
-		}
+			// Envia ping com mutex de write
+			now := time.Now().UnixNano()
+			cc.writeMu.Lock()
+			err := protocol.WriteControlPing(conn, now)
+			cc.writeMu.Unlock()
 
-		cc.connMu.Lock()
-		conn := cc.conn
-		cc.connMu.Unlock()
-
-		if conn == nil {
-			return
-		}
-
-		// Envia ping
-		now := time.Now().UnixNano()
-		if err := protocol.WriteControlPing(conn, now); err != nil {
-			cc.logger.Warn("control channel ping write failed", "error", err)
-			return
-		}
-
-		// Lê pong com deadline
-		conn.SetReadDeadline(time.Now().Add(pongDeadline))
-		pong, err := protocol.ReadControlPong(conn)
-		conn.SetReadDeadline(time.Time{}) // remove deadline
-
-		if err != nil {
-			missedPings++
-			cc.logger.Warn("control channel pong read failed",
-				"error", err,
-				"missed", missedPings,
-			)
-
-			if missedPings >= maxMissedPings {
-				cc.state.Store(StateDegraded)
-				cc.logger.Error("control channel degraded: max missed pings reached",
-					"missed", missedPings,
-				)
+			if err != nil {
+				cc.logger.Warn("control channel ping write failed", "error", err)
 				return
 			}
-			continue
 		}
-
-		// Pong recebido — calcula RTT
-		rttSample := time.Duration(time.Now().UnixNano() - pong.Timestamp)
-		if rttSample < 0 {
-			rttSample = 0
-		}
-		cc.updateRTT(rttSample)
-
-		// Atualiza métricas do server
-		cc.serverLoad.Store(pong.ServerLoad)
-		cc.diskFree.Store(pong.DiskFree)
-
-		missedPings = 0
-
-		cc.logger.Debug("control channel pong received",
-			"rtt", rttSample,
-			"ewma_rtt", cc.RTT(),
-			"server_load", pong.ServerLoad,
-			"disk_free_mb", pong.DiskFree,
-		)
 	}
 }
 
