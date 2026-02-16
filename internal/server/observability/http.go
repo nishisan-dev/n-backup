@@ -53,15 +53,12 @@ func NewRouter(metrics HandlerMetrics, cfg *config.ServerConfig, acl *ACL, event
 		mux.HandleFunc("GET /api/v1/events", makeEventsHandler(events[0]))
 	}
 
-	// SPA root (placeholder até Fase 4)
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(`<!DOCTYPE html><html><head><title>NBackup Observability</title></head><body><h1>NBackup Server</h1><p>SPA em construção.</p></body></html>`))
-	})
+	// SPA — serve assets embarcados via go:embed
+	spa := http.FileServer(WebFS())
+	mux.Handle("GET /", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Para paths não-API que não existam como arquivo, serve index.html (SPA fallback)
+		spa.ServeHTTP(w, r)
+	}))
 
 	return acl.Middleware(mux)
 }
