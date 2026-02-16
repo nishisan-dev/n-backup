@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nishisan-dev/n-backup/internal/config"
 	"github.com/nishisan-dev/n-backup/internal/protocol"
 )
 
@@ -79,6 +80,91 @@ func TestControlChannel_StopUnblocksRead(t *testing.T) {
 
 	if cc.State() != StateDisconnected {
 		t.Errorf("expected state %s, got %s", StateDisconnected, cc.State())
+	}
+}
+
+// TestControlChannel_StopIsIdempotent verifica que Stop() pode ser chamado
+// múltiplas vezes sem panic (close de channel duplicado).
+func TestControlChannel_StopIsIdempotent(t *testing.T) {
+	cc := &ControlChannel{
+		logger: slog.Default(),
+		stopCh: make(chan struct{}),
+	}
+	cc.state.Store(StateConnected)
+	cc.serverLoad.Store(float32(0))
+	cc.diskFree.Store(uint32(0))
+
+	// Deve ser seguro chamar Stop duas vezes.
+	cc.Stop()
+	cc.Stop()
+
+	if cc.State() != StateDisconnected {
+		t.Errorf("expected state %s, got %s", StateDisconnected, cc.State())
+	}
+}
+
+// TestControlChannel_RotateACKSentWhenOnRotatePanics verifica que o ACK é
+// enviado mesmo quando o callback onRotate entra em panic.
+func TestControlChannel_RotateACKSentWhenOnRotatePanics(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer serverConn.Close()
+
+	cc := &ControlChannel{
+		cfg: &config.AgentConfig{
+			Daemon: config.DaemonInfo{
+				ControlChannel: config.ControlChannelConfig{
+					KeepaliveInterval: time.Hour,
+				},
+			},
+		},
+		logger: slog.Default(),
+		stopCh: make(chan struct{}),
+	}
+	cc.state.Store(StateConnected)
+	cc.serverLoad.Store(float32(0))
+	cc.diskFree.Store(uint32(0))
+	cc.SetOnRotate(func(streamIndex uint8) {
+		panic("boom")
+	})
+
+	cc.connMu.Lock()
+	cc.conn = clientConn
+	cc.connMu.Unlock()
+	defer clientConn.Close()
+
+	pingLoopDone := make(chan struct{})
+	go func() {
+		cc.pingLoop()
+		close(pingLoopDone)
+	}()
+
+	streamIdx := uint8(7)
+	if err := protocol.WriteControlRotate(serverConn, streamIdx); err != nil {
+		t.Fatalf("WriteControlRotate failed: %v", err)
+	}
+
+	_ = serverConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	magic, err := protocol.ReadControlMagic(serverConn)
+	if err != nil {
+		t.Fatalf("reading ACK magic: %v", err)
+	}
+	if magic != protocol.MagicControlRotateACK {
+		t.Fatalf("expected CRAK magic, got %q", string(magic[:]))
+	}
+
+	gotIdx, err := protocol.ReadControlRotateACKPayload(serverConn)
+	if err != nil {
+		t.Fatalf("reading ACK payload: %v", err)
+	}
+	if gotIdx != streamIdx {
+		t.Fatalf("ACK stream index: want %d, got %d", streamIdx, gotIdx)
+	}
+
+	cc.Stop()
+	select {
+	case <-pingLoopDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pingLoop did not stop within 2s")
 	}
 }
 

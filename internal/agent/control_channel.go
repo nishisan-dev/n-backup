@@ -63,6 +63,7 @@ type ControlChannel struct {
 
 	// Lifecycle
 	stopCh chan struct{}
+	stopMu sync.Once
 	wg     sync.WaitGroup
 }
 
@@ -116,7 +117,9 @@ func (cc *ControlChannel) Start() {
 // Stop para o canal de controle e aguarda a goroutine terminar.
 // Fecha a conexão primeiro para desbloquear qualquer read pendente.
 func (cc *ControlChannel) Stop() {
-	close(cc.stopCh)
+	cc.stopMu.Do(func() {
+		close(cc.stopCh)
+	})
 
 	// Fecha conn ANTES de Wait para desbloquear reads bloqueados no pingLoop
 	cc.connMu.Lock()
@@ -241,7 +244,10 @@ func (cc *ControlChannel) connect() error {
 	// O server usa keepalive_interval para calcular o read timeout (2.5x)
 	handshake := make([]byte, 8) // 4B magic + 4B interval
 	copy(handshake[0:4], protocol.MagicControl[:])
-	intervalSecs := uint32(cc.cfg.Daemon.ControlChannel.KeepaliveInterval.Seconds())
+	intervalSecs := uint32(math.Ceil(cc.cfg.Daemon.ControlChannel.KeepaliveInterval.Seconds()))
+	if intervalSecs == 0 {
+		intervalSecs = 1
+	}
 	handshake[4] = byte(intervalSecs >> 24)
 	handshake[5] = byte(intervalSecs >> 16)
 	handshake[6] = byte(intervalSecs >> 8)
@@ -352,16 +358,27 @@ func (cc *ControlChannel) pingLoop() {
 				cc.logger.Info("control channel: received ControlRotate",
 					"stream", streamIdx)
 
-				// Chama callback em goroutine para não bloquear o reader
-				if cc.onRotate != nil {
-					go func(idx uint8) {
-						cc.onRotate(idx)
-						// Envia ACK após drain
+				// Executa em goroutine para não bloquear o reader.
+				// O ACK DEVE ser enviado sempre — onRotate é opcional.
+				go func(idx uint8) {
+					defer func() {
+						if r := recover(); r != nil {
+							cc.logger.Error("control channel: onRotate panic recovered",
+								"stream", idx, "panic", r)
+						}
+						// Envia ACK sempre, mesmo se onRotate panicar.
 						cc.SendRotateACK(idx)
 						cc.logger.Info("control channel: sent ControlRotateACK",
 							"stream", idx)
-					}(streamIdx)
-				}
+					}()
+
+					if cc.onRotate != nil {
+						cc.onRotate(idx)
+					} else {
+						cc.logger.Warn("control channel: onRotate handler missing, sending ACK without drain",
+							"stream", idx)
+					}
+				}(streamIdx)
 
 			default:
 				cc.logger.Warn("control channel: unknown magic from server",
