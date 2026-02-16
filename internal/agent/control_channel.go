@@ -61,6 +61,10 @@ type ControlChannel struct {
 	// A função deve drenar o stream e retornar.
 	onRotate func(streamIndex uint8)
 
+	// Callback que retorna dados de progresso do backup em andamento.
+	// Chamado a cada ping tick para enviar ControlProgress ao server.
+	progressProvider func() (totalObjects, objectsSent uint32, walkComplete bool)
+
 	// Lifecycle
 	stopCh chan struct{}
 	stopMu sync.Once
@@ -84,6 +88,33 @@ func NewControlChannel(cfg *config.AgentConfig, logger *slog.Logger) *ControlCha
 // Deve ser chamado antes de Start().
 func (cc *ControlChannel) SetOnRotate(fn func(streamIndex uint8)) {
 	cc.onRotate = fn
+}
+
+// SetProgressProvider define o callback que fornece dados de progresso do backup.
+// Chamado a cada ping tick; quando retorna totalObjects > 0, envia ControlProgress ao server.
+func (cc *ControlChannel) SetProgressProvider(fn func() (totalObjects, objectsSent uint32, walkComplete bool)) {
+	cc.progressProvider = fn
+}
+
+// SendProgress envia um frame ControlProgress ao server imediatamente.
+// Thread-safe via writeMu.
+func (cc *ControlChannel) SendProgress(totalObjects, objectsSent uint32, walkComplete bool) error {
+	cc.connMu.Lock()
+	conn := cc.conn
+	cc.connMu.Unlock()
+
+	if conn == nil {
+		return nil
+	}
+
+	cc.writeMu.Lock()
+	err := protocol.WriteControlProgress(conn, totalObjects, objectsSent, walkComplete)
+	cc.writeMu.Unlock()
+
+	if err != nil {
+		cc.logger.Warn("failed to send ControlProgress", "error", err)
+	}
+	return err
 }
 
 // SendRotateACK envia ControlRotateACK ao server pelo canal de controle.
@@ -405,10 +436,17 @@ func (cc *ControlChannel) pingLoop() {
 			now := time.Now().UnixNano()
 			cc.writeMu.Lock()
 			err := protocol.WriteControlPing(conn, now)
+			// Coalescendo envio de progress com o mesmo tick de ping
+			if err == nil && cc.progressProvider != nil {
+				total, sent, walk := cc.progressProvider()
+				if total > 0 {
+					err = protocol.WriteControlProgress(conn, total, sent, walk)
+				}
+			}
 			cc.writeMu.Unlock()
 
 			if err != nil {
-				cc.logger.Warn("control channel ping write failed", "error", err)
+				cc.logger.Warn("control channel write failed", "error", err)
 				return
 			}
 		}
