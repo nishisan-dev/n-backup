@@ -7,9 +7,35 @@ package protocol
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 )
+
+// maxLineLength é o limite máximo para leitura de linhas delimitadas por '\n'.
+// Suficiente para sessionIDs, agent names, storage names (UUID + nomes razoáveis).
+const maxLineLength = 1024
+
+// ErrLineTooLong é retornado quando uma linha excede maxLineLength bytes.
+var ErrLineTooLong = errors.New("protocol: line too long")
+
+// readLineLimited lê até '\n' com limite de bytes. Retorna a string sem o '\n' final.
+func readLineLimited(br *bufio.Reader, max int) (string, error) {
+	buf := make([]byte, 0, 128)
+	for {
+		b, err := br.ReadByte()
+		if err != nil {
+			return "", err
+		}
+		if b == '\n' {
+			return string(buf), nil
+		}
+		buf = append(buf, b)
+		if len(buf) > max {
+			return "", ErrLineTooLong
+		}
+	}
+}
 
 // ReadHandshake lê e valida o frame de handshake (Client → Server).
 func ReadHandshake(r io.Reader) (*Handshake, error) {
@@ -53,11 +79,22 @@ func ReadHandshake(r io.Reader) (*Handshake, error) {
 	}
 	backupName = backupName[:len(backupName)-1]
 
+	var clientVersion string
+	if version[0] >= 0x03 {
+		// Lê client version até '\n'
+		ver, err := br.ReadString('\n')
+		if err != nil {
+			return nil, fmt.Errorf("reading client version: %w", err)
+		}
+		clientVersion = ver[:len(ver)-1]
+	}
+
 	return &Handshake{
-		Version:     version[0],
-		AgentName:   name,
-		StorageName: storageName,
-		BackupName:  backupName,
+		Version:       version[0],
+		AgentName:     name,
+		StorageName:   storageName,
+		BackupName:    backupName,
+		ClientVersion: clientVersion,
 	}, nil
 }
 
@@ -179,23 +216,20 @@ func ReadResume(r io.Reader) (*Resume, error) {
 
 	br := bufio.NewReader(r)
 
-	sessionID, err := br.ReadString('\n')
+	sessionID, err := readLineLimited(br, maxLineLength)
 	if err != nil {
 		return nil, fmt.Errorf("reading resume session id: %w", err)
 	}
-	sessionID = sessionID[:len(sessionID)-1]
 
-	agentName, err := br.ReadString('\n')
+	agentName, err := readLineLimited(br, maxLineLength)
 	if err != nil {
 		return nil, fmt.Errorf("reading resume agent name: %w", err)
 	}
-	agentName = agentName[:len(agentName)-1]
 
-	storageName, err := br.ReadString('\n')
+	storageName, err := readLineLimited(br, maxLineLength)
 	if err != nil {
 		return nil, fmt.Errorf("reading resume storage name: %w", err)
 	}
-	storageName = storageName[:len(storageName)-1]
 
 	return &Resume{
 		SessionID:   sessionID,
@@ -288,11 +322,10 @@ func ReadParallelJoin(r io.Reader) (*ParallelJoin, error) {
 
 	// Lê sessionID até '\n'
 	br := bufio.NewReader(r)
-	sessionID, err := br.ReadString('\n')
+	sessionID, err := readLineLimited(br, maxLineLength)
 	if err != nil {
 		return nil, fmt.Errorf("reading parallel join session id: %w", err)
 	}
-	sessionID = sessionID[:len(sessionID)-1]
 
 	// Lê streamIndex
 	var streamIndex [1]byte
