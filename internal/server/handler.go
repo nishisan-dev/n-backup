@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
@@ -56,6 +57,12 @@ type Handler struct {
 	logger   *slog.Logger
 	locks    *sync.Map // Mapa de locks por "agent:storage"
 	sessions *sync.Map // Mapa de sessões parciais por sessionID
+
+	// Control channel registry: agentName → net.Conn
+	// Registrado em handleControlChannel, usado por evaluateFlowRotation
+	// para enviar ControlRotate graceful.
+	controlConns   sync.Map // agentName (string) → net.Conn
+	controlConnsMu sync.Map // agentName (string) → *sync.Mutex (protege writes na conn)
 
 	// Métricas observáveis pelo stats reporter
 	TrafficIn   atomic.Int64 // bytes recebidos da rede (acumulado desde último reset)
@@ -194,8 +201,14 @@ func (h *Handler) logPerStreamStats(intervalSecs float64) {
 	})
 }
 
+// rotateACKTimeout é o tempo máximo que o server espera pelo ControlRotateACK do agent.
+// Se expirar, faz fallback para close abrupto (comportamento pré-Fase 3).
+const rotateACKTimeout = 10 * time.Second
+
 // evaluateFlowRotation verifica se streams estão com throughput abaixo do threshold
-// e fecha a conexão dos degradados para forçar reconexão com nova source port.
+// e solicita rotação graceful via canal de controle. Se o agent confirmar com
+// ControlRotateACK, fecha a conexão de dados após drain. Se não houver canal de
+// controle ou o ACK não chegar a tempo, faz fallback para close abrupto.
 // Usa Swap(0) para ler os bytes reais do intervalo e resetar o contador.
 // Limita a 1 rotação por tick para evitar tempestade de reconexões.
 func (h *Handler) evaluateFlowRotation(intervalSecs float64) {
@@ -248,20 +261,10 @@ func (h *Handler) evaluateFlowRotation(intervalSecs float64) {
 					}
 
 					if sinceMarked >= frCfg.EvalWindow && sinceLast >= frCfg.Cooldown && rotated < maxRotationsPerTick {
-						// Flow rotation: fecha a conn do stream
-						if conn, ok := ps.StreamConns.Load(idx); ok {
-							h.logger.Info("flow rotation triggered",
-								"session", key,
-								"agent", ps.AgentName,
-								"stream", idx,
-								"mbps", fmt.Sprintf("%.2f", mbps),
-								"slowFor", sinceMarked.String(),
-							)
-							conn.(net.Conn).Close()
-							ps.StreamLastReset.Store(idx, now)
-							ps.StreamSlowSince.Delete(idx)
-							rotated++
-						}
+						h.rotateStream(key, ps, idx, mbps, sinceMarked)
+						ps.StreamLastReset.Store(idx, now)
+						ps.StreamSlowSince.Delete(idx)
+						rotated++
 					}
 				}
 			} else {
@@ -274,6 +277,71 @@ func (h *Handler) evaluateFlowRotation(intervalSecs float64) {
 
 		return true
 	})
+}
+
+// rotateStream executa a rotação de um stream, tentando primeiro a via graceful
+// pelo canal de controle (ControlRotate → espera ACK → fecha conn). Se não houver
+// canal de controle ou o ACK não chegar a tempo, faz fallback para close abrupto.
+func (h *Handler) rotateStream(sessionKey any, ps *ParallelSession, idx uint8, mbps float64, slowFor time.Duration) {
+	conn, ok := ps.StreamConns.Load(idx)
+	if !ok {
+		return
+	}
+
+	// Tenta graceful rotation via control channel
+	ctrlConn, hasCtrl := h.controlConns.Load(ps.AgentName)
+	if hasCtrl {
+		// Cria canal para esperar ACK do agent
+		ackCh := make(chan struct{}, 1)
+		ps.RotatePending.Store(idx, ackCh)
+		defer ps.RotatePending.Delete(idx)
+
+		// Envia ControlRotate com mutex de write
+		writeOK := false
+		if muRaw, ok := h.controlConnsMu.Load(ps.AgentName); ok {
+			mu := muRaw.(*sync.Mutex)
+			mu.Lock()
+			err := protocol.WriteControlRotate(ctrlConn.(net.Conn), idx)
+			mu.Unlock()
+			writeOK = (err == nil)
+			if err != nil {
+				h.logger.Warn("flow rotation: failed to send ControlRotate, falling back",
+					"agent", ps.AgentName, "stream", idx, "error", err)
+			}
+		}
+
+		if writeOK {
+			h.logger.Info("flow rotation: sent ControlRotate (graceful)",
+				"session", sessionKey,
+				"agent", ps.AgentName,
+				"stream", idx,
+				"mbps", fmt.Sprintf("%.2f", mbps),
+				"slowFor", slowFor.String(),
+			)
+
+			// Espera ACK com timeout
+			select {
+			case <-ackCh:
+				h.logger.Info("flow rotation: received ControlRotateACK, closing data conn",
+					"agent", ps.AgentName, "stream", idx)
+				conn.(net.Conn).Close()
+				return
+			case <-time.After(rotateACKTimeout):
+				h.logger.Warn("flow rotation: ACK timeout, falling back to abrupt close",
+					"agent", ps.AgentName, "stream", idx, "timeout", rotateACKTimeout)
+			}
+		}
+	}
+
+	// Fallback: close abrupto (comportamento pré-Fase 3)
+	h.logger.Info("flow rotation triggered (abrupt)",
+		"session", sessionKey,
+		"agent", ps.AgentName,
+		"stream", idx,
+		"mbps", fmt.Sprintf("%.2f", mbps),
+		"slowFor", slowFor.String(),
+	)
+	conn.(net.Conn).Close()
 }
 
 // HandleConnection processa uma conexão individual de backup.
@@ -320,7 +388,11 @@ func (h *Handler) handleHealthCheck(conn net.Conn, logger *slog.Logger) {
 }
 
 // handleControlChannel processa uma conexão de canal de controle persistente (CTRL).
-// Responde a ControlPing com ControlPong indefinidamente até que o agent desconecte.
+// Usa despacho full-duplex baseado em magic bytes para suportar múltiplos tipos de frame:
+// - ControlPing (CPNG): Agent → Server, responde com ControlPong
+// - ControlRotateACK (CRAK): Agent → Server, sinaliza drain completo de stream
+// O server também pode enviar frames assíncronos ao agent pela mesma conn:
+// - ControlRotate (CROT): Server → Agent, solicita drain de stream
 // O agent envia o keepalive_interval (uint32 big-endian, segundos) logo após o magic CTRL.
 func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logger *slog.Logger) {
 	// Lê o keepalive_interval negociado pelo agent (4 bytes big-endian, segundos)
@@ -340,6 +412,20 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 	// Read timeout = 2.5x keepalive_interval para tolerar jitter + 1 ping perdido
 	readTimeout := time.Duration(intervalSecs) * time.Second * 5 / 2
 
+	// Lê agent name do TLS peer cert CN (para registrar control conn por agent)
+	agentName := h.extractAgentName(conn, logger)
+	if agentName == "" {
+		agentName = conn.RemoteAddr().String() // fallback
+	}
+
+	// Registra control conn e mutex de write para este agent
+	writeMu := &sync.Mutex{}
+	h.controlConns.Store(agentName, conn)
+	h.controlConnsMu.Store(agentName, writeMu)
+	defer h.controlConns.Delete(agentName)
+	defer h.controlConnsMu.Delete(agentName)
+
+	logger = logger.With("agent", agentName)
 	logger.Info("control channel established",
 		"keepalive_interval_s", intervalSecs,
 		"read_timeout", readTimeout,
@@ -354,32 +440,96 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 		}
 
 		conn.SetReadDeadline(time.Now().Add(readTimeout))
-		timestamp, err := protocol.ReadControlPing(conn)
+
+		// Full-duplex: lê o magic de 4 bytes e despacha pelo tipo de frame
+		magic, err := protocol.ReadControlMagic(conn)
 		if err != nil {
 			logger.Info("control channel closed", "reason", err)
 			return
 		}
 
-		// Calcula server load simples (conexões ativas / 100)
-		activeConns := float32(h.ActiveConns.Load())
-		serverLoad := activeConns / 100.0
-		if serverLoad > 1.0 {
-			serverLoad = 1.0
-		}
+		switch magic {
+		case protocol.MagicControlPing:
+			// Agent enviou PING → responde com PONG
+			timestamp, err := protocol.ReadControlPingPayload(conn)
+			if err != nil {
+				logger.Warn("control channel: reading ping payload", "error", err)
+				return
+			}
 
-		// TODO: implementar disk free real com syscall.Statfs
-		var diskFree uint32 = 0
+			// Calcula server load simples (conexões ativas / 100)
+			activeConns := float32(h.ActiveConns.Load())
+			serverLoad := activeConns / 100.0
+			if serverLoad > 1.0 {
+				serverLoad = 1.0
+			}
 
-		if err := protocol.WriteControlPong(conn, timestamp, serverLoad, diskFree); err != nil {
-			logger.Warn("control channel pong write failed", "error", err)
+			// TODO: implementar disk free real com syscall.Statfs
+			var diskFree uint32 = 0
+
+			writeMu.Lock()
+			err = protocol.WriteControlPong(conn, timestamp, serverLoad, diskFree)
+			writeMu.Unlock()
+			if err != nil {
+				logger.Warn("control channel pong write failed", "error", err)
+				return
+			}
+
+			logger.Debug("control channel pong sent",
+				"timestamp", timestamp,
+				"server_load", serverLoad,
+			)
+
+		case protocol.MagicControlRotateACK:
+			// Agent confirmou drain de stream após ControlRotate
+			streamIdx, err := protocol.ReadControlRotateACKPayload(conn)
+			if err != nil {
+				logger.Warn("control channel: reading rotate ACK payload", "error", err)
+				return
+			}
+
+			logger.Info("control channel: received ControlRotateACK", "stream", streamIdx)
+
+			// Sinaliza o canal pendente em qualquer ParallelSession deste agent
+			h.sessions.Range(func(_, value any) bool {
+				ps, ok := value.(*ParallelSession)
+				if !ok || ps.AgentName != agentName {
+					return true
+				}
+				if ackCh, ok := ps.RotatePending.Load(streamIdx); ok {
+					select {
+					case ackCh.(chan struct{}) <- struct{}{}:
+					default:
+					}
+				}
+				return false // encontrou, não precisa continuar
+			})
+
+		default:
+			logger.Warn("control channel: unknown magic", "magic", string(magic[:]))
 			return
 		}
-
-		logger.Debug("control channel pong sent",
-			"timestamp", timestamp,
-			"server_load", serverLoad,
-		)
 	}
+}
+
+// extractAgentName extrai o CN do certificado TLS peer para usar como agentName.
+func (h *Handler) extractAgentName(conn net.Conn, logger *slog.Logger) string {
+	tlsConn, ok := conn.(*tls.Conn)
+	if !ok {
+		return ""
+	}
+
+	state := tlsConn.ConnectionState()
+	if len(state.PeerCertificates) > 0 {
+		cn := state.PeerCertificates[0].Subject.CommonName
+		if cn != "" {
+			return cn
+		}
+	}
+
+	// Fallback: usa o remote address agrupado por IP (sem porta)
+	host, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+	return host
 }
 
 // handleBackup processa uma sessão de backup completa.
@@ -927,6 +1077,7 @@ type ParallelSession struct {
 	StreamCancels   sync.Map // streamIndex (uint8) → context.CancelFunc (cancela goroutine anterior em re-join)
 	StreamSlowSince sync.Map // streamIndex (uint8) → time.Time (início de degradação contínua)
 	StreamLastReset sync.Map // streamIndex (uint8) → time.Time (último flow rotation deste stream)
+	RotatePending   sync.Map // streamIndex (uint8) → chan struct{} (sinalizada por ControlRotateACK)
 	MaxStreams      uint8
 	ChunkSize       uint32
 	StreamWg        sync.WaitGroup // barreira para todos os streams
