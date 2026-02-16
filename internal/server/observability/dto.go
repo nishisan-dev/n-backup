@@ -24,24 +24,25 @@ type MetricsResponse struct {
 
 // SessionSummary é usado na lista de GET /api/v1/sessions.
 type SessionSummary struct {
-	SessionID     string `json:"session_id"`
-	Agent         string `json:"agent"`
-	Storage       string `json:"storage"`
-	Backup        string `json:"backup,omitempty"`
-	Mode          string `json:"mode"` // single | parallel
-	StartedAt     string `json:"started_at"`
-	LastActivity  string `json:"last_activity"`
-	BytesReceived int64  `json:"bytes_received"`
-	ActiveStreams int    `json:"active_streams"`
-	MaxStreams    int    `json:"max_streams,omitempty"`
-	Status        string `json:"status"` // running | idle | degraded
+	SessionID      string `json:"session_id"`
+	Agent          string `json:"agent"`
+	Storage        string `json:"storage"`
+	Backup         string `json:"backup,omitempty"`
+	Mode           string `json:"mode"` // single | parallel
+	StartedAt      string `json:"started_at"`
+	LastActivity   string `json:"last_activity"`
+	BytesReceived  int64  `json:"bytes_received"`
+	DiskWriteBytes int64  `json:"disk_write_bytes"`
+	ActiveStreams  int    `json:"active_streams"`
+	MaxStreams     int    `json:"max_streams,omitempty"`
+	Status         string `json:"status"` // running | idle | degraded
 
-	// Campos de progresso vindos do agent (via ControlProgress, Fase 3).
+	// Campos de progresso vindos do agent (via ControlProgress).
 	// Zero values quando o agent não reporta progresso.
 	TotalObjects uint32 `json:"total_objects,omitempty"`
 	ObjectsSent  uint32 `json:"objects_sent,omitempty"`
 	WalkComplete bool   `json:"walk_complete,omitempty"`
-	ETA          string `json:"eta,omitempty"` // "N/A" quando indisponível
+	ETA          string `json:"eta,omitempty"` // "∞" até o agent reportar
 }
 
 // SessionDetail é retornado por GET /api/v1/sessions/{id}.
@@ -57,6 +58,8 @@ type StreamDetail struct {
 	MBps        float64 `json:"mbps"`
 	IdleSecs    int64   `json:"idle_secs"`
 	SlowSince   string  `json:"slow_since,omitempty"`
+	Active      bool    `json:"active"`
+	Status      string  `json:"status"` // running | idle | degraded | inactive
 }
 
 // EventEntry representa um evento operacional no ring buffer.

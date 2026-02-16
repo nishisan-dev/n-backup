@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -138,18 +139,38 @@ func (h *Handler) SessionsSnapshot() []observability.SessionSummary {
 				}
 				return true
 			})
+			// Progresso e ETA
+			totalObj := s.TotalObjects.Load()
+			sentObj := s.ObjectsSent.Load()
+			walkDone := s.WalkComplete.Load() != 0
+			eta := "∞"
+			if walkDone && totalObj > 0 && sentObj > 0 && sentObj < totalObj {
+				elapsed := time.Since(s.CreatedAt).Seconds()
+				rate := float64(sentObj) / elapsed
+				remaining := float64(totalObj - sentObj)
+				etaSecs := remaining / rate
+				eta = (time.Duration(etaSecs) * time.Second).Truncate(time.Second).String()
+			} else if walkDone && sentObj >= totalObj && totalObj > 0 {
+				eta = "0s"
+			}
+
 			sessions = append(sessions, observability.SessionSummary{
-				SessionID:     sessionID,
-				Agent:         s.AgentName,
-				Storage:       s.StorageName,
-				Backup:        s.BackupName,
-				Mode:          "parallel",
-				StartedAt:     s.CreatedAt.Format(time.RFC3339),
-				LastActivity:  lastAct.Format(time.RFC3339),
-				BytesReceived: totalOffset,
-				ActiveStreams: activeStreams,
-				MaxStreams:    int(s.MaxStreams),
-				Status:        sessionStatus(lastAct),
+				SessionID:      sessionID,
+				Agent:          s.AgentName,
+				Storage:        s.StorageName,
+				Backup:         s.BackupName,
+				Mode:           "parallel",
+				StartedAt:      s.CreatedAt.Format(time.RFC3339),
+				LastActivity:   lastAct.Format(time.RFC3339),
+				BytesReceived:  totalOffset,
+				DiskWriteBytes: s.DiskWriteBytes.Load(),
+				ActiveStreams:  activeStreams,
+				MaxStreams:     int(s.MaxStreams),
+				Status:         sessionStatus(lastAct),
+				TotalObjects:   totalObj,
+				ObjectsSent:    sentObj,
+				WalkComplete:   walkDone,
+				ETA:            eta,
 			})
 		}
 		return true
@@ -189,8 +210,12 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 		activeStreams := 0
 		var totalOffset int64
 		var streams []observability.StreamDetail
+		activeByIndex := make(map[uint8]bool)
 
-		s.StreamConns.Range(func(_, _ interface{}) bool {
+		s.StreamConns.Range(func(k, _ interface{}) bool {
+			if idx, ok := k.(uint8); ok {
+				activeByIndex[idx] = true
+			}
 			activeStreams++
 			return true
 		})
@@ -203,9 +228,16 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 			}
 			totalOffset += offset
 
-			// Throughput por stream (bytes no intervalo / 15s stats interval)
+			// Throughput por stream: usa StreamTickBytes (snapshot do último
+			// tick de 15s) quando FlowRotation está habilitado, pois o
+			// evaluateFlowRotation faz Swap(0) nos contadores StreamTrafficIn.
+			// Sem FlowRotation, lê direto do StreamTrafficIn acumulado.
 			var mbps float64
-			if trafficRaw, ok := s.StreamTrafficIn.Load(idx); ok {
+			if h.cfg.FlowRotation.Enabled {
+				if tickRaw, ok := s.StreamTickBytes.Load(idx); ok {
+					mbps = float64(tickRaw.(int64)) / 15.0 / (1024 * 1024)
+				}
+			} else if trafficRaw, ok := s.StreamTrafficIn.Load(idx); ok {
 				if ai, ok := trafficRaw.(*atomic.Int64); ok {
 					bytes := ai.Load()
 					mbps = float64(bytes) / 15.0 / (1024 * 1024)
@@ -228,6 +260,7 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 					slowSince = ts.Format(time.RFC3339)
 				}
 			}
+			active := activeByIndex[idx]
 
 			streams = append(streams, observability.StreamDetail{
 				Index:       idx,
@@ -235,23 +268,50 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 				MBps:        mbps,
 				IdleSecs:    idleSecs,
 				SlowSince:   slowSince,
+				Active:      active,
+				Status:      streamStatus(active, idleSecs, slowSince),
 			})
 			return true
 		})
 
+		// Ordena streams por index para exibição determinística na UI.
+		sort.Slice(streams, func(i, j int) bool {
+			return streams[i].Index < streams[j].Index
+		})
+
+		// Progresso e ETA
+		totalObj := s.TotalObjects.Load()
+		sentObj := s.ObjectsSent.Load()
+		walkDone := s.WalkComplete.Load() != 0
+		eta := "∞"
+		if walkDone && totalObj > 0 && sentObj > 0 && sentObj < totalObj {
+			elapsed := time.Since(s.CreatedAt).Seconds()
+			rate := float64(sentObj) / elapsed // objetos/s
+			remaining := float64(totalObj - sentObj)
+			etaSecs := remaining / rate
+			eta = (time.Duration(etaSecs) * time.Second).Truncate(time.Second).String()
+		} else if walkDone && sentObj >= totalObj && totalObj > 0 {
+			eta = "0s"
+		}
+
 		return &observability.SessionDetail{
 			SessionSummary: observability.SessionSummary{
-				SessionID:     id,
-				Agent:         s.AgentName,
-				Storage:       s.StorageName,
-				Backup:        s.BackupName,
-				Mode:          "parallel",
-				StartedAt:     s.CreatedAt.Format(time.RFC3339),
-				LastActivity:  lastAct.Format(time.RFC3339),
-				BytesReceived: totalOffset,
-				ActiveStreams: activeStreams,
-				MaxStreams:    int(s.MaxStreams),
-				Status:        sessionStatus(lastAct),
+				SessionID:      id,
+				Agent:          s.AgentName,
+				Storage:        s.StorageName,
+				Backup:         s.BackupName,
+				Mode:           "parallel",
+				StartedAt:      s.CreatedAt.Format(time.RFC3339),
+				LastActivity:   lastAct.Format(time.RFC3339),
+				BytesReceived:  totalOffset,
+				DiskWriteBytes: s.DiskWriteBytes.Load(),
+				ActiveStreams:  activeStreams,
+				MaxStreams:     int(s.MaxStreams),
+				Status:         sessionStatus(lastAct),
+				TotalObjects:   totalObj,
+				ObjectsSent:    sentObj,
+				WalkComplete:   walkDone,
+				ETA:            eta,
 			},
 			Streams: streams,
 		}, true
@@ -267,6 +327,23 @@ func sessionStatus(lastActivity time.Time) string {
 	case idle < 10*time.Second:
 		return "running"
 	case idle < 60*time.Second:
+		return "idle"
+	default:
+		return "degraded"
+	}
+}
+
+func streamStatus(active bool, idleSecs int64, slowSince string) string {
+	if !active {
+		return "inactive"
+	}
+	if slowSince != "" {
+		return "degraded"
+	}
+	switch {
+	case idleSecs < 10:
+		return "running"
+	case idleSecs < 60:
 		return "idle"
 	default:
 		return "degraded"
@@ -697,6 +774,34 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 				}
 				return false // encontrou, não precisa continuar
 			})
+
+		case protocol.MagicControlProgress:
+			// Agent enviou progresso de backup (objetos escaneados/enviados)
+			prog, err := protocol.ReadControlProgressPayload(conn)
+			if err != nil {
+				logger.Warn("control channel: reading progress payload", "error", err)
+				return
+			}
+
+			// Atualiza a ParallelSession deste agent
+			h.sessions.Range(func(_, value any) bool {
+				ps, ok := value.(*ParallelSession)
+				if !ok || ps.AgentName != agentName {
+					return true
+				}
+				ps.TotalObjects.Store(prog.TotalObjects)
+				ps.ObjectsSent.Store(prog.ObjectsSent)
+				if prog.WalkComplete {
+					ps.WalkComplete.Store(1)
+				}
+				return false
+			})
+
+			logger.Debug("control channel: progress update",
+				"total_objects", prog.TotalObjects,
+				"objects_sent", prog.ObjectsSent,
+				"walk_complete", prog.WalkComplete,
+			)
 
 		default:
 			logger.Warn("control channel: unknown magic", "magic", string(magic[:]))
@@ -1269,7 +1374,11 @@ type ParallelSession struct {
 	streamReadyOnce sync.Once      // garante close único do StreamReady
 	Done            chan struct{}  // sinaliza conclusão
 	CreatedAt       time.Time
-	LastActivity    atomic.Int64 // UnixNano do último I/O bem-sucedido
+	LastActivity    atomic.Int64  // UnixNano do último I/O bem-sucedido
+	DiskWriteBytes  atomic.Int64  // Total de bytes escritos em disco nesta sessão
+	TotalObjects    atomic.Uint32 // Total de objetos a enviar (recebido via ControlProgress)
+	ObjectsSent     atomic.Uint32 // Objetos já enviados (recebido via ControlProgress)
+	WalkComplete    atomic.Int32  // 1 = prescan concluído, total confiável (via ControlProgress)
 }
 
 // handleParallelBackup processa um backup paralelo.
@@ -1424,6 +1533,7 @@ func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, read
 		session.LastActivity.Store(nowNano)
 		h.TrafficIn.Add(int64(hdr.Length))
 		h.DiskWrite.Add(int64(hdr.Length))
+		session.DiskWriteBytes.Add(int64(hdr.Length))
 
 		// Per-stream stats: incrementa tráfego e atualiza last activity
 		if counter, ok := session.StreamTrafficIn.Load(streamIndex); ok {
