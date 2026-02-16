@@ -321,11 +321,29 @@ func (h *Handler) handleHealthCheck(conn net.Conn, logger *slog.Logger) {
 
 // handleControlChannel processa uma conexão de canal de controle persistente (CTRL).
 // Responde a ControlPing com ControlPong indefinidamente até que o agent desconecte.
+// O agent envia o keepalive_interval (uint32 big-endian, segundos) logo após o magic CTRL.
 func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logger *slog.Logger) {
-	logger.Info("control channel established")
+	// Lê o keepalive_interval negociado pelo agent (4 bytes big-endian, segundos)
+	intervalBuf := make([]byte, 4)
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, err := io.ReadFull(conn, intervalBuf); err != nil {
+		logger.Error("control channel: reading keepalive interval", "error", err)
+		return
+	}
+	conn.SetReadDeadline(time.Time{})
 
-	// Deadline de leitura: 2x keepalive_interval típico (60s)
-	readTimeout := 60 * time.Second
+	intervalSecs := uint32(intervalBuf[0])<<24 | uint32(intervalBuf[1])<<16 | uint32(intervalBuf[2])<<8 | uint32(intervalBuf[3])
+	if intervalSecs == 0 {
+		intervalSecs = 30 // fallback default
+	}
+
+	// Read timeout = 2.5x keepalive_interval para tolerar jitter + 1 ping perdido
+	readTimeout := time.Duration(intervalSecs) * time.Second * 5 / 2
+
+	logger.Info("control channel established",
+		"keepalive_interval_s", intervalSecs,
+		"read_timeout", readTimeout,
+	)
 
 	for {
 		select {

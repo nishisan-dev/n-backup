@@ -78,15 +78,22 @@ func (cc *ControlChannel) Start() {
 }
 
 // Stop para o canal de controle e aguarda a goroutine terminar.
+// Fecha a conexão primeiro para desbloquear qualquer read pendente.
 func (cc *ControlChannel) Stop() {
 	close(cc.stopCh)
-	cc.wg.Wait()
 
+	// Fecha conn ANTES de Wait para desbloquear reads bloqueados no pingLoop
 	cc.connMu.Lock()
 	if cc.conn != nil {
 		cc.conn.Close()
-		cc.conn = nil
 	}
+	cc.connMu.Unlock()
+
+	cc.wg.Wait()
+
+	// Nil-ifica a referência após goroutine terminar
+	cc.connMu.Lock()
+	cc.conn = nil
 	cc.connMu.Unlock()
 
 	cc.state.Store(StateDisconnected)
@@ -169,7 +176,7 @@ func (cc *ControlChannel) run() {
 	}
 }
 
-// connect estabelece a conexão TLS e envia o magic "CTRL".
+// connect estabelece a conexão TLS, envia o magic "CTRL" e o keepalive_interval.
 func (cc *ControlChannel) connect() error {
 	tlsCfg, err := pki.NewClientTLSConfig(cc.cfg.TLS.CACert, cc.cfg.TLS.ClientCert, cc.cfg.TLS.ClientKey)
 	if err != nil {
@@ -194,8 +201,16 @@ func (cc *ControlChannel) connect() error {
 		return err
 	}
 
-	// Envia magic "CTRL" para identificar esta conexão como canal de controle
-	if _, err := tlsConn.Write(protocol.MagicControl[:]); err != nil {
+	// Envia magic "CTRL" + keepalive_interval (uint32 big-endian, em segundos)
+	// O server usa keepalive_interval para calcular o read timeout (2.5x)
+	handshake := make([]byte, 8) // 4B magic + 4B interval
+	copy(handshake[0:4], protocol.MagicControl[:])
+	intervalSecs := uint32(cc.cfg.Daemon.ControlChannel.KeepaliveInterval.Seconds())
+	handshake[4] = byte(intervalSecs >> 24)
+	handshake[5] = byte(intervalSecs >> 16)
+	handshake[6] = byte(intervalSecs >> 8)
+	handshake[7] = byte(intervalSecs)
+	if _, err := tlsConn.Write(handshake); err != nil {
 		tlsConn.Close()
 		return err
 	}
