@@ -960,6 +960,16 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 		}
 	}
 
+	// Valida identidade: agentName do protocolo deve coincidir com CN do certificado TLS
+	certName := h.extractAgentName(conn, logger)
+	if certName != "" && certName != agentName {
+		logger.Warn("agent identity mismatch: protocol agentName does not match TLS certificate CN",
+			"protocol_agent", agentName, "cert_cn", certName)
+		protocol.WriteACK(conn, protocol.StatusReject,
+			fmt.Sprintf("agent name %q does not match certificate CN %q", agentName, certName), "")
+		return
+	}
+
 	// Busca storage nomeado
 	storageInfo, ok := h.cfg.GetStorage(storageName)
 	if !ok {
