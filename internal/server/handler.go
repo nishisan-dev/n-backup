@@ -23,7 +23,8 @@ import (
 )
 
 // sackInterval define a cada quantos bytes o server envia um SACK.
-const sackInterval = 64 * 1024 * 1024 // 64MB
+// Reduzido para 1MB para evitar deadlock com buffers pequenos no agent.
+const sackInterval = 1 * 1024 * 1024 // 1MB
 
 // readInactivityTimeout é o tempo máximo de inatividade na leitura de dados (single-stream).
 // Se expirar, a conexão é considerada morta e a goroutine é liberada.
@@ -214,12 +215,12 @@ func (h *Handler) evaluateFlowRotation(intervalSecs float64) {
 			idx := k.(uint8)
 			counter := v.(*atomic.Int64)
 
-				// Swap-and-reset: lê bytes reais do intervalo e zera o contador.
-				// Isso garante que o flow rotation veja o throughput real,
-				// independente de quando logPerStreamStats roda.
-				bytes := counter.Swap(0)
-				ps.StreamTickBytes.Store(idx, bytes)
-				mbps := float64(bytes) / intervalSecs / (1024 * 1024)
+			// Swap-and-reset: lê bytes reais do intervalo e zera o contador.
+			// Isso garante que o flow rotation veja o throughput real,
+			// independente de quando logPerStreamStats roda.
+			bytes := counter.Swap(0)
+			ps.StreamTickBytes.Store(idx, bytes)
+			mbps := float64(bytes) / intervalSecs / (1024 * 1024)
 
 			now := time.Now()
 
