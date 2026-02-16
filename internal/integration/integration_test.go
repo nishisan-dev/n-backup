@@ -40,10 +40,9 @@ const testBackupName = "e2e-backup"
 // Agent conecta → Handshake (com storage) → Stream tar.gz → Trailer → Server valida → Commit → Rotação
 func TestEndToEnd_FullBackupSession(t *testing.T) {
 	pkiDir := t.TempDir()
-	pki := generatePKI(t, pkiDir)
-
 	storageDir := t.TempDir()
 	agentName := "test-agent-e2e"
+	pki := generatePKI(t, pkiDir, agentName)
 
 	serverCfg := &config.ServerConfig{
 		Storages: map[string]config.StorageInfo{
@@ -100,7 +99,7 @@ func TestEndToEnd_FullBackupSession(t *testing.T) {
 	defer conn.Close()
 
 	// 1. Handshake com storage name
-	if err := protocol.WriteHandshake(conn, agentName, testStorageName, testBackupName); err != nil {
+	if err := protocol.WriteHandshake(conn, agentName, testStorageName, testBackupName, "v1.2.3"); err != nil {
 		t.Fatalf("WriteHandshake: %v", err)
 	}
 
@@ -198,7 +197,7 @@ func TestEndToEnd_FullBackupSession(t *testing.T) {
 // TestEndToEnd_StorageNotFound testa que o server rejeita storage inexistente.
 func TestEndToEnd_StorageNotFound(t *testing.T) {
 	pkiDir := t.TempDir()
-	pki := generatePKI(t, pkiDir)
+	pki := generatePKI(t, pkiDir, "some-agent")
 
 	serverCfg := &config.ServerConfig{
 		Storages: map[string]config.StorageInfo{
@@ -239,7 +238,7 @@ func TestEndToEnd_StorageNotFound(t *testing.T) {
 	defer conn.Close()
 
 	// Envia handshake com storage que não existe
-	if err := protocol.WriteHandshake(conn, "some-agent", "nonexistent-storage", "some-backup"); err != nil {
+	if err := protocol.WriteHandshake(conn, "some-agent", "nonexistent-storage", "some-backup", "v1.2.3"); err != nil {
 		t.Fatalf("WriteHandshake: %v", err)
 	}
 
@@ -256,7 +255,7 @@ func TestEndToEnd_StorageNotFound(t *testing.T) {
 // TestEndToEnd_HealthCheck testa o fluxo de health check.
 func TestEndToEnd_HealthCheck(t *testing.T) {
 	pkiDir := t.TempDir()
-	pki := generatePKI(t, pkiDir)
+	pki := generatePKI(t, pkiDir, "health-check")
 
 	serverCfg := &config.ServerConfig{
 		Storages: map[string]config.StorageInfo{
@@ -313,9 +312,9 @@ func TestEndToEnd_HealthCheck(t *testing.T) {
 // TestEndToEnd_BusyLock testa que o server rejeita backup duplicado do mesmo agent:storage.
 func TestEndToEnd_BusyLock(t *testing.T) {
 	pkiDir := t.TempDir()
-	pki := generatePKI(t, pkiDir)
 	storageDir := t.TempDir()
 	agentName := "busy-agent"
+	pki := generatePKI(t, pkiDir, agentName)
 
 	serverCfg := &config.ServerConfig{
 		Storages: map[string]config.StorageInfo{
@@ -356,7 +355,7 @@ func TestEndToEnd_BusyLock(t *testing.T) {
 	}
 	defer conn1.Close()
 
-	protocol.WriteHandshake(conn1, agentName, testStorageName, testBackupName)
+	protocol.WriteHandshake(conn1, agentName, testStorageName, testBackupName, "v1.2.3")
 	ack1, _ := protocol.ReadACK(conn1)
 	if ack1.Status != protocol.StatusGo {
 		t.Fatalf("expected GO for conn1, got %d", ack1.Status)
@@ -371,7 +370,7 @@ func TestEndToEnd_BusyLock(t *testing.T) {
 	}
 	defer conn2.Close()
 
-	protocol.WriteHandshake(conn2, agentName, testStorageName, testBackupName)
+	protocol.WriteHandshake(conn2, agentName, testStorageName, testBackupName, "v1.2.3")
 	ack2, err := protocol.ReadACK(conn2)
 	if err != nil {
 		t.Fatalf("ReadACK conn2: %v", err)
@@ -411,10 +410,9 @@ func TestEndToEnd_Rotation(t *testing.T) {
 // Agent → Handshake → ACK GO → ParallelInit → ParallelJoin(stream 0) → Stream data → Trailer (primary) → FinalACK → Commit
 func TestEndToEnd_ParallelBackupSession(t *testing.T) {
 	pkiDir := t.TempDir()
-	pki := generatePKI(t, pkiDir)
-
 	storageDir := t.TempDir()
 	agentName := "test-agent-parallel"
+	pki := generatePKI(t, pkiDir, agentName)
 
 	serverCfg := &config.ServerConfig{
 		Storages: map[string]config.StorageInfo{
@@ -472,7 +470,7 @@ func TestEndToEnd_ParallelBackupSession(t *testing.T) {
 	defer conn.Close()
 
 	// 1. Handshake
-	if err := protocol.WriteHandshake(conn, agentName, testStorageName, testBackupName); err != nil {
+	if err := protocol.WriteHandshake(conn, agentName, testStorageName, testBackupName, "v1.2.3"); err != nil {
 		t.Fatalf("WriteHandshake: %v", err)
 	}
 
@@ -637,7 +635,7 @@ type pkiPaths struct {
 	clientKeyPath  string
 }
 
-func generatePKI(t *testing.T, dir string) *pkiPaths {
+func generatePKI(t *testing.T, dir string, agentCN string) *pkiPaths {
 	t.Helper()
 
 	caKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -676,7 +674,7 @@ func generatePKI(t *testing.T, dir string) *pkiPaths {
 	clientKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	clientTemplate := &x509.Certificate{
 		SerialNumber: big.NewInt(3),
-		Subject:      pkix.Name{CommonName: "E2E Test Agent"},
+		Subject:      pkix.Name{CommonName: agentCN},
 		NotBefore:    time.Now(),
 		NotAfter:     time.Now().Add(1 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
