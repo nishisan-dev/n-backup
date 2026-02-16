@@ -111,12 +111,12 @@ func (s *Scheduler) executeJob(job *BackupJob, entry config.BackupEntry, runFn f
 
 	job.mu.Lock()
 	if job.running {
-		job.mu.Unlock()
-		entryLogger.Warn("backup already running, skipping scheduled execution")
 		job.LastResult = &BackupJobResult{
 			Status:    "skipped",
 			Timestamp: time.Now(),
 		}
+		job.mu.Unlock()
+		entryLogger.Warn("backup already running, skipping scheduled execution")
 		return
 	}
 	job.running = true
@@ -133,10 +133,12 @@ func (s *Scheduler) executeJob(job *BackupJob, entry config.BackupEntry, runFn f
 		entryLogger.Warn("skipping scheduled backup: server unreachable via control channel",
 			"control_state", s.controlCh.State(),
 		)
+		job.mu.Lock()
 		job.LastResult = &BackupJobResult{
 			Status:    "skipped",
 			Timestamp: time.Now(),
 		}
+		job.mu.Unlock()
 		return
 	}
 
@@ -158,6 +160,7 @@ func (s *Scheduler) executeJob(job *BackupJob, entry config.BackupEntry, runFn f
 	atomic.StoreInt32(&job.ActiveStreams, 0)
 	atomic.StoreInt32(&job.MaxStreams, 0)
 
+	job.mu.Lock()
 	if err != nil {
 		entryLogger.Error("backup failed", "error", err, "duration", duration)
 		job.LastResult = &BackupJobResult{
@@ -173,4 +176,5 @@ func (s *Scheduler) executeJob(job *BackupJob, entry config.BackupEntry, runFn f
 			Timestamp:       time.Now(),
 		}
 	}
+	job.mu.Unlock()
 }
