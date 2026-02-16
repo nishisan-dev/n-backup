@@ -31,8 +31,18 @@ type AgentInfo struct {
 	Name string `yaml:"name"`
 }
 
-// DaemonInfo reservado para configurações futuras do modo daemon.
-type DaemonInfo struct{}
+// DaemonInfo contém configurações do modo daemon.
+type DaemonInfo struct {
+	ControlChannel ControlChannelConfig `yaml:"control_channel"`
+}
+
+// ControlChannelConfig configura o canal de controle persistente com o server.
+type ControlChannelConfig struct {
+	Enabled           *bool         `yaml:"enabled"`             // default: true
+	KeepaliveInterval time.Duration `yaml:"keepalive_interval"`  // default: 30s
+	ReconnectDelay    time.Duration `yaml:"reconnect_delay"`     // default: 5s
+	MaxReconnectDelay time.Duration `yaml:"max_reconnect_delay"` // default: 5m
+}
 
 // ServerAddr contém o endereço do servidor de backup.
 type ServerAddr struct {
@@ -205,6 +215,25 @@ func (c *AgentConfig) validate() error {
 		return fmt.Errorf("resume.chunk_size must be at most 16mb, got %s", c.Resume.ChunkSize)
 	}
 	c.Resume.ChunkSizeRaw = chunkParsed
+
+	// Control channel defaults
+	cc := &c.Daemon.ControlChannel
+	if cc.Enabled == nil {
+		defaultEnabled := true
+		cc.Enabled = &defaultEnabled
+	}
+	if cc.KeepaliveInterval <= 0 {
+		cc.KeepaliveInterval = 30 * time.Second
+	}
+	if cc.ReconnectDelay <= 0 {
+		cc.ReconnectDelay = 5 * time.Second
+	}
+	if cc.MaxReconnectDelay <= 0 {
+		cc.MaxReconnectDelay = 5 * time.Minute
+	}
+	if cc.MaxReconnectDelay < cc.ReconnectDelay {
+		cc.MaxReconnectDelay = cc.ReconnectDelay
+	}
 
 	return nil
 }
