@@ -947,6 +947,19 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	logger = logger.With("agent", agentName, "storage", storageName, "backup", backupName, "client_ver", clientVersion)
 	logger.Info("backup handshake received")
 
+	// Valida componentes de path contra traversal
+	for _, v := range []struct{ val, field string }{
+		{agentName, "agentName"},
+		{storageName, "storageName"},
+		{backupName, "backupName"},
+	} {
+		if err := validatePathComponent(v.val, v.field); err != nil {
+			logger.Warn("invalid path component in handshake", "field", v.field, "value", v.val, "error", err)
+			protocol.WriteACK(conn, protocol.StatusReject, fmt.Sprintf("invalid %s: %s", v.field, err), "")
+			return
+		}
+	}
+
 	// Busca storage nomeado
 	storageInfo, ok := h.cfg.GetStorage(storageName)
 	if !ok {

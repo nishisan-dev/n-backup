@@ -26,6 +26,12 @@ type AtomicWriter struct {
 // Cria o diretório {baseDir}/{agentName}/{backupName}/ se não existir.
 func NewAtomicWriter(baseDir, agentName, backupName string) (*AtomicWriter, error) {
 	agentDir := filepath.Join(baseDir, agentName, backupName)
+
+	// Defesa em profundidade: garante que o path resolvido está dentro de baseDir
+	if err := validatePathInBaseDir(baseDir, agentDir); err != nil {
+		return nil, fmt.Errorf("path traversal detected: %w", err)
+	}
+
 	if err := os.MkdirAll(agentDir, 0755); err != nil {
 		return nil, fmt.Errorf("creating backup directory: %w", err)
 	}
