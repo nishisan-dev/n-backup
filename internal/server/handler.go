@@ -1331,9 +1331,6 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 	lastActCounter.Store(nowNano)
 	pSession.StreamLastAct.LoadOrStore(pj.StreamIndex, lastActCounter)
 
-	// Sinaliza que pelo menos 1 stream conectou
-	pSession.streamReadyOnce.Do(func() { close(pSession.StreamReady) })
-
 	// Cria contexto cancelável para esta goroutine específica.
 	// Será cancelado se outro re-join chegar para o mesmo stream index.
 	streamCtx, streamCancel := context.WithCancel(ctx)
@@ -1345,6 +1342,10 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 	//   join:    Add(1) → counter=1 → Done() → counter=0
 	//   re-join: Add(1) → counter=2 → old Done() → counter=1 → new Done() → counter=0
 	pSession.StreamWg.Add(1)
+
+	// Sinaliza que pelo menos 1 stream conectou APÓS incrementar o WaitGroup.
+	// Isso evita race onde handleParallelBackup faz Wait() com counter ainda 0.
+	pSession.streamReadyOnce.Do(func() { close(pSession.StreamReady) })
 
 	// Recebe dados do stream com ChunkHeader framing
 	bytesReceived, err := h.receiveParallelStream(streamCtx, conn, conn, conn, pj.StreamIndex, pSession, logger)
