@@ -104,16 +104,20 @@ Client                                     Server
 #### Handshake (Client → Server)
 
 ```
-┌──────────┬──────┬──────────────────┬───────┬───────────────────┬───────┐
-│ "NBKP"   │ Ver  │ AgentName (UTF8) │ '\n'  │ StorageName (UTF8) │ '\n'  │
-│ 4 bytes  │ 1B   │ variável         │ 1B    │ variável           │ 1B    │
-└──────────┴──────┴──────────────────┴───────┴───────────────────┴───────┘
+┌──────────┬──────┬──────────────────┬───────┬───────────────────┬───────┬───────────────────┬───────┬────────────────────┬───────┐
+│ "NBKP"   │ Ver  │ AgentName (UTF8) │ '\n'  │ StorageName (UTF8) │ '\n'  │ BackupName (UTF8)  │ '\n'  │ ClientVersion (UTF8)│ '\n'  │
+│ 4 bytes  │ 1B   │ variável         │ 1B    │ variável           │ 1B    │ variável           │ 1B    │ variável            │ 1B    │
+└──────────┴──────┴──────────────────┴───────┴───────────────────┴───────┴───────────────────┴───────┴────────────────────┴───────┘
 ```
 
 - **Magic**: `0x4E 0x42 0x4B 0x50` ("NBKP")
-- **Ver**: Versão do protocolo (`0x01`)
+- **Ver**: Versão do protocolo (`0x03` — v3 com ClientVersion)
 - **AgentName**: Identificador UTF-8 do agent, delimitado por `\n`
 - **StorageName**: Nome do storage de destino no server, delimitado por `\n`
+- **BackupName**: Nome do backup entry, delimitado por `\n`
+- **ClientVersion**: Versão do binário do agent (ex: `v1.7.0`), delimitado por `\n`
+
+> **Hardening (v1.7.0+):** Leituras de campos delimitados por `\n` utilizam `readLineLimited` com máximo de 1024 bytes, prevenindo ataques de OOM ou slowloris via linhas infinitas.
 
 #### ACK (Server → Client)
 
@@ -454,6 +458,22 @@ Solicita que o agent espere antes de iniciar backup.
 | DISK_FULL | `1` | Disco cheio no server |
 | SERVER_BUSY | `2` | Server sobrecarregado |
 | MAINTENANCE | `3` | Server em manutenção |
+
+##### ControlProgress (Agent → Server)
+
+```
+┌──────────┬──────────────┬────────────┬──────────────┐
+│ "CPRG"   │ TotalObjects  │ ObjectsSent │ WalkComplete  │
+│ 4 bytes  │ 4B uint32     │ 4B uint32   │ 1 byte        │
+└──────────┴──────────────┴────────────┴──────────────┘
+```
+
+- **Magic**: `0x43 0x50 0x52 0x47` ("CPRG")
+- **TotalObjects**: Total de objetos a enviar (0 se PreScan ainda não completou)
+- **ObjectsSent**: Objetos já processados pelo pipeline
+- **WalkComplete**: `0x01` se PreScan completou e `TotalObjects` é confiável
+
+Enviado periodicamente pelo agent junto com ControlPing. O server popula `TotalObjects`, `ObjectsSent` e `WalkComplete` na `ParallelSession` para cálculo de progresso e ETA na Web UI.
 
 #### RTT EWMA
 
