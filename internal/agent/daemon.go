@@ -30,11 +30,18 @@ func RunDaemon(configPath string, cfg *config.AgentConfig, logger *slog.Logger) 
 		"backups", len(cfg.Backups),
 	)
 
+	// Canal de controle persistente com o server
+	var controlCh *ControlChannel
+	if cfg.Daemon.ControlChannel.Enabled != nil && *cfg.Daemon.ControlChannel.Enabled {
+		controlCh = NewControlChannel(cfg, logger)
+		controlCh.Start()
+	}
+
 	runFn := func(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, entryLogger *slog.Logger, job *BackupJob) error {
 		return RunBackupWithRetry(ctx, cfg, entry, entryLogger, nil, job)
 	}
 
-	sched, err := NewScheduler(cfg, logger, runFn)
+	sched, err := NewScheduler(cfg, logger, runFn, controlCh)
 	if err != nil {
 		return fmt.Errorf("creating scheduler: %w", err)
 	}
@@ -61,15 +68,26 @@ func RunDaemon(configPath string, cfg *config.AgentConfig, logger *slog.Logger) 
 				continue
 			}
 
-			// Para scheduler e stats atuais
+			// Para scheduler, stats e control channel atuais
 			stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			stats.Stop()
 			sched.Stop(stopCtx)
+			if controlCh != nil {
+				controlCh.Stop()
+			}
 			stopCancel()
 
 			// Recria com nova config
 			cfg = newCfg
-			sched, err = NewScheduler(cfg, logger, runFn)
+
+			// Recria control channel se habilitado na nova config
+			controlCh = nil
+			if cfg.Daemon.ControlChannel.Enabled != nil && *cfg.Daemon.ControlChannel.Enabled {
+				controlCh = NewControlChannel(cfg, logger)
+				controlCh.Start()
+			}
+
+			sched, err = NewScheduler(cfg, logger, runFn, controlCh)
 			if err != nil {
 				logger.Error("failed to create scheduler after reload", "error", err)
 				return fmt.Errorf("reload scheduler: %w", err)
@@ -90,6 +108,9 @@ func RunDaemon(configPath string, cfg *config.AgentConfig, logger *slog.Logger) 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		stats.Stop()
 		sched.Stop(ctx)
+		if controlCh != nil {
+			controlCh.Stop()
+		}
 		cancel()
 		return nil
 	}

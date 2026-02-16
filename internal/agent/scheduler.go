@@ -40,17 +40,19 @@ type BackupJob struct {
 
 // Scheduler gerencia N cron jobs independentes, um por backup entry.
 type Scheduler struct {
-	cron   *cron.Cron
-	logger *slog.Logger
-	jobs   []*BackupJob
-	cfg    *config.AgentConfig
+	cron      *cron.Cron
+	logger    *slog.Logger
+	jobs      []*BackupJob
+	cfg       *config.AgentConfig
+	controlCh *ControlChannel // nil quando não habilitado (ex: --once)
 }
 
 // NewScheduler cria um Scheduler com um cron job por backup entry.
-func NewScheduler(cfg *config.AgentConfig, logger *slog.Logger, runFn func(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, logger *slog.Logger, job *BackupJob) error) (*Scheduler, error) {
+func NewScheduler(cfg *config.AgentConfig, logger *slog.Logger, runFn func(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, logger *slog.Logger, job *BackupJob) error, controlCh *ControlChannel) (*Scheduler, error) {
 	s := &Scheduler{
-		logger: logger,
-		cfg:    cfg,
+		logger:    logger,
+		cfg:       cfg,
+		controlCh: controlCh,
 	}
 
 	c := cron.New(cron.WithLogger(cron.VerbosePrintfLogger(slog.NewLogLogger(logger.Handler(), slog.LevelDebug))))
@@ -125,6 +127,18 @@ func (s *Scheduler) executeJob(job *BackupJob, entry config.BackupEntry, runFn f
 		job.running = false
 		job.mu.Unlock()
 	}()
+
+	// Pre-flight check: se o control channel existe e está desconectado, skip
+	if s.controlCh != nil && !s.controlCh.IsConnected() {
+		entryLogger.Warn("skipping scheduled backup: server unreachable via control channel",
+			"control_state", s.controlCh.State(),
+		)
+		job.LastResult = &BackupJobResult{
+			Status:    "skipped",
+			Timestamp: time.Now(),
+		}
+		return
+	}
 
 	entryLogger.Info("scheduled backup triggered")
 	start := time.Now()
