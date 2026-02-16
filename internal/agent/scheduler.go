@@ -134,7 +134,7 @@ func (s *Scheduler) executeJob(job *BackupJob, entry config.BackupEntry, runFn f
 	atomic.StoreInt32(&job.ActiveStreams, 0)
 
 	// Context com timeout previne jobs zumbis (BUG 3: deadlock = job eterno)
-	jobCtx, jobCancel := context.WithTimeout(context.Background(), 24*time.Hour)
+	jobCtx, jobCancel := context.WithTimeout(context.Background(), MaxBackupDuration)
 	defer jobCancel()
 
 	err := runFn(jobCtx, s.cfg, entry, entryLogger, job)

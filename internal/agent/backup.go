@@ -26,6 +26,9 @@ const maxResumeAttempts = 5
 // resumeBackoff é o tempo inicial entre tentativas de resume.
 const resumeBackoff = 2 * time.Second
 
+// MaxBackupDuration define o tempo máximo que um backup pode rodar antes de ser cancelado.
+const MaxBackupDuration = 24 * time.Hour
+
 // RunBackup executa uma sessão completa de backup com suporte a resume.
 //
 // Pipeline:
@@ -448,7 +451,7 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 
 	// WaitAllSenders e produtor rodam em paralelo.
 	// Context com timeout previne deadlock eterno.
-	sendersCtx, sendersCancel := context.WithTimeout(ctx, 24*time.Hour)
+	sendersCtx, sendersCancel := context.WithTimeout(ctx, MaxBackupDuration)
 	defer sendersCancel()
 
 	sendersDone := make(chan error, 1)
