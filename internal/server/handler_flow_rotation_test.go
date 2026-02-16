@@ -118,3 +118,136 @@ func TestEvaluateFlowRotation_LowThroughputActiveStreamRotates(t *testing.T) {
 		t.Fatalf("expected tick bytes = 1024, got %d", tickBytes.(int64))
 	}
 }
+
+// --- Testes de Graceful Flow Rotation (Fase 3) ---
+
+// controlTestConn é uma testConn que também captura writes (para verificar ControlRotate enviado).
+type controlTestConn struct {
+	testConn
+	writeBuf []byte
+	mu       sync.Mutex
+}
+
+func (c *controlTestConn) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.writeBuf = append(c.writeBuf, p...)
+	return len(p), nil
+}
+
+func TestEvaluateFlowRotation_GracefulWithControlChannel(t *testing.T) {
+	h, sessions := newFlowRotationTestHandler()
+	ps := newParallelSessionForFlowTest()
+	dataConn := &testConn{}
+
+	trafficCounter := &atomic.Int64{}
+	trafficCounter.Add(1024) // low throughput
+	ps.StreamTrafficIn.Store(uint8(0), trafficCounter)
+	ps.StreamConns.Store(uint8(0), dataConn)
+	ps.StreamSlowSince.Store(uint8(0), time.Now().Add(-2*time.Second))
+
+	sessions.Store("session-graceful", ps)
+
+	// Registra control conn para o agent
+	ctrlConn := &controlTestConn{}
+	mu := &sync.Mutex{}
+	h.controlConns.Store("agent-test", ctrlConn)
+	h.controlConnsMu.Store("agent-test", mu)
+
+	// Simula ACK chegando quase imediatamente em goroutine separada
+	go func() {
+		// Espera um pouco para o rotateStream ter tempo de criar o canal RotatePending
+		time.Sleep(50 * time.Millisecond)
+		if ackCh, ok := ps.RotatePending.Load(uint8(0)); ok {
+			ackCh.(chan struct{}) <- struct{}{}
+		}
+	}()
+
+	h.evaluateFlowRotation(15)
+
+	// Verifica que o data conn foi fechado (graceful, após ACK)
+	if !dataConn.closed.Load() {
+		t.Fatal("data conn should be closed after graceful rotation")
+	}
+
+	// Verifica que ControlRotate foi escrito no control conn
+	ctrlConn.mu.Lock()
+	if len(ctrlConn.writeBuf) == 0 {
+		t.Fatal("expected ControlRotate to be written to control conn")
+	}
+	// Verifica magic CROT (4 bytes)
+	if string(ctrlConn.writeBuf[:4]) != "CROT" {
+		t.Fatalf("expected CROT magic, got %q", ctrlConn.writeBuf[:4])
+	}
+	ctrlConn.mu.Unlock()
+}
+
+func TestEvaluateFlowRotation_FallbackWithoutControlChannel(t *testing.T) {
+	h, sessions := newFlowRotationTestHandler()
+	ps := newParallelSessionForFlowTest()
+	dataConn := &testConn{}
+
+	trafficCounter := &atomic.Int64{}
+	trafficCounter.Add(1024) // low throughput
+	ps.StreamTrafficIn.Store(uint8(0), trafficCounter)
+	ps.StreamConns.Store(uint8(0), dataConn)
+	ps.StreamSlowSince.Store(uint8(0), time.Now().Add(-2*time.Second))
+
+	sessions.Store("session-no-ctrl", ps)
+
+	// Sem registrar control conn — deve fazer fallback para close abrupto
+	h.evaluateFlowRotation(15)
+
+	if !dataConn.closed.Load() {
+		t.Fatal("data conn should be closed by abrupt fallback")
+	}
+}
+
+func TestEvaluateFlowRotation_FallbackOnACKTimeout(t *testing.T) {
+	// Reduz rotateACKTimeout para o teste ser rápido
+	// Na implementação real é 10s, mas vamos testar com registro de control
+	// conn mas sem enviar ACK — deve fazer timeout e close abrupto.
+	h, sessions := newFlowRotationTestHandler()
+	ps := newParallelSessionForFlowTest()
+	dataConn := &testConn{}
+
+	trafficCounter := &atomic.Int64{}
+	trafficCounter.Add(1024) // low throughput
+	ps.StreamTrafficIn.Store(uint8(0), trafficCounter)
+	ps.StreamConns.Store(uint8(0), dataConn)
+	ps.StreamSlowSince.Store(uint8(0), time.Now().Add(-2*time.Second))
+
+	sessions.Store("session-timeout", ps)
+
+	// Registra control conn mas NÃO envia ACK
+	ctrlConn := &controlTestConn{}
+	mu := &sync.Mutex{}
+	h.controlConns.Store("agent-test", ctrlConn)
+	h.controlConnsMu.Store("agent-test", mu)
+
+	// evaluateFlowRotation vai enviar ControlRotate, esperar ACK por rotateACKTimeout (10s),
+	// e então fazer fallback. Para não esperar 10s no teste, vamos rodar em goroutine com timeout.
+	done := make(chan struct{})
+	go func() {
+		h.evaluateFlowRotation(15)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// OK — evaluateFlowRotation retornou
+	case <-time.After(15 * time.Second):
+		t.Fatal("evaluateFlowRotation should have timed out and returned")
+	}
+
+	if !dataConn.closed.Load() {
+		t.Fatal("data conn should be closed by timeout fallback")
+	}
+
+	// Verifica que ControlRotate foi enviado antes do timeout
+	ctrlConn.mu.Lock()
+	if len(ctrlConn.writeBuf) == 0 {
+		t.Fatal("expected ControlRotate to be sent before timeout")
+	}
+	ctrlConn.mu.Unlock()
+}
