@@ -54,13 +54,15 @@ type SessionDetail struct {
 
 // StreamDetail representa o estado de um stream individual dentro de uma sessão paralela.
 type StreamDetail struct {
-	Index       uint8   `json:"index"`
-	OffsetBytes int64   `json:"offset_bytes"`
-	MBps        float64 `json:"mbps"`
-	IdleSecs    int64   `json:"idle_secs"`
-	SlowSince   string  `json:"slow_since,omitempty"`
-	Active      bool    `json:"active"`
-	Status      string  `json:"status"` // running | idle | slow | degraded | inactive
+	Index        uint8   `json:"index"`
+	OffsetBytes  int64   `json:"offset_bytes"`
+	MBps         float64 `json:"mbps"`
+	IdleSecs     int64   `json:"idle_secs"`
+	SlowSince    string  `json:"slow_since,omitempty"`
+	Active       bool    `json:"active"`
+	Status       string  `json:"status"`                  // running | idle | slow | degraded | inactive
+	ConnectedFor string  `json:"connected_for,omitempty"` // ex: "2m30s", reseta na reconexão
+	Reconnects   int32   `json:"reconnects"`              // 0 = primeira conexão, N = N reconexões
 }
 
 // EventEntry representa um evento operacional no ring buffer.

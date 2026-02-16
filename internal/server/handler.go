@@ -316,14 +316,26 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 			}
 			active := activeByIndex[idx]
 
+			// Stream uptime e reconnects
+			var connectedFor string
+			if ct, ok := s.StreamConnectedAt.Load(idx); ok {
+				connectedFor = time.Since(ct.(time.Time)).Truncate(time.Second).String()
+			}
+			var reconnects int32
+			if rc, ok := s.StreamReconnects.Load(idx); ok {
+				reconnects = rc.(*atomic.Int32).Load()
+			}
+
 			streams = append(streams, observability.StreamDetail{
-				Index:       idx,
-				OffsetBytes: offset,
-				MBps:        mbps,
-				IdleSecs:    idleSecs,
-				SlowSince:   slowSince,
-				Active:      active,
-				Status:      streamStatus(active, idleSecs, slowSince, h.cfg.FlowRotation.EvalWindow),
+				Index:        idx,
+				OffsetBytes:  offset,
+				MBps:         mbps,
+				IdleSecs:     idleSecs,
+				SlowSince:    slowSince,
+				Active:       active,
+				Status:       streamStatus(active, idleSecs, slowSince, h.cfg.FlowRotation.EvalWindow),
+				ConnectedFor: connectedFor,
+				Reconnects:   reconnects,
 			})
 			return true
 		})
@@ -1472,35 +1484,37 @@ func CleanupExpiredSessions(sessions *sync.Map, ttl time.Duration, logger *slog.
 
 // ParallelSession rastreia uma sessão de backup com streams paralelos.
 type ParallelSession struct {
-	SessionID       string
-	Assembler       *ChunkAssembler
-	Writer          *AtomicWriter
-	StorageInfo     config.StorageInfo
-	AgentName       string
-	StorageName     string
-	BackupName      string
-	StreamConns     sync.Map // streamIndex (uint8) → net.Conn
-	StreamOffsets   sync.Map // streamIndex (uint8) → *int64 (completed bytes, atômico)
-	StreamTrafficIn sync.Map // streamIndex (uint8) → *atomic.Int64 (bytes recebidos no intervalo, para stats por stream)
-	StreamTickBytes sync.Map // streamIndex (uint8) → int64 (bytes observados no último tick do stats reporter)
-	StreamLastAct   sync.Map // streamIndex (uint8) → *atomic.Int64 (UnixNano último I/O deste stream)
-	StreamCancels   sync.Map // streamIndex (uint8) → context.CancelFunc (cancela goroutine anterior em re-join)
-	StreamSlowSince sync.Map // streamIndex (uint8) → time.Time (início de degradação contínua)
-	StreamLastReset sync.Map // streamIndex (uint8) → time.Time (último flow rotation deste stream)
-	RotatePending   sync.Map // streamIndex (uint8) → chan struct{} (sinalizada por ControlRotateACK)
-	MaxStreams      uint8
-	ChunkSize       uint32
-	StreamWg        sync.WaitGroup // barreira para todos os streams
-	StreamReady     chan struct{}  // fechado quando o primeiro stream conecta
-	streamReadyOnce sync.Once      // garante close único do StreamReady
-	Done            chan struct{}  // sinaliza conclusão
-	CreatedAt       time.Time
-	LastActivity    atomic.Int64  // UnixNano do último I/O bem-sucedido
-	DiskWriteBytes  atomic.Int64  // Total de bytes escritos em disco nesta sessão
-	TotalObjects    atomic.Uint32 // Total de objetos a enviar (recebido via ControlProgress)
-	ObjectsSent     atomic.Uint32 // Objetos já enviados (recebido via ControlProgress)
-	WalkComplete    atomic.Int32  // 1 = prescan concluído, total confiável (via ControlProgress)
-	ClientVersion   string        // Versão do client (protocolo v3+)
+	SessionID         string
+	Assembler         *ChunkAssembler
+	Writer            *AtomicWriter
+	StorageInfo       config.StorageInfo
+	AgentName         string
+	StorageName       string
+	BackupName        string
+	StreamConns       sync.Map // streamIndex (uint8) → net.Conn
+	StreamOffsets     sync.Map // streamIndex (uint8) → *int64 (completed bytes, atômico)
+	StreamTrafficIn   sync.Map // streamIndex (uint8) → *atomic.Int64 (bytes recebidos no intervalo, para stats por stream)
+	StreamTickBytes   sync.Map // streamIndex (uint8) → int64 (bytes observados no último tick do stats reporter)
+	StreamLastAct     sync.Map // streamIndex (uint8) → *atomic.Int64 (UnixNano último I/O deste stream)
+	StreamCancels     sync.Map // streamIndex (uint8) → context.CancelFunc (cancela goroutine anterior em re-join)
+	StreamSlowSince   sync.Map // streamIndex (uint8) → time.Time (início de degradação contínua)
+	StreamLastReset   sync.Map // streamIndex (uint8) → time.Time (último flow rotation deste stream)
+	StreamConnectedAt sync.Map // streamIndex (uint8) → time.Time (timestamp do último connect/re-join)
+	StreamReconnects  sync.Map // streamIndex (uint8) → *atomic.Int32 (reconexões acumuladas por stream)
+	RotatePending     sync.Map // streamIndex (uint8) → chan struct{} (sinalizada por ControlRotateACK)
+	MaxStreams        uint8
+	ChunkSize         uint32
+	StreamWg          sync.WaitGroup // barreira para todos os streams
+	StreamReady       chan struct{}  // fechado quando o primeiro stream conecta
+	streamReadyOnce   sync.Once      // garante close único do StreamReady
+	Done              chan struct{}  // sinaliza conclusão
+	CreatedAt         time.Time
+	LastActivity      atomic.Int64  // UnixNano do último I/O bem-sucedido
+	DiskWriteBytes    atomic.Int64  // Total de bytes escritos em disco nesta sessão
+	TotalObjects      atomic.Uint32 // Total de objetos a enviar (recebido via ControlProgress)
+	ObjectsSent       atomic.Uint32 // Objetos já enviados (recebido via ControlProgress)
+	WalkComplete      atomic.Int32  // 1 = prescan concluído, total confiável (via ControlProgress)
+	ClientVersion     string        // Versão do client (protocolo v3+)
 }
 
 // handleParallelBackup processa um backup paralelo.
@@ -1748,6 +1762,14 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 
 	// Registra conexão do stream
 	pSession.StreamConns.Store(pj.StreamIndex, conn)
+
+	// Atualiza uptime e reconnects do stream
+	// No primeiro connect, StreamReconnects não existe — LoadOrStore cria com zero.
+	// Em re-joins subsequentes, incrementa o contador.
+	if rcRaw, loaded := pSession.StreamReconnects.LoadOrStore(pj.StreamIndex, &atomic.Int32{}); loaded {
+		rcRaw.(*atomic.Int32).Add(1)
+	}
+	pSession.StreamConnectedAt.Store(pj.StreamIndex, time.Now())
 
 	// Inicializa counters per-stream para stats
 	nowNano := time.Now().UnixNano()

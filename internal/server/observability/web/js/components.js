@@ -300,6 +300,8 @@ const Components = {
                         <td>${this.formatBytes(st.offset_bytes)}</td>
                         <td>${st.mbps.toFixed(2)}</td>
                         <td>${st.idle_secs}s</td>
+                        <td>${this.formatUptime(st.connected_for)}</td>
+                        <td>${st.reconnects > 0 ? '<span class="badge badge-warn">' + st.reconnects + '</span>' : '0'}</td>
                         <td>${this.statusBadge(streamStatus)}</td>
                     </tr>
                 `;
