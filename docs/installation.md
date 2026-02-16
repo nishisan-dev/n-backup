@@ -93,6 +93,12 @@ openssl x509 -req -sha256 -in ${AGENT_NAME}.csr \
   -extfile agent-ext.cnf
 ```
 
+> [!IMPORTANT]
+> O **Common Name (CN)** do certificado do agent **deve ser idêntico** ao campo `agent.name` no arquivo de configuração do agent (`agent.yaml`).
+> O server valida essa correspondência durante o handshake mTLS e **rejeitará conexões** cujo CN não coincida com o `agentName` informado no protocolo.
+>
+> Exemplo: se `agent.name: "web-server-01"`, o certificado deve ter sido gerado com `-subj "/CN=web-server-01"`.
+
 ### 2.4. Distribuir os Certificados
 
 **No Server:**
@@ -171,7 +177,7 @@ Edite `/etc/nbackup/agent.yaml`:
 
 ```yaml
 agent:
-  name: "web-server-01"        # Identifica este host
+  name: "web-server-01"        # Identifica este host (DEVE coincidir com o CN do certificado TLS)
 
 daemon:
   schedule: "0 2 * * *"        # Cron: diário às 02h

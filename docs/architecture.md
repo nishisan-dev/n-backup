@@ -244,8 +244,15 @@ Para detalhes completos dos frames, veja a [Especificação Técnica](specificat
 - **TLS 1.3** obrigatório — não aceita versões anteriores
 - **Autenticação mútua**: server valida certificado do agent, agent valida certificado do server
 - **CA compartilhada**: ambos devem ter certificados assinados pela mesma Certificate Authority
+- **Validação de identidade**: o server verifica que o **CN do certificado do agent corresponde ao `agentName`** informado no protocolo de handshake — rejeita a conexão se divergem
 - **ECC P-256**: curva recomendada para chaves (`prime256v1`)
 - **Sem SSH**: o sistema não depende de SSH ou shell remoto
+
+### Hardening do Handshake
+
+- **Path traversal**: nomes de agent, storage e backup são sanitizados contra `..`, `/`, `\`, null bytes e nomes ocultos (`.`)
+- **Limite de campo**: campos do handshake limitados a 512 bytes (previne OOM/DoS)
+- **Read deadline**: timeout de 10s para leitura do handshake (previne slowloris)
 
 ### Integridade de Dados
 
