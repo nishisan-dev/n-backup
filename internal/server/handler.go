@@ -1063,7 +1063,13 @@ func (h *Handler) handleResume(ctx context.Context, conn net.Conn, logger *slog.
 		protocol.WriteResumeACK(conn, protocol.ResumeStatusNotFound, 0)
 		return
 	}
-	session := raw.(*PartialSession)
+	session, ok := raw.(*PartialSession)
+	if !ok {
+		logger.Warn("resume: session is not a PartialSession (type mismatch)",
+			"session", resume.SessionID)
+		protocol.WriteResumeACK(conn, protocol.ResumeStatusNotFound, 0)
+		return
+	}
 
 	// Valida agent e storage
 	if session.AgentName != resume.AgentName || session.StorageName != resume.StorageName {
