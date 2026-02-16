@@ -6,6 +6,16 @@
 
 Sistema de backup **high-performance** client-server escrito em Go. Streaming direto da origem para o destino — **sem arquivos temporários** — via TCP com **mTLS** (TLS 1.3).
 
+### ⬇️ Quick Download — Latest Release
+
+| Artefato | amd64 | arm64 |
+|----------|:-----:|:-----:|
+| **Agent (.deb)** | [⬇ deb](https://github.com/nishisan-dev/n-backup/releases/latest/download/nbackup-agent_amd64.deb) | [⬇ deb](https://github.com/nishisan-dev/n-backup/releases/latest/download/nbackup-agent_arm64.deb) |
+| **Server (.deb)** | [⬇ deb](https://github.com/nishisan-dev/n-backup/releases/latest/download/nbackup-server_amd64.deb) | [⬇ deb](https://github.com/nishisan-dev/n-backup/releases/latest/download/nbackup-server_arm64.deb) |
+| **Agent (binário)** | [⬇ bin](https://github.com/nishisan-dev/n-backup/releases/latest/download/nbackup-agent-linux-amd64) | [⬇ bin](https://github.com/nishisan-dev/n-backup/releases/latest/download/nbackup-agent-linux-arm64) |
+| **Server (binário)** | [⬇ bin](https://github.com/nishisan-dev/n-backup/releases/latest/download/nbackup-server-linux-amd64) | [⬇ bin](https://github.com/nishisan-dev/n-backup/releases/latest/download/nbackup-server-linux-arm64) |
+| **Checksums** | [checksums.txt](https://github.com/nishisan-dev/n-backup/releases/latest/download/checksums.txt) | |
+
 ---
 
 ## ✨ Features
