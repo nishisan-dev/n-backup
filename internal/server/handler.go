@@ -218,6 +218,21 @@ func (h *Handler) SessionsSnapshot() []observability.SessionSummary {
 				eta = "0s"
 			}
 
+			// Assembly stats (single call)
+			asmStats := s.Assembler.Stats()
+
+			// AssemblyETA: calculado quando o assembler está na fase assembling
+			var assemblyETA string
+			if asmStats.Phase == "assembling" && asmStats.TotalChunks > 0 && asmStats.AssembledChunks > 0 {
+				elapsed := time.Since(s.CreatedAt).Seconds()
+				rate := float64(asmStats.AssembledChunks) / elapsed
+				remaining := float64(asmStats.TotalChunks - asmStats.AssembledChunks)
+				if rate > 0 {
+					etaSecs := remaining / rate
+					assemblyETA = (time.Duration(etaSecs) * time.Second).Truncate(time.Second).String()
+				}
+			}
+
 			sessions = append(sessions, observability.SessionSummary{
 				SessionID:      sessionID,
 				Agent:          s.AgentName,
@@ -236,12 +251,16 @@ func (h *Handler) SessionsSnapshot() []observability.SessionSummary {
 				ObjectsSent:    sentObj,
 				WalkComplete:   walkDone,
 				ETA:            eta,
+				AssemblyETA:    assemblyETA,
 				Assembler: &observability.AssemblerStats{
-					NextExpectedSeq: s.Assembler.Stats().NextExpectedSeq,
-					PendingChunks:   s.Assembler.Stats().PendingChunks,
-					PendingMemBytes: s.Assembler.Stats().PendingMemBytes,
-					TotalBytes:      s.Assembler.Stats().TotalBytes,
-					Finalized:       s.Assembler.Stats().Finalized,
+					NextExpectedSeq: asmStats.NextExpectedSeq,
+					PendingChunks:   asmStats.PendingChunks,
+					PendingMemBytes: asmStats.PendingMemBytes,
+					TotalBytes:      asmStats.TotalBytes,
+					Finalized:       asmStats.Finalized,
+					TotalChunks:     asmStats.TotalChunks,
+					AssembledChunks: asmStats.AssembledChunks,
+					Phase:           asmStats.Phase,
 				},
 			})
 		}
@@ -379,6 +398,21 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 			eta = "0s"
 		}
 
+		// Assembly stats (single call)
+		asmStats := s.Assembler.Stats()
+
+		// AssemblyETA: calculado quando o assembler está na fase assembling
+		var assemblyETA string
+		if asmStats.Phase == "assembling" && asmStats.TotalChunks > 0 && asmStats.AssembledChunks > 0 {
+			elapsed := time.Since(s.CreatedAt).Seconds()
+			rate := float64(asmStats.AssembledChunks) / elapsed
+			remaining := float64(asmStats.TotalChunks - asmStats.AssembledChunks)
+			if rate > 0 {
+				etaSecs := remaining / rate
+				assemblyETA = (time.Duration(etaSecs) * time.Second).Truncate(time.Second).String()
+			}
+		}
+
 		return &observability.SessionDetail{
 			SessionSummary: observability.SessionSummary{
 				SessionID:      id,
@@ -398,12 +432,16 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 				ObjectsSent:    sentObj,
 				WalkComplete:   walkDone,
 				ETA:            eta,
+				AssemblyETA:    assemblyETA,
 				Assembler: &observability.AssemblerStats{
-					NextExpectedSeq: s.Assembler.Stats().NextExpectedSeq,
-					PendingChunks:   s.Assembler.Stats().PendingChunks,
-					PendingMemBytes: s.Assembler.Stats().PendingMemBytes,
-					TotalBytes:      s.Assembler.Stats().TotalBytes,
-					Finalized:       s.Assembler.Stats().Finalized,
+					NextExpectedSeq: asmStats.NextExpectedSeq,
+					PendingChunks:   asmStats.PendingChunks,
+					PendingMemBytes: asmStats.PendingMemBytes,
+					TotalBytes:      asmStats.TotalBytes,
+					Finalized:       asmStats.Finalized,
+					TotalChunks:     asmStats.TotalChunks,
+					AssembledChunks: asmStats.AssembledChunks,
+					Phase:           asmStats.Phase,
 				},
 			},
 			Streams: streams,

@@ -45,6 +45,7 @@ type SessionSummary struct {
 	ObjectsSent  uint32          `json:"objects_sent,omitempty"`
 	WalkComplete bool            `json:"walk_complete,omitempty"`
 	ETA          string          `json:"eta,omitempty"` // "∞" até o agent reportar
+	AssemblyETA  string          `json:"assembly_eta,omitempty"`
 	Assembler    *AssemblerStats `json:"assembler,omitempty"`
 }
 
@@ -55,6 +56,9 @@ type AssemblerStats struct {
 	PendingMemBytes int64  `json:"pending_mem_bytes"`
 	TotalBytes      int64  `json:"total_bytes"`
 	Finalized       bool   `json:"finalized"`
+	TotalChunks     uint32 `json:"total_chunks"`
+	AssembledChunks uint32 `json:"assembled_chunks"`
+	Phase           string `json:"phase"` // "receiving" | "assembling" | "done"
 }
 
 // SessionDetail é retornado por GET /api/v1/sessions/{id}.

@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 )
 
 // maxChunkLength é o tamanho máximo aceitável de um chunk.
@@ -64,6 +65,11 @@ type ChunkAssembler struct {
 	totalBytes      int64
 	mu              sync.Mutex
 	logger          *slog.Logger
+
+	// Observability: contadores atômicos para progresso de assembly.
+	// Usados fora do mutex pelo Stats() para permitir leitura sem contention.
+	assembling      atomic.Bool   // true durante finalizeLazy()
+	assembledChunks atomic.Uint32 // chunks já montados no finalize lazy
 }
 
 // AssemblerStats contém métricas do estado atual do assembler.
@@ -73,18 +79,59 @@ type AssemblerStats struct {
 	PendingMemBytes int64
 	TotalBytes      int64
 	Finalized       bool
+	TotalChunks     uint32 // total de chunks a montar (lazy: lazyMaxSeq+1, eager: nextExpectedSeq)
+	AssembledChunks uint32 // chunks já montados no finalize (relevante para lazy)
+	Phase           string // "receiving" | "assembling" | "done"
 }
 
 // Stats retorna um snapshot das métricas do assembler.
 func (ca *ChunkAssembler) Stats() AssemblerStats {
 	ca.mu.Lock()
-	defer ca.mu.Unlock()
+	finalized := ca.finalized
+	nextSeq := ca.nextExpectedSeq
+	pending := len(ca.pendingChunks)
+	pendingMem := ca.pendingMemBytes
+	totalBytes := ca.totalBytes
+	mode := ca.mode
+	lazyMax := ca.lazyMaxSeq
+	ca.mu.Unlock()
+
+	// Phase e TotalChunks determinados fora do lock (assembling/assembledChunks são atomics)
+	assembling := ca.assembling.Load()
+	assembled := ca.assembledChunks.Load()
+
+	var phase string
+	var totalChunks uint32
+	switch {
+	case finalized:
+		phase = "done"
+		if mode == AssemblerModeLazy {
+			totalChunks = lazyMax + 1
+		} else {
+			totalChunks = nextSeq
+		}
+		assembled = totalChunks
+	case assembling:
+		phase = "assembling"
+		totalChunks = lazyMax + 1
+	default:
+		phase = "receiving"
+		if mode == AssemblerModeLazy {
+			totalChunks = lazyMax + 1
+		} else {
+			totalChunks = nextSeq
+		}
+	}
+
 	return AssemblerStats{
-		NextExpectedSeq: ca.nextExpectedSeq,
-		PendingChunks:   len(ca.pendingChunks),
-		PendingMemBytes: ca.pendingMemBytes,
-		TotalBytes:      ca.totalBytes,
-		Finalized:       ca.finalized,
+		NextExpectedSeq: nextSeq,
+		PendingChunks:   pending,
+		PendingMemBytes: pendingMem,
+		TotalBytes:      totalBytes,
+		Finalized:       finalized,
+		TotalChunks:     totalChunks,
+		AssembledChunks: assembled,
+		Phase:           phase,
 	}
 }
 
@@ -347,6 +394,10 @@ func (ca *ChunkAssembler) Finalize() (string, int64, error) {
 	defer ca.mu.Unlock()
 
 	if ca.mode == AssemblerModeLazy {
+		// Seta flag de assembling ANTES do lock para que Stats() possa ler.
+		// O lock é segurado por Finalize() mas assembling é atomic.
+		ca.assembling.Store(true)
+		defer ca.assembling.Store(false)
 		if err := ca.finalizeLazy(); err != nil {
 			return "", 0, err
 		}
@@ -401,6 +452,7 @@ func (ca *ChunkAssembler) finalizeLazy() error {
 		f.Close()
 		os.Remove(pc.filePath)
 		delete(ca.pendingChunks, seq)
+		ca.assembledChunks.Add(1)
 	}
 
 	return nil
