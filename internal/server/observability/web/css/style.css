@@ -873,6 +873,12 @@ body {
     padding-top: 8px;
 }
 
+/* ============ Session History ============ */
+
+.history-section {
+    margin-top: 24px;
+}
+
 /* ============ Responsive ============ */
 
 @media (max-width: 768px) {

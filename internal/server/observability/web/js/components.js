@@ -520,4 +520,42 @@ const Components = {
                 </div>
             </div>`;
     },
+
+    // Badge de resultado para sessões finalizadas
+    resultBadge(result) {
+        const map = {
+            ok: { cls: 'badge-success', label: '✓ ok' },
+            checksum_mismatch: { cls: 'badge-error', label: '✗ checksum' },
+            write_error: { cls: 'badge-warn', label: '⚠ write error' },
+            timeout: { cls: 'badge-idle', label: '⏱ timeout' },
+            error: { cls: 'badge-error', label: '✗ error' },
+        };
+        const m = map[result] || { cls: 'badge-neutral', label: result || '—' };
+        return `<span class="badge ${m.cls}">${m.label}</span>`;
+    },
+
+    // Renderiza tabela de histórico de sessões finalizadas
+    renderSessionHistory(entries) {
+        const card = document.getElementById('session-history-card');
+        const body = document.getElementById('session-history-body');
+
+        if (!entries || entries.length === 0) {
+            card.style.display = 'none';
+            return;
+        }
+
+        card.style.display = '';
+        body.innerHTML = entries.map(e => `
+            <tr>
+                <td><strong>${this.escapeHtml(e.agent)}</strong></td>
+                <td>${this.escapeHtml(e.storage)}</td>
+                <td>${this.modeBadge(e.mode)}</td>
+                <td>${this.compressionBadge(e.compression)}</td>
+                <td>${this.resultBadge(e.result)}</td>
+                <td>${this.escapeHtml(e.duration)}</td>
+                <td>${this.formatBytes(e.bytes_total)}</td>
+                <td>${this.formatDateTime(e.finished_at)}</td>
+            </tr>
+        `).join('');
+    },
 };

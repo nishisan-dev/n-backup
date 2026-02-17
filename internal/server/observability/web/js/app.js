@@ -76,13 +76,17 @@
 
     async function fetchSessions() {
         try {
-            const sessions = await API.sessions();
+            const [sessions, history] = await Promise.all([
+                API.sessions(),
+                API.sessionsHistory(),
+            ]);
             updateConnectionStatus('connected');
 
             // Atualiza ring buffers para cada sessão
             sessions.forEach(s => updateSparkHistory(s));
 
             Components.renderSessionsList(sessions);
+            Components.renderSessionHistory(history);
 
             // Desenha mini sparklines após render
             sessions.forEach(s => {
