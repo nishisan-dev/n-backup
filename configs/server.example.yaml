@@ -13,12 +13,14 @@ storages:
   scripts:
     base_dir: /var/backups/scripts
     max_backups: 5
+    compression_mode: gzip            # gzip|zst (default: gzip)
     assembler_mode: eager             # eager|lazy (default: eager)
     assembler_pending_mem_limit: 8mb  # limite de pending em memória no modo eager
 
   home-dirs:
     base_dir: /var/backups/home
     max_backups: 10
+    compression_mode: zst             # usa Zstandard para compressão mais rápida
     assembler_mode: lazy
     assembler_pending_mem_limit: 8mb
 
