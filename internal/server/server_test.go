@@ -16,7 +16,7 @@ import (
 func TestAtomicWriter_CommitAndAbort(t *testing.T) {
 	dir := t.TempDir()
 
-	w, err := NewAtomicWriter(dir, "test-agent", "test-backup")
+	w, err := NewAtomicWriter(dir, "test-agent", "test-backup", ".tar.gz")
 	if err != nil {
 		t.Fatalf("NewAtomicWriter: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestAtomicWriter_CommitAndAbort(t *testing.T) {
 func TestAtomicWriter_Abort(t *testing.T) {
 	dir := t.TempDir()
 
-	w, err := NewAtomicWriter(dir, "test-agent", "test-backup")
+	w, err := NewAtomicWriter(dir, "test-agent", "test-backup", ".tar.gz")
 	if err != nil {
 		t.Fatalf("NewAtomicWriter: %v", err)
 	}

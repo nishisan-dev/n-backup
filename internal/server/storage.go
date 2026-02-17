@@ -16,15 +16,17 @@ import (
 // AtomicWriter gerencia a escrita atômica de backups:
 // grava em .tmp → valida → rename para nome final.
 type AtomicWriter struct {
-	baseDir    string
-	agentName  string
-	backupName string
-	agentDir   string
+	baseDir       string
+	agentName     string
+	backupName    string
+	agentDir      string
+	fileExtension string // ".tar.gz" ou ".tar.zst"
 }
 
 // NewAtomicWriter cria um AtomicWriter para o agent e backup especificados.
+// fileExtension deve ser ".tar.gz" ou ".tar.zst".
 // Cria o diretório {baseDir}/{agentName}/{backupName}/ se não existir.
-func NewAtomicWriter(baseDir, agentName, backupName string) (*AtomicWriter, error) {
+func NewAtomicWriter(baseDir, agentName, backupName, fileExtension string) (*AtomicWriter, error) {
 	agentDir := filepath.Join(baseDir, agentName, backupName)
 
 	// Defesa em profundidade: garante que o path resolvido está dentro de baseDir
@@ -36,10 +38,11 @@ func NewAtomicWriter(baseDir, agentName, backupName string) (*AtomicWriter, erro
 		return nil, fmt.Errorf("creating backup directory: %w", err)
 	}
 	return &AtomicWriter{
-		baseDir:    baseDir,
-		agentName:  agentName,
-		backupName: backupName,
-		agentDir:   agentDir,
+		baseDir:       baseDir,
+		agentName:     agentName,
+		backupName:    backupName,
+		agentDir:      agentDir,
+		fileExtension: fileExtension,
 	}, nil
 }
 
@@ -57,7 +60,7 @@ func (w *AtomicWriter) Commit(tmpPath string) (string, error) {
 	timestamp := time.Now().UTC().Format("2006-01-02T15-04-05.000")
 	// Substitui ponto decimal por traço para portabilidade em FS
 	timestamp = strings.ReplaceAll(timestamp, ".", "-")
-	finalName := fmt.Sprintf("%s.tar.gz", timestamp)
+	finalName := fmt.Sprintf("%s%s", timestamp, w.fileExtension)
 	finalPath := filepath.Join(w.agentDir, finalName)
 
 	if err := os.Rename(tmpPath, finalPath); err != nil {
@@ -88,10 +91,10 @@ func Rotate(agentDir string, maxBackups int) error {
 		return fmt.Errorf("reading agent directory: %w", err)
 	}
 
-	// Filtra apenas arquivos .tar.gz
+	// Filtra apenas arquivos de backup (.tar.gz e .tar.zst)
 	var backups []string
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".tar.gz") {
+		if !e.IsDir() && isBackupFile(e.Name()) {
 			backups = append(backups, e.Name())
 		}
 	}
@@ -111,4 +114,9 @@ func Rotate(agentDir string, maxBackups int) error {
 	}
 
 	return nil
+}
+
+// isBackupFile verifica se o nome do arquivo é um backup válido (.tar.gz ou .tar.zst).
+func isBackupFile(name string) bool {
+	return strings.HasSuffix(name, ".tar.gz") || strings.HasSuffix(name, ".tar.zst")
 }

@@ -44,15 +44,16 @@ const sackWriteTimeout = 10 * time.Second
 
 // PartialSession rastreia um backup parcial para resume.
 type PartialSession struct {
-	TmpPath       string
-	BytesWritten  int64
-	AgentName     string
-	StorageName   string
-	BackupName    string
-	BaseDir       string
-	CreatedAt     time.Time
-	LastActivity  atomic.Int64 // UnixNano do último I/O bem-sucedido
-	ClientVersion string       // Versão do client (protocolo v3+)
+	TmpPath         string
+	BytesWritten    int64
+	AgentName       string
+	StorageName     string
+	BackupName      string
+	BaseDir         string
+	CreatedAt       time.Time
+	LastActivity    atomic.Int64 // UnixNano do último I/O bem-sucedido
+	ClientVersion   string       // Versão do client (protocolo v3+)
+	CompressionMode string       // gzip | zst
 }
 
 // Handler processa conexões individuais de backup.
@@ -180,6 +181,7 @@ func (h *Handler) SessionsSnapshot() []observability.SessionSummary {
 				Storage:       s.StorageName,
 				Backup:        s.BackupName,
 				Mode:          "single",
+				Compression:   s.CompressionMode,
 				StartedAt:     s.CreatedAt.Format(time.RFC3339),
 				LastActivity:  lastAct.Format(time.RFC3339),
 				BytesReceived: s.BytesWritten,
@@ -222,6 +224,7 @@ func (h *Handler) SessionsSnapshot() []observability.SessionSummary {
 				Storage:        s.StorageName,
 				Backup:         s.BackupName,
 				Mode:           "parallel",
+				Compression:    s.StorageInfo.CompressionMode,
 				StartedAt:      s.CreatedAt.Format(time.RFC3339),
 				LastActivity:   lastAct.Format(time.RFC3339),
 				BytesReceived:  totalOffset,
@@ -266,6 +269,7 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 				Storage:       s.StorageName,
 				Backup:        s.BackupName,
 				Mode:          "single",
+				Compression:   s.CompressionMode,
 				StartedAt:     s.CreatedAt.Format(time.RFC3339),
 				LastActivity:  lastAct.Format(time.RFC3339),
 				BytesReceived: s.BytesWritten,
@@ -382,6 +386,7 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 				Storage:        s.StorageName,
 				Backup:         s.BackupName,
 				Mode:           "parallel",
+				Compression:    s.StorageInfo.CompressionMode,
 				StartedAt:      s.CreatedAt.Format(time.RFC3339),
 				LastActivity:   lastAct.Format(time.RFC3339),
 				BytesReceived:  totalOffset,
@@ -964,9 +969,10 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 		return
 	}
 
-	if versionBuf[0] != protocol.ProtocolVersion {
-		logger.Error("unsupported protocol version", "version", versionBuf[0])
-		protocol.WriteACK(conn, protocol.StatusReject, "unsupported protocol version", "")
+	handshakeVersion := versionBuf[0]
+	if handshakeVersion < 0x03 || handshakeVersion > protocol.ProtocolVersion {
+		logger.Error("unsupported protocol version", "version", handshakeVersion)
+		protocol.WriteACKLegacy(conn, protocol.StatusReject, "unsupported protocol version", "")
 		return
 	}
 
@@ -1018,7 +1024,7 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	} {
 		if err := validatePathComponent(v.val, v.field); err != nil {
 			logger.Warn("invalid path component in handshake", "field", v.field, "value", v.val, "error", err)
-			protocol.WriteACK(conn, protocol.StatusReject, fmt.Sprintf("invalid %s: %s", v.field, err), "")
+			sendACK(conn, handshakeVersion, protocol.StatusReject, fmt.Sprintf("invalid %s: %s", v.field, err), "")
 			return
 		}
 	}
@@ -1028,7 +1034,7 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	if certName != "" && certName != agentName {
 		logger.Warn("agent identity mismatch: protocol agentName does not match TLS certificate CN",
 			"protocol_agent", agentName, "cert_cn", certName)
-		protocol.WriteACK(conn, protocol.StatusReject,
+		sendACK(conn, handshakeVersion, protocol.StatusReject,
 			fmt.Sprintf("agent name %q does not match certificate CN %q", agentName, certName), "")
 		return
 	}
@@ -1038,7 +1044,7 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	storageInfo, ok := h.cfg.GetStorage(storageName)
 	if !ok {
 		logger.Warn("storage not found")
-		protocol.WriteACK(conn, protocol.StatusStorageNotFound, fmt.Sprintf("storage %q not found", storageName), "")
+		sendACK(conn, handshakeVersion, protocol.StatusStorageNotFound, fmt.Sprintf("storage %q not found", storageName), "")
 		return
 	}
 
@@ -1046,7 +1052,7 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	lockKey := agentName + ":" + storageName + ":" + backupName
 	if _, loaded := h.locks.LoadOrStore(lockKey, true); loaded {
 		logger.Warn("backup already in progress for agent")
-		protocol.WriteACK(conn, protocol.StatusBusy, "backup already in progress", "")
+		sendACK(conn, handshakeVersion, protocol.StatusBusy, "backup already in progress", "")
 		return
 	}
 	defer h.locks.Delete(lockKey)
@@ -1055,10 +1061,18 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	sessionID := generateSessionID()
 	logger = logger.With("session", sessionID)
 
-	// ACK GO
-	if err := protocol.WriteACK(conn, protocol.StatusGo, "", sessionID); err != nil {
-		logger.Error("writing ACK", "error", err)
-		return
+	// ACK GO — v4+ inclui compression mode, v3 usa legacy
+	compressionMode := storageInfo.CompressionModeByte()
+	if handshakeVersion >= 0x04 {
+		if err := protocol.WriteACK(conn, protocol.StatusGo, "", sessionID, compressionMode); err != nil {
+			logger.Error("writing ACK", "error", err)
+			return
+		}
+	} else {
+		if err := protocol.WriteACKLegacy(conn, protocol.StatusGo, "", sessionID); err != nil {
+			logger.Error("writing ACK", "error", err)
+			return
+		}
 	}
 
 	// Detecta modo: lê 1 byte discriminador
@@ -1086,7 +1100,7 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	// Modo single-stream — byte 0x00 já consumido, br contém os dados
 
 	// Prepara escrita atômica
-	writer, err := NewAtomicWriter(storageInfo.BaseDir, agentName, backupName)
+	writer, err := NewAtomicWriter(storageInfo.BaseDir, agentName, backupName, storageInfo.FileExtension())
 	if err != nil {
 		logger.Error("creating atomic writer", "error", err)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
@@ -1103,13 +1117,14 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	// Registra sessão parcial
 	now := time.Now()
 	session := &PartialSession{
-		TmpPath:       tmpPath,
-		AgentName:     agentName,
-		StorageName:   storageName,
-		BackupName:    backupName,
-		BaseDir:       storageInfo.BaseDir,
-		CreatedAt:     now,
-		ClientVersion: clientVersion,
+		TmpPath:         tmpPath,
+		AgentName:       agentName,
+		StorageName:     storageName,
+		BackupName:      backupName,
+		BaseDir:         storageInfo.BaseDir,
+		CreatedAt:       now,
+		ClientVersion:   clientVersion,
+		CompressionMode: storageInfo.CompressionMode,
 	}
 	session.LastActivity.Store(now.UnixNano())
 	h.sessions.Store(sessionID, session)
@@ -1222,7 +1237,7 @@ func (h *Handler) handleResume(ctx context.Context, conn net.Conn, logger *slog.
 	h.sessions.Delete(resume.SessionID)
 
 	// Validação e commit
-	writer, wErr := NewAtomicWriter(storageInfo.BaseDir, session.AgentName, session.BackupName)
+	writer, wErr := NewAtomicWriter(storageInfo.BaseDir, session.AgentName, session.BackupName, storageInfo.FileExtension())
 	if wErr != nil {
 		logger.Error("creating atomic writer for resume", "error", wErr)
 		return
@@ -1421,6 +1436,16 @@ func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWrit
 // (agentName, storageName, backupName, clientVersion).
 const maxHandshakeFieldLen = 512
 
+// sendACK envia um ACK condicional baseado na versão do handshake.
+// Para v4+, inclui o byte de CompressionMode (default gzip para rejeições).
+// Para v3, usa WriteACKLegacy sem o byte adicional.
+func sendACK(conn net.Conn, handshakeVersion byte, status byte, message, sessionID string) error {
+	if handshakeVersion >= 0x04 {
+		return protocol.WriteACK(conn, status, message, sessionID, protocol.CompressionGzip)
+	}
+	return protocol.WriteACKLegacy(conn, status, message, sessionID)
+}
+
 // readUntilNewline lê bytes até encontrar '\n', retornando a string sem o delimitador.
 // Limitado a maxHandshakeFieldLen bytes para prevenir slowloris/OOM.
 func readUntilNewline(conn net.Conn) (string, error) {
@@ -1574,7 +1599,7 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	logger.Info("starting parallel backup session")
 
 	// Prepara escrita atômica
-	writer, err := NewAtomicWriter(storageInfo.BaseDir, agentName, backupName)
+	writer, err := NewAtomicWriter(storageInfo.BaseDir, agentName, backupName, storageInfo.FileExtension())
 	if err != nil {
 		logger.Error("creating atomic writer", "error", err)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
