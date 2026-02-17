@@ -162,6 +162,11 @@
                 </div>
             </div>
 
+            <div class="card" id="overview-storages-card" style="display:none">
+                <h2 class="card-title">Storages</h2>
+                <div class="storages-grid" id="overview-storages-body"></div>
+            </div>
+
             <div class="card" id="overview-sessions-card" style="display:none">
                 <h2 class="card-title">Sessões Ativas</h2>
                 <div class="table-wrap">
@@ -211,6 +216,27 @@
                             </tr>
                         </thead>
                         <tbody id="detail-streams-body"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="card history-section" id="session-history-card" style="display:none">
+                <h2 class="card-title">Histórico de Sessões</h2>
+                <div class="table-wrap">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Agent</th>
+                                <th>Storage</th>
+                                <th>Modo</th>
+                                <th>Compressão</th>
+                                <th>Resultado</th>
+                                <th>Duração</th>
+                                <th>Bytes</th>
+                                <th>Finalizado em</th>
+                            </tr>
+                        </thead>
+                        <tbody id="session-history-body"></tbody>
                     </table>
                 </div>
             </div>

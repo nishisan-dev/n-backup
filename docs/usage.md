@@ -400,6 +400,59 @@ Exemplo de log JSON do agent:
 
 ---
 
+## WebUI de Observabilidade (v2.0.0+)
+
+O nbackup-server inclui uma interface web embarcada para monitoramento operacional em tempo real.
+
+### Configuração
+
+```yaml
+observability:
+  enabled: true
+  listen_addr: ":8080"
+  allowed_cidrs:
+    - "10.0.0.0/8"
+    - "127.0.0.1/32"
+  events_max_lines: 10000
+  session_history_size: 200
+```
+
+| Parâmetro | Default | Descrição |
+|----------|---------|-----------|
+| `enabled` | `false` | Habilita o listener HTTP da WebUI |
+| `listen_addr` | `:8080` | Endereço de bind (host:porta) |
+| `allowed_cidrs` | — | CIDRs autorizados a acessar |
+| `events_max_lines` | `10000` | Máximo de linhas no JSONL de eventos antes de rotação |
+| `session_history_size` | `200` | Sessões finalizadas mantidas no ring buffer |
+
+### Acesso
+
+Abra `http://<server-ip>:8080` em qualquer navegador. A interface não requer autenticação (protegida por ACL de rede).
+
+### Views
+
+| View | Conteúdo |
+|------|----------|
+| **Overview** | Status do server, métricas gerais, agentes conectados com gauges de CPU/RAM/Disco, storages com uso de disco |
+| **Sessions** | Sessões ativas com sparklines de throughput, detalhes de streams (uptime, reconnects), assembler progress, e **histórico de sessões finalizadas** com badges de resultado |
+| **Events** | Eventos recentes (ring buffer + persistência JSONL) |
+| **Config** | Configuração efetiva do server (read-only) |
+
+### Badges de Resultado (Session History)
+
+| Badge | Significado |
+|-------|-------------|
+| ✓ ok | Backup finalizado com sucesso |
+| ✗ checksum | Checksum mismatch na validação |
+| ⚠ write error | Erro de escrita no storage |
+| ⏱ timeout | Sessão expirou por timeout |
+| ✗ error | Erro genérico |
+
+> [!TIP]
+> A WebUI atualiza automaticamente a cada 2 segundos via polling. Não é necessário refresh manual.
+
+---
+
 ## Considerações por Tipo de Disco/Storage
 
 O modo do assembler e o limite de memória ideal variam conforme o tipo de disco no server.

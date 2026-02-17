@@ -12,6 +12,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -168,9 +170,20 @@ func RunWithListener(ctx context.Context, ln net.Listener, cfg *config.ServerCon
 // O server é encerrado gracefully quando o context é cancelado.
 func startWebUI(ctx context.Context, cfg *config.ServerConfig, handler *Handler, logger *slog.Logger) {
 	acl := observability.NewACL(cfg.WebUI.ParsedCIDRs)
-	events := observability.NewEventRing(1000)
-	handler.Events = events
-	router := observability.NewRouter(handler, cfg, acl, events)
+
+	// Cria EventStore com persistência JSONL
+	store, err := observability.NewEventStore(cfg.WebUI.EventsFile, 1000, cfg.WebUI.EventsMaxLines)
+	if err != nil {
+		logger.Error("creating event store", "error", err, "path", cfg.WebUI.EventsFile)
+		// Fallback: persiste em tmp
+		store, _ = observability.NewEventStore(filepath.Join(os.TempDir(), "nbackup-events.jsonl"), 1000, cfg.WebUI.EventsMaxLines)
+	}
+	handler.Events = store
+
+	// Cria ring para histórico de sessões finalizadas
+	handler.SessionHistory = observability.NewSessionHistoryRing(200)
+
+	router := observability.NewRouter(handler, cfg, acl, store)
 
 	webSrv := &http.Server{
 		Addr:              cfg.WebUI.Listen,
@@ -195,6 +208,9 @@ func startWebUI(ctx context.Context, cfg *config.ServerConfig, handler *Handler,
 		defer cancel()
 		if err := webSrv.Shutdown(shutdownCtx); err != nil {
 			logger.Error("web UI shutdown error", "error", err)
+		}
+		if err := store.Close(); err != nil {
+			logger.Error("event store close error", "error", err)
 		}
 		logger.Info("web UI shutdown complete")
 	}()

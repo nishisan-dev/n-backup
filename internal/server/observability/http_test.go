@@ -21,6 +21,7 @@ type mockMetrics struct {
 	sessions []SessionSummary
 	details  map[string]*SessionDetail
 	agents   []AgentInfo
+	storages []StorageUsage
 }
 
 func (m *mockMetrics) MetricsSnapshot() MetricsData       { return m.data }
@@ -32,13 +33,16 @@ func (m *mockMetrics) SessionDetail(id string) (*SessionDetail, bool) {
 	d, ok := m.details[id]
 	return d, ok
 }
-func (m *mockMetrics) ConnectedAgents() []AgentInfo { return m.agents }
+func (m *mockMetrics) ConnectedAgents() []AgentInfo                  { return m.agents }
+func (m *mockMetrics) StorageUsageSnapshot() []StorageUsage          { return m.storages }
+func (m *mockMetrics) SessionHistorySnapshot() []SessionHistoryEntry { return nil }
 
 func newMockMetrics() *mockMetrics {
 	return &mockMetrics{
 		sessions: []SessionSummary{},
 		details:  map[string]*SessionDetail{},
 		agents:   []AgentInfo{},
+		storages: []StorageUsage{},
 	}
 }
 
@@ -60,7 +64,7 @@ func localhostACL(t *testing.T) *ACL {
 }
 
 func TestHealth_ReturnsOK(t *testing.T) {
-	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t))
+	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/health", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -94,7 +98,7 @@ func TestMetrics_ReturnsData(t *testing.T) {
 		ActiveConns: 3,
 		Sessions:    2,
 	}
-	router := NewRouter(mock, testCfg(), localhostACL(t))
+	router := NewRouter(mock, testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/metrics", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -121,7 +125,7 @@ func TestMetrics_ReturnsData(t *testing.T) {
 }
 
 func TestSessions_EmptyList(t *testing.T) {
-	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t))
+	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/sessions", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -146,7 +150,7 @@ func TestSessions_WithData(t *testing.T) {
 	mock.sessions = []SessionSummary{
 		{SessionID: "abc123", Agent: "web-01", Mode: "parallel", ActiveStreams: 4, MaxStreams: 8, Status: "running"},
 	}
-	router := NewRouter(mock, testCfg(), localhostACL(t))
+	router := NewRouter(mock, testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/sessions", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -170,7 +174,7 @@ func TestSessions_WithData(t *testing.T) {
 }
 
 func TestSessionDetail_NotFound(t *testing.T) {
-	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t))
+	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/sessions/nonexistent", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -193,7 +197,7 @@ func TestSessionDetail_Found(t *testing.T) {
 			{Index: 1, OffsetBytes: 2048, MBps: 3.2},
 		},
 	}
-	router := NewRouter(mock, testCfg(), localhostACL(t))
+	router := NewRouter(mock, testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/sessions/abc123", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -217,7 +221,7 @@ func TestSessionDetail_Found(t *testing.T) {
 }
 
 func TestConfigEffective(t *testing.T) {
-	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t))
+	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/config/effective", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -251,7 +255,7 @@ func TestACL_BlocksHealthEndpoint(t *testing.T) {
 	acl := NewACL([]*net.IPNet{
 		mustParseCIDR("10.0.0.0/8"),
 	})
-	router := NewRouter(newMockMetrics(), testCfg(), acl)
+	router := NewRouter(newMockMetrics(), testCfg(), acl, nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/health", nil)
 	req.RemoteAddr = "192.168.1.1:12345" // não permitido
@@ -264,7 +268,7 @@ func TestACL_BlocksHealthEndpoint(t *testing.T) {
 }
 
 func TestRoot_ReturnsSPA(t *testing.T) {
-	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t))
+	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -280,7 +284,7 @@ func TestRoot_ReturnsSPA(t *testing.T) {
 }
 
 func TestNotFound_Returns404(t *testing.T) {
-	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t))
+	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/nonexistent", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -301,7 +305,7 @@ func mustParseCIDR(s string) *net.IPNet {
 }
 
 func TestAgents_EmptyList(t *testing.T) {
-	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t))
+	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -327,7 +331,7 @@ func TestAgents_WithData(t *testing.T) {
 		{Name: "web-01", RemoteAddr: "10.0.0.1:54321", ConnectedAt: "2025-01-01T00:00:00Z", ConnectedFor: "1h0m0s", KeepaliveS: 30, HasSession: true, ClientVersion: "1.7.2"},
 		{Name: "db-01", RemoteAddr: "10.0.0.2:54322", ConnectedAt: "2025-01-01T00:00:00Z", ConnectedFor: "30m0s", KeepaliveS: 15, HasSession: false},
 	}
-	router := NewRouter(mock, testCfg(), localhostACL(t))
+	router := NewRouter(mock, testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -354,5 +358,71 @@ func TestAgents_WithData(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected agent web-01 with session and version 1.7.2")
+	}
+}
+
+func TestStorages_EmptyList(t *testing.T) {
+	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t), nil)
+
+	req := httptest.NewRequest("GET", "/api/v1/storages", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var resp []StorageUsage
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if len(resp) != 0 {
+		t.Errorf("expected empty storages, got %d", len(resp))
+	}
+}
+
+func TestStorages_WithData(t *testing.T) {
+	mock := newMockMetrics()
+	mock.storages = []StorageUsage{
+		{
+			Name:            "default",
+			BaseDir:         "/tmp/backups",
+			MaxBackups:      5,
+			CompressionMode: "gzip",
+			AssemblerMode:   "eager",
+			TotalBytes:      100 * 1024 * 1024 * 1024,
+			UsedBytes:       60 * 1024 * 1024 * 1024,
+			FreeBytes:       40 * 1024 * 1024 * 1024,
+			UsagePercent:    60.0,
+			BackupsCount:    3,
+		},
+	}
+	router := NewRouter(mock, testCfg(), localhostACL(t), nil)
+
+	req := httptest.NewRequest("GET", "/api/v1/storages", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var resp []StorageUsage
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if len(resp) != 1 {
+		t.Fatalf("expected 1 storage, got %d", len(resp))
+	}
+	if resp[0].Name != "default" {
+		t.Errorf("expected storage name 'default', got %q", resp[0].Name)
+	}
+	if resp[0].UsagePercent != 60.0 {
+		t.Errorf("expected usage_percent 60.0, got %f", resp[0].UsagePercent)
+	}
+	if resp[0].BackupsCount != 3 {
+		t.Errorf("expected backups_count 3, got %d", resp[0].BackupsCount)
 	}
 }

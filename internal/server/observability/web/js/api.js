@@ -18,4 +18,6 @@ const API = {
     events(limit = 50) { return this.get(`/api/v1/events?limit=${limit}`); },
     config() { return this.get('/api/v1/config/effective'); },
     agents() { return this.get('/api/v1/agents'); },
+    storages() { return this.get('/api/v1/storages'); },
+    sessionsHistory() { return this.get('/api/v1/sessions/history'); },
 };

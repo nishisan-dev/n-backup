@@ -291,12 +291,7 @@ func initialConnect(ctx context.Context, cfg *config.AgentConfig, entry config.B
 	// Handshake com medição de RTT
 	handshakeStart := time.Now()
 	// Envia handshake
-	// TODO: obter versão real do build (por enquanto hardcoded ou via var global se acessível)
-	// Como o pacote main não exporta Version, vamos usar uma string fixa ou injetada.
-	// O ideal seria mover Version para um pacote interno compartilhado ou configs.
-	// Por hora, vou usar "v1.x.x" placeholder ou tentar ler de config se existir.
-	// Assumindo que o agente sabe sua versão. Vamos usar "dev" ou similar por enquanto.
-	agentVersion := "dev"
+	agentVersion := Version
 	if err := protocol.WriteHandshake(conn, cfg.Agent.Name, entry.Storage, entry.Name, agentVersion); err != nil {
 		conn.Close()
 		return nil, "", 0, 0, fmt.Errorf("writing handshake: %w", err)

@@ -27,6 +27,8 @@ type HandlerMetrics interface {
 	SessionsSnapshot() []SessionSummary
 	SessionDetail(id string) (*SessionDetail, bool)
 	ConnectedAgents() []AgentInfo
+	StorageUsageSnapshot() []StorageUsage
+	SessionHistorySnapshot() []SessionHistoryEntry
 }
 
 // MetricsData contém os dados de métricas coletados do Handler.
@@ -39,7 +41,7 @@ type MetricsData struct {
 
 // NewRouter cria o http.Handler para a API de observabilidade e SPA.
 // Aplica middleware ACL em todas as rotas.
-func NewRouter(metrics HandlerMetrics, cfg *config.ServerConfig, acl *ACL, events ...*EventRing) http.Handler {
+func NewRouter(metrics HandlerMetrics, cfg *config.ServerConfig, acl *ACL, store *EventStore) http.Handler {
 	mux := http.NewServeMux()
 
 	// API v1
@@ -48,11 +50,13 @@ func NewRouter(metrics HandlerMetrics, cfg *config.ServerConfig, acl *ACL, event
 	mux.HandleFunc("GET /api/v1/sessions", makeSessionsHandler(metrics))
 	mux.HandleFunc("GET /api/v1/sessions/{id}", makeSessionDetailHandler(metrics))
 	mux.HandleFunc("GET /api/v1/agents", makeAgentsHandler(metrics))
+	mux.HandleFunc("GET /api/v1/storages", makeStoragesHandler(metrics))
+	mux.HandleFunc("GET /api/v1/sessions/history", makeSessionHistoryHandler(metrics))
 	mux.HandleFunc("GET /api/v1/config/effective", makeConfigHandler(cfg))
 
-	// Events endpoint (se ring fornecido)
-	if len(events) > 0 && events[0] != nil {
-		mux.HandleFunc("GET /api/v1/events", makeEventsHandler(events[0]))
+	// Events endpoint (se store fornecido)
+	if store != nil {
+		mux.HandleFunc("GET /api/v1/events", makeEventsHandler(store))
 	}
 
 	// SPA — serve assets embarcados via go:embed
@@ -148,11 +152,11 @@ func makeConfigHandler(cfg *config.ServerConfig) http.HandlerFunc {
 	}
 }
 
-// makeEventsHandler retorna um handler que serve os últimos eventos do ring buffer.
-func makeEventsHandler(ring *EventRing) http.HandlerFunc {
+// makeEventsHandler retorna um handler que serve os últimos eventos do store.
+func makeEventsHandler(store *EventStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		limit := parseInt(r.URL.Query().Get("limit"), 50)
-		events := ring.Recent(limit)
+		events := store.Recent(limit)
 		writeJSON(w, http.StatusOK, events)
 	}
 }
@@ -165,6 +169,28 @@ func makeAgentsHandler(metrics HandlerMetrics) http.HandlerFunc {
 			agents = []AgentInfo{}
 		}
 		writeJSON(w, http.StatusOK, agents)
+	}
+}
+
+// makeStoragesHandler retorna um handler que lista storages com uso de disco.
+func makeStoragesHandler(metrics HandlerMetrics) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		storages := metrics.StorageUsageSnapshot()
+		if storages == nil {
+			storages = []StorageUsage{}
+		}
+		writeJSON(w, http.StatusOK, storages)
+	}
+}
+
+// makeSessionHistoryHandler retorna um handler que lista sessões finalizadas.
+func makeSessionHistoryHandler(metrics HandlerMetrics) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		history := metrics.SessionHistorySnapshot()
+		if history == nil {
+			history = []SessionHistoryEntry{}
+		}
+		writeJSON(w, http.StatusOK, history)
 	}
 }
 

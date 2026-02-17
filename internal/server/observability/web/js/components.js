@@ -206,6 +206,50 @@ const Components = {
         `}).join('');
     },
 
+    // Renderiza cards de storage com uso de disco no overview
+    renderOverviewStorages(storages) {
+        const card = document.getElementById('overview-storages-card');
+        const body = document.getElementById('overview-storages-body');
+
+        if (!storages || storages.length === 0) {
+            card.style.display = 'none';
+            return;
+        }
+
+        card.style.display = '';
+        body.innerHTML = storages.map(s => {
+            const pct = s.usage_percent || 0;
+            let colorClass = 'low';
+            if (pct >= 90) colorClass = 'high';
+            else if (pct >= 70) colorClass = 'med';
+
+            return `
+            <div class="storage-card">
+                <div class="storage-header">
+                    <span class="storage-name">${this.escapeHtml(s.name)}</span>
+                    <div class="storage-badges">
+                        ${this.compressionBadge(s.compression_mode === 'zst' ? 'zst' : 'gzip')}
+                        <span class="badge badge-neutral">${this.escapeHtml(s.assembler_mode)}</span>
+                    </div>
+                </div>
+                <div class="storage-usage">
+                    <div class="stat-track storage-bar">
+                        <div class="stat-fill ${colorClass}" style="width: ${Math.min(pct, 100)}%"></div>
+                    </div>
+                    <span class="storage-pct">${pct.toFixed(1)}%</span>
+                </div>
+                <div class="storage-details">
+                    <span title="Espaço usado">${this.formatBytes(s.used_bytes)} / ${this.formatBytes(s.total_bytes)}</span>
+                    <span title="Espaço livre">Livre: ${this.formatBytes(s.free_bytes)}</span>
+                </div>
+                <div class="storage-meta">
+                    <span title="Diretório base">${this.escapeHtml(s.base_dir)}</span>
+                    <span>Max: ${s.max_backups} | Backups: ${s.backups_count}</span>
+                </div>
+            </div>`;
+        }).join('');
+    },
+
     renderOverviewSessions(sessions) {
         const card = document.getElementById('overview-sessions-card');
         const body = document.getElementById('overview-sessions-body');
@@ -475,5 +519,43 @@ const Components = {
                     ${progressBar}
                 </div>
             </div>`;
+    },
+
+    // Badge de resultado para sessões finalizadas
+    resultBadge(result) {
+        const map = {
+            ok: { cls: 'badge-success', label: '✓ ok' },
+            checksum_mismatch: { cls: 'badge-error', label: '✗ checksum' },
+            write_error: { cls: 'badge-warn', label: '⚠ write error' },
+            timeout: { cls: 'badge-idle', label: '⏱ timeout' },
+            error: { cls: 'badge-error', label: '✗ error' },
+        };
+        const m = map[result] || { cls: 'badge-neutral', label: result || '—' };
+        return `<span class="badge ${m.cls}">${m.label}</span>`;
+    },
+
+    // Renderiza tabela de histórico de sessões finalizadas
+    renderSessionHistory(entries) {
+        const card = document.getElementById('session-history-card');
+        const body = document.getElementById('session-history-body');
+
+        if (!entries || entries.length === 0) {
+            card.style.display = 'none';
+            return;
+        }
+
+        card.style.display = '';
+        body.innerHTML = entries.map(e => `
+            <tr>
+                <td><strong>${this.escapeHtml(e.agent)}</strong></td>
+                <td>${this.escapeHtml(e.storage)}</td>
+                <td>${this.modeBadge(e.mode)}</td>
+                <td>${this.compressionBadge(e.compression)}</td>
+                <td>${this.resultBadge(e.result)}</td>
+                <td>${this.escapeHtml(e.duration)}</td>
+                <td>${this.formatBytes(e.bytes_total)}</td>
+                <td>${this.formatDateTime(e.finished_at)}</td>
+            </tr>
+        `).join('');
     },
 };

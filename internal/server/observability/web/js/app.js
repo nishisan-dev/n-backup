@@ -50,11 +50,12 @@
 
     async function fetchOverview() {
         try {
-            const [health, metrics, sessions, agents] = await Promise.all([
+            const [health, metrics, sessions, agents, storages] = await Promise.all([
                 API.health(),
                 API.metrics(),
                 API.sessions(),
                 API.agents(),
+                API.storages(),
             ]);
 
             updateConnectionStatus('connected');
@@ -62,6 +63,7 @@
             Components.renderServerInfo(health);
             Components.renderOverviewMetrics(metrics);
             Components.renderOverviewAgents(agents);
+            Components.renderOverviewStorages(storages);
             Components.renderOverviewSessions(sessions);
 
             // Atualiza topbar
@@ -74,13 +76,17 @@
 
     async function fetchSessions() {
         try {
-            const sessions = await API.sessions();
+            const [sessions, history] = await Promise.all([
+                API.sessions(),
+                API.sessionsHistory(),
+            ]);
             updateConnectionStatus('connected');
 
             // Atualiza ring buffers para cada sessão
             sessions.forEach(s => updateSparkHistory(s));
 
             Components.renderSessionsList(sessions);
+            Components.renderSessionHistory(history);
 
             // Desenha mini sparklines após render
             sessions.forEach(s => {

@@ -440,3 +440,38 @@ func TestControlProgress_PayloadAfterMagic(t *testing.T) {
 		t.Error("walk_complete: want true, got false")
 	}
 }
+
+func TestControlStatsPayload_RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	cpu := float32(45.5)
+	mem := float32(72.3)
+	disk := float32(88.1)
+	load := float32(2.15)
+
+	if err := WriteControlStatsPayload(&buf, cpu, mem, disk, load); err != nil {
+		t.Fatalf("WriteControlStatsPayload failed: %v", err)
+	}
+
+	// Payload sem magic: 4 × float32 = 16B
+	if buf.Len() != 16 {
+		t.Fatalf("expected 16 bytes, got %d", buf.Len())
+	}
+
+	got, err := ReadControlStatsPayload(&buf)
+	if err != nil {
+		t.Fatalf("ReadControlStatsPayload failed: %v", err)
+	}
+
+	if got.CPUPercent != cpu {
+		t.Errorf("cpu: want %f, got %f", cpu, got.CPUPercent)
+	}
+	if got.MemoryPercent != mem {
+		t.Errorf("mem: want %f, got %f", mem, got.MemoryPercent)
+	}
+	if got.DiskUsagePercent != disk {
+		t.Errorf("disk: want %f, got %f", disk, got.DiskUsagePercent)
+	}
+	if got.LoadAverage != load {
+		t.Errorf("load: want %f, got %f", load, got.LoadAverage)
+	}
+}

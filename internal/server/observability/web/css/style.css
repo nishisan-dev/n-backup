@@ -793,6 +793,92 @@ body {
     background: var(--accent-rose);
 }
 
+/* ============ Storage Cards ============ */
+
+.storages-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+}
+
+.storage-card {
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    transition: all var(--transition-normal);
+}
+
+.storage-card:hover {
+    border-color: var(--border-active);
+    box-shadow: var(--shadow-glow);
+}
+
+.storage-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.storage-name {
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: var(--text-primary);
+}
+
+.storage-badges {
+    display: flex;
+    gap: 4px;
+}
+
+.storage-usage {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.storage-bar {
+    flex: 1;
+    height: 8px;
+    border-radius: 4px;
+}
+
+.storage-pct {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    min-width: 48px;
+    text-align: right;
+}
+
+.storage-details {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.storage-meta {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    border-top: 1px solid var(--border-subtle);
+    padding-top: 8px;
+}
+
+/* ============ Session History ============ */
+
+.history-section {
+    margin-top: 24px;
+}
+
 /* ============ Responsive ============ */
 
 @media (max-width: 768px) {
