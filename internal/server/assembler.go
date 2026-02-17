@@ -26,6 +26,10 @@ const maxChunkLength = 32 * 1024 * 1024 // 32MB
 // mantidos em memória antes de fazer spill para disco.
 const defaultPendingMemLimit int64 = 8 * 1024 * 1024 // 8MB
 
+// chunkShardFanout define quantos subdiretórios usamos para distribuir
+// arquivos de chunk no staging.
+const chunkShardFanout uint32 = 256
+
 const (
 	// AssemblerModeEager monta chunks conforme chegam (com reordenação incremental).
 	AssemblerModeEager = "eager"
@@ -264,15 +268,10 @@ func (ca *ChunkAssembler) writeChunkLazy(globalSeq uint32, buf []byte) error {
 		ca.lazyMaxSeq = globalSeq
 	}
 
-	if !ca.chunkDirExists {
-		if err := os.MkdirAll(ca.chunkDir, 0755); err != nil {
-			return fmt.Errorf("creating chunk directory: %w", err)
-		}
-		ca.chunkDirExists = true
+	path, err := ca.chunkPath(globalSeq)
+	if err != nil {
+		return err
 	}
-
-	name := fmt.Sprintf("chunk_%010d.tmp", globalSeq)
-	path := filepath.Join(ca.chunkDir, name)
 	if err := os.WriteFile(path, buf, 0644); err != nil {
 		return fmt.Errorf("writing lazy chunk seq %d: %w", globalSeq, err)
 	}
@@ -349,16 +348,10 @@ func (ca *ChunkAssembler) saveOutOfOrder(globalSeq uint32, data []byte) error {
 	}
 
 	// Excedeu limite de memória: faz spill para disco.
-	// Lazy creation do diretório de chunks
-	if !ca.chunkDirExists {
-		if err := os.MkdirAll(ca.chunkDir, 0755); err != nil {
-			return fmt.Errorf("creating chunk directory: %w", err)
-		}
-		ca.chunkDirExists = true
+	path, err := ca.chunkPath(globalSeq)
+	if err != nil {
+		return err
 	}
-
-	name := fmt.Sprintf("chunk_%010d.tmp", globalSeq)
-	path := filepath.Join(ca.chunkDir, name)
 
 	f, err := os.Create(path)
 	if err != nil {
@@ -385,6 +378,19 @@ func (ca *ChunkAssembler) saveOutOfOrder(globalSeq uint32, data []byte) error {
 		"pendingMemLimit", ca.pendingMemLimit)
 
 	return nil
+}
+
+// chunkPath retorna o caminho de staging do chunk usando directory sharding.
+// Deve ser chamado com ca.mu held.
+func (ca *ChunkAssembler) chunkPath(globalSeq uint32) (string, error) {
+	shardDir := filepath.Join(ca.chunkDir, fmt.Sprintf("%02x", globalSeq%chunkShardFanout))
+	if err := os.MkdirAll(shardDir, 0755); err != nil {
+		return "", fmt.Errorf("creating chunk shard directory: %w", err)
+	}
+	ca.chunkDirExists = true
+
+	name := fmt.Sprintf("chunk_%010d.tmp", globalSeq)
+	return filepath.Join(shardDir, name), nil
 }
 
 // Finalize faz flush do buffer e fecha o arquivo de saída.

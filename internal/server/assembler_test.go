@@ -135,6 +135,27 @@ func TestChunkAssembler_WriteChunk_MultiStream_RoundRobin(t *testing.T) {
 	}
 }
 
+func TestChunkAssembler_OutOfOrder_UsesShardedChunkPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	ca, err := NewChunkAssemblerWithMemLimit("test-shard", tmpDir, logger, 1)
+	if err != nil {
+		t.Fatalf("NewChunkAssemblerWithMemLimit: %v", err)
+	}
+	defer ca.Cleanup()
+
+	const seq uint32 = 513 // 0x201 -> shard 0x01
+	if err := ca.WriteChunk(seq, bytes.NewReader([]byte("ZZ")), 2); err != nil {
+		t.Fatalf("WriteChunk(%d): %v", seq, err)
+	}
+
+	expectedPath := filepath.Join(ca.ChunkDir(), "01", "chunk_0000000513.tmp")
+	if _, err := os.Stat(expectedPath); err != nil {
+		t.Fatalf("expected sharded chunk file at %q: %v", expectedPath, err)
+	}
+}
+
 func TestChunkAssembler_Cleanup(t *testing.T) {
 	tmpDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -256,5 +277,86 @@ func TestChunkAssembler_LazyChunkDir_NotCreatedForInOrder(t *testing.T) {
 
 	if totalBytes != 10 {
 		t.Errorf("expected totalBytes=10, got %d", totalBytes)
+	}
+}
+
+func TestChunkAssembler_EagerDiskSpill_Sharded_StillAssembles(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	ca, err := NewChunkAssemblerWithMemLimit("test-eager-sharded-assemble", tmpDir, logger, 1)
+	if err != nil {
+		t.Fatalf("NewChunkAssemblerWithMemLimit: %v", err)
+	}
+	defer ca.Cleanup()
+
+	// seq=2 força spill em disco (limite 1 byte), indo para shard "02".
+	if err := ca.WriteChunk(2, bytes.NewReader([]byte("CC")), 2); err != nil {
+		t.Fatalf("WriteChunk(2): %v", err)
+	}
+	if err := ca.WriteChunk(0, bytes.NewReader([]byte("AA")), 2); err != nil {
+		t.Fatalf("WriteChunk(0): %v", err)
+	}
+	if err := ca.WriteChunk(1, bytes.NewReader([]byte("BB")), 2); err != nil {
+		t.Fatalf("WriteChunk(1): %v", err)
+	}
+
+	expectedPath := filepath.Join(ca.ChunkDir(), "02", "chunk_0000000002.tmp")
+	if _, err := os.Stat(expectedPath); !os.IsNotExist(err) {
+		t.Fatalf("chunk file should have been consumed and removed after flush: %v", err)
+	}
+
+	resultPath, totalBytes, err := ca.Finalize()
+	if err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	defer os.Remove(resultPath)
+
+	if totalBytes != 6 {
+		t.Fatalf("expected totalBytes=6, got %d", totalBytes)
+	}
+
+	content, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("reading assembled file: %v", err)
+	}
+	if string(content) != "AABBCC" {
+		t.Fatalf("expected %q, got %q", "AABBCC", content)
+	}
+}
+
+func TestChunkAssembler_LazyMode_ShardedPaths_StillAssembles(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	ca, err := NewChunkAssemblerWithOptions("test-lazy-sharded-assemble", tmpDir, logger, ChunkAssemblerOptions{Mode: AssemblerModeLazy})
+	if err != nil {
+		t.Fatalf("NewChunkAssemblerWithOptions: %v", err)
+	}
+	defer ca.Cleanup()
+
+	if err := ca.WriteChunk(1, bytes.NewReader([]byte("BBBB")), 4); err != nil {
+		t.Fatalf("WriteChunk(1): %v", err)
+	}
+	if err := ca.WriteChunk(0, bytes.NewReader([]byte("AAAA")), 4); err != nil {
+		t.Fatalf("WriteChunk(0): %v", err)
+	}
+
+	resultPath, totalBytes, err := ca.Finalize()
+	if err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	defer os.Remove(resultPath)
+
+	if totalBytes != 8 {
+		t.Fatalf("expected totalBytes=8, got %d", totalBytes)
+	}
+
+	content, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("reading assembled file: %v", err)
+	}
+	if string(content) != "AAAABBBB" {
+		t.Fatalf("expected %q, got %q", "AAAABBBB", content)
 	}
 }
