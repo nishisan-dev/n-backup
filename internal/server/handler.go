@@ -247,6 +247,16 @@ func (h *Handler) recordSessionEnd(sessionID, agent, storage, backup, mode, comp
 		return
 	}
 	now := time.Now()
+
+	// Emite evento de sessão finalizada
+	if h.Events != nil {
+		level := "info"
+		if result != "ok" {
+			level = "error"
+		}
+		h.Events.PushEvent(level, "session_end", agent, fmt.Sprintf("%s/%s %s (%s)", storage, backup, result, mode), 0)
+	}
+
 	h.SessionHistory.Push(observability.SessionHistoryEntry{
 		SessionID:   sessionID,
 		Agent:       agent,
@@ -830,6 +840,11 @@ func (h *Handler) rotateStream(sessionKey any, ps *ParallelSession, idx uint8, m
 				"slowFor", slowFor.String(),
 			)
 
+			// Emite evento de flow rotation graceful
+			if h.Events != nil {
+				h.Events.PushEvent("warn", "flow_rotation", ps.AgentName, fmt.Sprintf("stream %d rotated (graceful, %.2f MB/s, slow for %s)", idx, mbps, slowFor.String()), int(idx))
+			}
+
 			// Espera ACK com timeout
 			select {
 			case <-ackCh:
@@ -852,6 +867,12 @@ func (h *Handler) rotateStream(sessionKey any, ps *ParallelSession, idx uint8, m
 		"mbps", fmt.Sprintf("%.2f", mbps),
 		"slowFor", slowFor.String(),
 	)
+
+	// Emite evento de flow rotation abrupta
+	if h.Events != nil {
+		h.Events.PushEvent("warn", "flow_rotation", ps.AgentName, fmt.Sprintf("stream %d rotated (abrupt, %.2f MB/s, slow for %s)", idx, mbps, slowFor.String()), int(idx))
+	}
+
 	conn.(net.Conn).Close()
 }
 
@@ -973,6 +994,11 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 		"read_timeout", readTimeout,
 	)
 
+	// Emite evento de conexão do agente
+	if h.Events != nil {
+		h.Events.PushEvent("info", "agent_connected", agentName, fmt.Sprintf("control channel established (keepalive %ds, v%s)", intervalSecs, clientVersion), 0)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -987,6 +1013,9 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 		magic, err := protocol.ReadControlMagic(conn)
 		if err != nil {
 			logger.Info("control channel closed", "reason", err)
+			if h.Events != nil {
+				h.Events.PushEvent("warn", "agent_disconnected", agentName, fmt.Sprintf("control channel closed: %v", err), 0)
+			}
 			return
 		}
 
@@ -1183,6 +1212,11 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 
 	logger = logger.With("agent", agentName, "storage", storageName, "backup", backupName, "client_ver", clientVersion)
 	logger.Info("backup handshake received")
+
+	// Emite evento de início de sessão
+	if h.Events != nil {
+		h.Events.PushEvent("info", "session_start", agentName, fmt.Sprintf("backup %s/%s handshake (v%s)", storageName, backupName, clientVersion), 0)
+	}
 
 	// Valida componentes de path contra traversal
 	for _, v := range []struct{ val, field string }{
@@ -1772,6 +1806,11 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	logger = logger.With("session", sessionID, "mode", "parallel", "maxStreams", pi.MaxStreams)
 	logger.Info("starting parallel backup session")
 
+	// Emite evento de início de sessão paralela
+	if h.Events != nil {
+		h.Events.PushEvent("info", "session_start", agentName, fmt.Sprintf("parallel backup %s/%s (%d streams)", storageName, backupName, pi.MaxStreams), 0)
+	}
+
 	// Prepara escrita atômica
 	writer, err := NewAtomicWriter(storageInfo.BaseDir, agentName, backupName, storageInfo.FileExtension())
 	if err != nil {
@@ -2015,6 +2054,10 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 	// Em re-joins subsequentes, incrementa o contador.
 	if rcRaw, loaded := pSession.StreamReconnects.LoadOrStore(pj.StreamIndex, &atomic.Int32{}); loaded {
 		rcRaw.(*atomic.Int32).Add(1)
+		// Emite evento de reconexão de stream
+		if h.Events != nil {
+			h.Events.PushEvent("warn", "stream_reconnect", pSession.AgentName, fmt.Sprintf("stream %d re-joined (session %s)", pj.StreamIndex, pj.SessionID), int(pj.StreamIndex))
+		}
 	}
 	pSession.StreamConnectedAt.Store(pj.StreamIndex, time.Now())
 
