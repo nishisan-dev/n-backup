@@ -13,6 +13,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/klauspost/compress/zstd"
+
+	"github.com/nishisan-dev/n-backup/internal/protocol"
 )
 
 func TestScanner_BasicScan(t *testing.T) {
@@ -103,7 +107,7 @@ func TestStream_ProducesValidTarGz(t *testing.T) {
 	scanner := NewScanner([]string{dir}, []string{"*.log", ".git/**"})
 
 	var buf bytes.Buffer
-	result, err := Stream(context.Background(), scanner, &buf, nil, nil)
+	result, err := Stream(context.Background(), scanner, &buf, nil, nil, protocol.CompressionGzip)
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
@@ -151,7 +155,7 @@ func TestStream_ChecksumConsistency(t *testing.T) {
 	scanner := NewScanner([]string{dir}, nil)
 
 	var buf bytes.Buffer
-	result, err := Stream(context.Background(), scanner, &buf, nil, nil)
+	result, err := Stream(context.Background(), scanner, &buf, nil, nil, protocol.CompressionGzip)
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
@@ -165,6 +169,54 @@ func TestStream_ChecksumConsistency(t *testing.T) {
 	// Size deve bater com o buffer
 	if result.Size != uint64(buf.Len()) {
 		t.Errorf("size mismatch: result=%d buffer=%d", result.Size, buf.Len())
+	}
+}
+
+func TestStream_ProducesValidTarZst(t *testing.T) {
+	dir := createTestTree(t)
+
+	scanner := NewScanner([]string{dir}, []string{"*.log", ".git/**"})
+
+	var buf bytes.Buffer
+	result, err := Stream(context.Background(), scanner, &buf, nil, nil, protocol.CompressionZstd)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	if result.Size == 0 {
+		t.Error("expected non-zero stream size")
+	}
+
+	// Verifica que é um zstd válido
+	zstReader, err := zstd.NewReader(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("invalid zstd: %v", err)
+	}
+	defer zstReader.Close()
+
+	// Verifica que é um tar válido
+	tr := tar.NewReader(zstReader)
+	var tarFiles []string
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("reading tar: %v", err)
+		}
+		tarFiles = append(tarFiles, hdr.Name)
+	}
+
+	if len(tarFiles) == 0 {
+		t.Error("expected at least one file in tar archive")
+	}
+
+	// Verifica que excludes foram respeitados
+	for _, f := range tarFiles {
+		if filepath.Base(f) == "access.log" {
+			t.Error("access.log should be excluded from tar")
+		}
 	}
 }
 

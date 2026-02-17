@@ -15,7 +15,10 @@ import (
 	"os"
 	"runtime"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/klauspost/pgzip"
+
+	"github.com/nishisan-dev/n-backup/internal/protocol"
 )
 
 // StreamResult contém o resultado de uma operação de streaming.
@@ -25,12 +28,12 @@ type StreamResult struct {
 }
 
 // Stream executa o pipeline de streaming zero-copy:
-// Scanner → tar.Writer → gzip.Writer → io.Writer (conexão de rede).
-// O SHA-256 é calculado inline sobre o stream gzip compactado.
+// Scanner → tar.Writer → compressor(gzip|zstd) → io.Writer (conexão de rede).
+// O SHA-256 é calculado inline sobre o stream compactado.
 // Se progress não for nil, alimenta contadores de bytes e objetos.
 // Se onObject não for nil, é chamado após cada objeto processado (usado para contadores externos).
 // Retorna o checksum e total de bytes escritos no destino.
-func Stream(ctx context.Context, scanner *Scanner, dest io.Writer, progress *ProgressReporter, onObject func()) (*StreamResult, error) {
+func Stream(ctx context.Context, scanner *Scanner, dest io.Writer, progress *ProgressReporter, onObject func(), compressionMode byte) (*StreamResult, error) {
 	// Buffer de escrita para reduzir syscalls na conexão TLS
 	bufDest := bufio.NewWriterSize(dest, 256*1024) // 256KB
 
@@ -38,16 +41,13 @@ func Stream(ctx context.Context, scanner *Scanner, dest io.Writer, progress *Pro
 	hasher := sha256.New()
 	counter := &countWriter{w: io.MultiWriter(bufDest, hasher), progress: progress}
 
-	// Pipeline: tar → gzip(paralelo) → buffer → (dest + hasher)
-	gzWriter, err := pgzip.NewWriterLevel(counter, pgzip.BestSpeed)
+	// Cria compressor com base no modo negociado
+	compressor, err := newCompressor(counter, compressionMode)
 	if err != nil {
-		return nil, fmt.Errorf("creating gzip writer: %w", err)
-	}
-	if err := gzWriter.SetConcurrency(1<<20, runtime.GOMAXPROCS(0)); err != nil {
-		return nil, fmt.Errorf("configuring gzip concurrency: %w", err)
+		return nil, err
 	}
 
-	tw := tar.NewWriter(gzWriter)
+	tw := tar.NewWriter(compressor)
 
 	// Itera sobre os arquivos via scanner
 	scanErr := scanner.Scan(ctx, func(entry FileEntry) error {
@@ -72,19 +72,19 @@ func Stream(ctx context.Context, scanner *Scanner, dest io.Writer, progress *Pro
 
 	if scanErr != nil {
 		tw.Close()
-		gzWriter.Close()
+		compressor.Close()
 		return nil, fmt.Errorf("scanning files: %w", scanErr)
 	}
 
 	// Fecha o tar writer (escreve os trailers)
 	if err := tw.Close(); err != nil {
-		gzWriter.Close()
+		compressor.Close()
 		return nil, fmt.Errorf("closing tar writer: %w", err)
 	}
 
-	// Fecha o gzip writer (flush + trailer)
-	if err := gzWriter.Close(); err != nil {
-		return nil, fmt.Errorf("closing gzip writer: %w", err)
+	// Fecha o compressor (flush + trailer)
+	if err := compressor.Close(); err != nil {
+		return nil, fmt.Errorf("closing compressor: %w", err)
 	}
 
 	// Flush do buffer para a conexão
@@ -99,6 +99,23 @@ func Stream(ctx context.Context, scanner *Scanner, dest io.Writer, progress *Pro
 		Checksum: checksum,
 		Size:     counter.n,
 	}, nil
+}
+
+// newCompressor cria um io.WriteCloser para compressão com base no mode.
+func newCompressor(w io.Writer, mode byte) (io.WriteCloser, error) {
+	switch mode {
+	case protocol.CompressionZstd:
+		return zstd.NewWriter(w, zstd.WithEncoderLevel(zstd.SpeedDefault))
+	default: // CompressionGzip
+		gzWriter, err := pgzip.NewWriterLevel(w, pgzip.BestSpeed)
+		if err != nil {
+			return nil, fmt.Errorf("creating gzip writer: %w", err)
+		}
+		if err := gzWriter.SetConcurrency(1<<20, runtime.GOMAXPROCS(0)); err != nil {
+			return nil, fmt.Errorf("configuring gzip concurrency: %w", err)
+		}
+		return gzWriter, nil
+	}
 }
 
 // addToTar adiciona um arquivo ou diretório ao tar archive.

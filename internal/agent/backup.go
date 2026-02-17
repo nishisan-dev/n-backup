@@ -57,7 +57,7 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 	tlsCfg.ServerName = host
 
 	// Conecta ao server e faz handshake
-	conn, sessionID, handshakeRTT, err := initialConnect(ctx, cfg, entry, tlsCfg, logger)
+	conn, sessionID, compressionMode, handshakeRTT, err := initialConnect(ctx, cfg, entry, tlsCfg, logger)
 	if err != nil {
 		return err
 	}
@@ -85,7 +85,7 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 			return fmt.Errorf("writing ParallelInit: %w", err)
 		}
 
-		return runParallelBackup(ctx, cfg, entry, conn, sessionID, tlsCfg, logger, progress, job, controlCh)
+		return runParallelBackup(ctx, cfg, entry, conn, sessionID, compressionMode, tlsCfg, logger, progress, job, controlCh)
 	}
 
 	logger.Info("handshake successful, starting resumable pipeline")
@@ -113,7 +113,7 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 
 	go func() {
 		defer close(producerDone)
-		producerResult, producerErr = Stream(ctx, scanner, rb, progress, nil)
+		producerResult, producerErr = Stream(ctx, scanner, rb, progress, nil, compressionMode)
 		rb.Close() // sinaliza EOF para o sender
 	}()
 
@@ -280,10 +280,10 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 
 // initialConnect realiza a conexão inicial e handshake.
 // Retorna a conexão, sessionID e o RTT do handshake.
-func initialConnect(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, tlsCfg *tls.Config, logger *slog.Logger) (net.Conn, string, time.Duration, error) {
+func initialConnect(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, tlsCfg *tls.Config, logger *slog.Logger) (net.Conn, string, byte, time.Duration, error) {
 	conn, err := dialWithContext(ctx, cfg.Server.Address, tlsCfg)
 	if err != nil {
-		return nil, "", 0, fmt.Errorf("connecting to server: %w", err)
+		return nil, "", 0, 0, fmt.Errorf("connecting to server: %w", err)
 	}
 
 	logger.Info("connected to server", "address", cfg.Server.Address)
@@ -299,24 +299,24 @@ func initialConnect(ctx context.Context, cfg *config.AgentConfig, entry config.B
 	agentVersion := "dev"
 	if err := protocol.WriteHandshake(conn, cfg.Agent.Name, entry.Storage, entry.Name, agentVersion); err != nil {
 		conn.Close()
-		return nil, "", 0, fmt.Errorf("writing handshake: %w", err)
+		return nil, "", 0, 0, fmt.Errorf("writing handshake: %w", err)
 	}
 
 	ack, err := protocol.ReadACK(conn)
 	handshakeRTT := time.Since(handshakeStart)
 	if err != nil {
 		conn.Close()
-		return nil, "", 0, fmt.Errorf("reading handshake ACK: %w", err)
+		return nil, "", 0, 0, fmt.Errorf("reading handshake ACK: %w", err)
 	}
 
 	logger.Info("handshake ACK received", "handshake_rtt", handshakeRTT)
 
 	if ack.Status != protocol.StatusGo {
 		conn.Close()
-		return nil, "", 0, fmt.Errorf("server rejected backup: status=%d message=%q", ack.Status, ack.Message)
+		return nil, "", 0, 0, fmt.Errorf("server rejected backup: status=%d message=%q", ack.Status, ack.Message)
 	}
 
-	return conn, ack.SessionID, handshakeRTT, nil
+	return conn, ack.SessionID, ack.CompressionMode, handshakeRTT, nil
 }
 
 // resumeConnect reconecta e envia RESUME para o server.
@@ -380,7 +380,7 @@ func dialWithContext(ctx context.Context, address string, tlsCfg *tls.Config) (*
 // runParallelBackup executa o pipeline de backup com streams paralelos.
 // A conn primária é usada apenas como canal de controle (Trailer + FinalACK).
 // Todas as N streams de dados conectam ao server via ParallelJoin.
-func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, conn net.Conn, sessionID string, tlsCfg *tls.Config, logger *slog.Logger, progress *ProgressReporter, job *BackupJob, controlCh *ControlChannel) error {
+func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry config.BackupEntry, conn net.Conn, sessionID string, compressionMode byte, tlsCfg *tls.Config, logger *slog.Logger, progress *ProgressReporter, job *BackupJob, controlCh *ControlChannel) error {
 	defer conn.Close()
 
 	// Callback para atualizar o progress reporter e job metrics com streams ativos
@@ -487,7 +487,7 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 
 	go func() {
 		defer close(producerDone)
-		producerResult, producerErr = Stream(ctx, scanner, dispatcher, progress, onObject)
+		producerResult, producerErr = Stream(ctx, scanner, dispatcher, progress, onObject, compressionMode)
 		dispatcher.Flush() // emite chunk parcial pendente no buffer de acumulação
 		dispatcher.Close() // sinaliza EOF para todos os senders
 	}()
