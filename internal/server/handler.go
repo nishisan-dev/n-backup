@@ -1850,6 +1850,7 @@ type ParallelSession struct {
 	MaxStreams        uint8
 	ChunkSize         uint32
 	StreamWg          sync.WaitGroup // barreira para todos os streams
+	Closing           atomic.Bool    // true após StreamWg.Wait() retornar — rejeita novos Add()
 	StreamReady       chan struct{}  // fechado quando o primeiro stream conecta
 	streamReadyOnce   sync.Once      // garante close único do StreamReady
 	Done              chan struct{}  // sinaliza conclusão
@@ -1916,7 +1917,6 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	}
 	pSession.LastActivity.Store(now.UnixNano())
 	h.sessions.Store(sessionID, pSession)
-	defer h.sessions.Delete(sessionID)
 
 	// Conn primária é control-only: não recebe dados de stream 0 aqui.
 	// Todos os N streams de dados conectam via ParallelJoin (handleParallelJoin).
@@ -1928,15 +1928,19 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		// Pelo menos 1 stream conectou — espera todos finalizarem.
 	case <-ctx.Done():
 		logger.Error("context cancelled waiting for streams")
+		h.sessions.Delete(sessionID)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
 		return
 	case <-time.After(5 * time.Minute):
 		logger.Error("timeout waiting for streams to connect")
+		h.sessions.Delete(sessionID)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
 		return
 	}
 
 	pSession.StreamWg.Wait()
+	pSession.Closing.Store(true)
+	h.sessions.Delete(sessionID) // remove imediatamente para rejeitar re-joins tardios
 	logger.Info("all parallel streams complete")
 
 	// Finaliza o assembler (flush + close)
@@ -2139,6 +2143,14 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 	// Será cancelado se outro re-join chegar para o mesmo stream index.
 	streamCtx, streamCancel := context.WithCancel(ctx)
 	pSession.StreamCancels.Store(pj.StreamIndex, streamCancel)
+
+	// Rejeita join se a sessão está em fase de fechamento (Wait() já retornou).
+	// Sem esta verificação, Add(1) após Wait() causa panic.
+	if pSession.Closing.Load() {
+		logger.Warn("session closing, rejecting late join", "stream", pj.StreamIndex)
+		protocol.WriteParallelACK(conn, protocol.ParallelStatusNotFound, 0)
+		return
+	}
 
 	// StreamWg.Add(1) SEMPRE — cada goroutine (inclusive a cancelada por re-join)
 	// faz exatamente um Done(). Com cancelamento via contexto, a goroutine antiga
