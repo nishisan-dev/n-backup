@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/nishisan-dev/n-backup/internal/protocol"
 )
 
 // mockConn é uma conexão mock que descarta escritas e simula leituras bloqueantes.
@@ -304,6 +306,203 @@ func TestAutoScaler_Hysteresis(t *testing.T) {
 	// Deve ter mantido apenas 1 stream (sem dados para avaliar)
 	if d.ActiveStreams() != 1 {
 		t.Errorf("expected 1 active stream (no data), got %d", d.ActiveStreams())
+	}
+}
+
+func TestDispatcher_StartSenderWithRetry_Idempotent(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	d := NewDispatcher(DispatcherConfig{
+		MaxStreams:  1,
+		BufferSize:  1024 * 1024,
+		ChunkSize:   512,
+		SessionID:   "test-idempotent-sender",
+		ServerAddr:  "localhost:9847",
+		AgentName:   "test-agent",
+		StorageName: "test-storage",
+		Logger:      logger,
+		PrimaryConn: nil,
+	})
+
+	activateStreamManually(d, 0, &mockConn{})
+	stream := d.streams[0]
+
+	// Chamar duas vezes não pode criar dois senders.
+	d.startSenderWithRetry(0)
+	d.startSenderWithRetry(0)
+
+	if !stream.senderStarted.Load() {
+		t.Fatal("expected senderStarted=true after first start")
+	}
+
+	// Fechar o buffer força término do sender.
+	stream.rb.Close()
+
+	select {
+	case <-stream.senderDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sender did not stop after ring buffer close")
+	}
+}
+
+func TestAutoScaler_Adaptive_ProbeSuccessKeepsStream(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	d := NewDispatcher(DispatcherConfig{
+		MaxStreams:  4,
+		BufferSize:  1024 * 1024,
+		ChunkSize:   1024,
+		SessionID:   "test-adaptive-success",
+		ServerAddr:  "localhost:9847",
+		AgentName:   "test-agent",
+		StorageName: "test-storage",
+		Logger:      logger,
+		PrimaryConn: nil,
+	})
+
+	activateStreamManually(d, 0, &mockConn{})
+	activateStreamManually(d, 1, &mockConn{})
+
+	as := NewAutoScaler(AutoScalerConfig{
+		Dispatcher: d,
+		Hysteresis: 3,
+		Logger:     logger,
+		Mode:       "adaptive",
+	})
+
+	as.probeState = probeProbing
+	as.probeBaseline = 100
+	as.probeWindows = probeWindowsRequired - 1
+
+	rates := RateSample{
+		ProducerBps: 60,
+		DrainBps:    50, // total=110 => +10%
+	}
+
+	as.evaluateAdaptive(1.0, rates, d.ActiveStreams())
+
+	if as.probeState != probeIdle {
+		t.Fatalf("expected probeState=probeIdle, got %d", as.probeState)
+	}
+	if as.probeBaseline != 0 {
+		t.Fatalf("expected probeBaseline reset to 0, got %f", as.probeBaseline)
+	}
+	if d.ActiveStreams() != 2 {
+		t.Fatalf("expected 2 active streams after successful probe, got %d", d.ActiveStreams())
+	}
+
+	snap := as.Snapshot()
+	if snap.State != protocol.AutoScaleStateScalingUp {
+		t.Fatalf("expected snapshot state ScalingUp, got %d", snap.State)
+	}
+	if snap.ProbeActive {
+		t.Fatal("expected probe_active=false after successful probe")
+	}
+}
+
+func TestAutoScaler_Adaptive_ProbeFailRevertsStream(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	d := NewDispatcher(DispatcherConfig{
+		MaxStreams:  4,
+		BufferSize:  1024 * 1024,
+		ChunkSize:   1024,
+		SessionID:   "test-adaptive-fail",
+		ServerAddr:  "localhost:9847",
+		AgentName:   "test-agent",
+		StorageName: "test-storage",
+		Logger:      logger,
+		PrimaryConn: nil,
+	})
+
+	activateStreamManually(d, 0, &mockConn{})
+	activateStreamManually(d, 1, &mockConn{})
+
+	as := NewAutoScaler(AutoScalerConfig{
+		Dispatcher: d,
+		Hysteresis: 3,
+		Logger:     logger,
+		Mode:       "adaptive",
+	})
+
+	as.probeState = probeProbing
+	as.probeBaseline = 100
+	as.probeWindows = probeWindowsRequired - 1
+
+	rates := RateSample{
+		ProducerBps: 50,
+		DrainBps:    50, // total=100 => 0% gain
+	}
+
+	as.evaluateAdaptive(1.0, rates, d.ActiveStreams())
+
+	if as.probeState != probeIdle {
+		t.Fatalf("expected probeState=probeIdle, got %d", as.probeState)
+	}
+	if as.probeCooldown != probeCooldownWindows {
+		t.Fatalf("expected probeCooldown=%d, got %d", probeCooldownWindows, as.probeCooldown)
+	}
+	if d.ActiveStreams() != 1 {
+		t.Fatalf("expected 1 active stream after failed probe revert, got %d", d.ActiveStreams())
+	}
+
+	snap := as.Snapshot()
+	if snap.State != protocol.AutoScaleStateStable {
+		t.Fatalf("expected snapshot state Stable, got %d", snap.State)
+	}
+	if snap.ProbeActive {
+		t.Fatal("expected probe_active=false after failed probe")
+	}
+}
+
+func TestAutoScaler_Adaptive_ScaleDownSetsCooldown(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	d := NewDispatcher(DispatcherConfig{
+		MaxStreams:  4,
+		BufferSize:  1024 * 1024,
+		ChunkSize:   1024,
+		SessionID:   "test-adaptive-scale-down",
+		ServerAddr:  "localhost:9847",
+		AgentName:   "test-agent",
+		StorageName: "test-storage",
+		Logger:      logger,
+		PrimaryConn: nil,
+	})
+
+	activateStreamManually(d, 0, &mockConn{})
+	activateStreamManually(d, 1, &mockConn{})
+
+	as := NewAutoScaler(AutoScalerConfig{
+		Dispatcher: d,
+		Hysteresis: 2,
+		Logger:     logger,
+		Mode:       "adaptive",
+	})
+
+	rates := RateSample{
+		ProducerBps: 20,
+		DrainBps:    100,
+	}
+
+	// Primeira janela abaixo do threshold: ainda sem scale-down.
+	as.evaluateAdaptive(0.4, rates, d.ActiveStreams())
+	if d.ActiveStreams() != 2 {
+		t.Fatalf("expected 2 active streams after first low-efficiency window, got %d", d.ActiveStreams())
+	}
+
+	// Segunda janela consecutiva: dispara scale-down e cooldown.
+	as.evaluateAdaptive(0.4, rates, d.ActiveStreams())
+	if d.ActiveStreams() != 1 {
+		t.Fatalf("expected 1 active stream after adaptive scale-down, got %d", d.ActiveStreams())
+	}
+	if as.probeCooldown != scaleDownCooldown {
+		t.Fatalf("expected probeCooldown=%d after scale-down, got %d", scaleDownCooldown, as.probeCooldown)
+	}
+
+	snap := as.Snapshot()
+	if snap.State != protocol.AutoScaleStateScaleDown {
+		t.Fatalf("expected snapshot state ScaleDown, got %d", snap.State)
 	}
 }
 

@@ -86,6 +86,9 @@ type ParallelStream struct {
 	sendOffset int64
 	sendMu     sync.Mutex
 	drainBytes int64 // atomic — bytes drenados (ACK'd) por este stream
+	// senderStarted evita múltiplos sender goroutines para o mesmo stream.
+	// Reativação de stream deve reutilizar o sender existente.
+	senderStarted atomic.Bool
 	active     atomic.Bool
 	dead       atomic.Bool // permanentemente morto (esgotou retries)
 	senderDone chan struct{}
@@ -245,6 +248,9 @@ func (d *Dispatcher) emitChunk(data []byte) error {
 // O server retorna lastOffset no ParallelACK, permitindo retomar da posição correta.
 func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 	stream := d.streams[streamIdx]
+	if !stream.senderStarted.CompareAndSwap(false, true) {
+		return
+	}
 
 	go func() {
 		defer close(stream.senderDone)
