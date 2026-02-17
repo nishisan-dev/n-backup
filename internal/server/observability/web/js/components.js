@@ -519,9 +519,9 @@ const Components = {
 
         // Efficiency gauge (0-2 range mapeado para 0-100%)
         const effPct = Math.min(100, Math.round(as.efficiency * 50));
-        let effColor = 'low';
-        if (as.efficiency > 1.2) effColor = 'high';
-        else if (as.efficiency > 0.8) effColor = 'med';
+        let effColor = 'high'; // < 0.6 = vermelho (crítico)
+        if (as.efficiency >= 1.0) effColor = 'low';       // ≥ 1.0 = verde (saudável)
+        else if (as.efficiency >= 0.6) effColor = 'med';   // 0.6-1.0 = âmbar (degradando)
 
         const probeIndicator = as.probe_active
             ? '<span class="badge badge-probing" style="margin-left: 0.5rem;">probe active</span>'
