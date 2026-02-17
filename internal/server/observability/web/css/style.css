@@ -449,6 +449,11 @@ body {
     color: var(--text-muted);
 }
 
+.badge-disconnected {
+    background: rgba(148, 163, 184, 0.2);
+    color: var(--text-muted);
+}
+
 .badge-single {
     background: rgba(99, 102, 241, 0.15);
     color: var(--accent-blue);

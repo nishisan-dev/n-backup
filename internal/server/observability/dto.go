@@ -76,7 +76,7 @@ type StreamDetail struct {
 	IdleSecs     int64   `json:"idle_secs"`
 	SlowSince    string  `json:"slow_since,omitempty"`
 	Active       bool    `json:"active"`
-	Status       string  `json:"status"`                  // running | idle | slow | degraded | inactive
+	Status       string  `json:"status"`                  // running | idle | slow | degraded | disconnected
 	ConnectedFor string  `json:"connected_for,omitempty"` // ex: "2m30s", reseta na reconexão
 	Reconnects   int32   `json:"reconnects"`              // 0 = primeira conexão, N = N reconexões
 }

@@ -581,7 +581,7 @@ func sessionStatus(lastActivity time.Time) string {
 
 func streamStatus(active bool, idleSecs int64, slowSince string, evalWindow time.Duration) string {
 	if !active {
-		return "inactive"
+		return "disconnected"
 	}
 	if slowSince != "" {
 		if t, err := time.Parse(time.RFC3339, slowSince); err == nil {
@@ -2096,8 +2096,10 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 			return
 		}
 		logger.Error("receiving parallel stream", "error", err, "bytes", bytesReceived)
+		pSession.StreamConns.Delete(pj.StreamIndex)
 		return
 	}
 
+	pSession.StreamConns.Delete(pj.StreamIndex)
 	logger.Info("parallel stream complete", "bytes", bytesReceived)
 }
