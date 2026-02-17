@@ -6,10 +6,11 @@ package observability
 
 // HealthResponse é retornado por GET /api/v1/health.
 type HealthResponse struct {
-	Status  string `json:"status"`
-	Uptime  string `json:"uptime"`
-	Version string `json:"version"`
-	Go      string `json:"go"`
+	Status  string       `json:"status"`
+	Uptime  string       `json:"uptime"`
+	Version string       `json:"version"`
+	Go      string       `json:"go"`
+	Stats   *ServerStats `json:"stats,omitempty"`
 }
 
 // MetricsResponse é retornado por GET /api/v1/metrics.
@@ -147,6 +148,16 @@ type StorageUsage struct {
 	FreeBytes       uint64  `json:"free_bytes"`
 	UsagePercent    float64 `json:"usage_percent"`
 	BackupsCount    int     `json:"backups_count"`
+}
+
+// ServerStats contém métricas de runtime do processo do server.
+type ServerStats struct {
+	GoRoutines  int     `json:"goroutines"`
+	HeapAllocMB float64 `json:"heap_alloc_mb"`
+	HeapSysMB   float64 `json:"heap_sys_mb"`
+	GCPauseMs   float64 `json:"gc_pause_ms"`
+	GCCycles    uint32  `json:"gc_cycles"`
+	CPUCores    int     `json:"cpu_cores"`
 }
 
 // SessionHistoryEntry representa uma sessão de backup finalizada.
