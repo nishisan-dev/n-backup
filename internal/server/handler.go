@@ -348,6 +348,12 @@ func (h *Handler) SessionsSnapshot() []observability.SessionSummary {
 				}
 			}
 
+			// Status: se Closing=true, a transferência acabou e o assembler está finalizando
+			status := sessionStatus(lastAct)
+			if s.Closing.Load() {
+				status = "finalizing"
+			}
+
 			sessions = append(sessions, observability.SessionSummary{
 				SessionID:      sessionID,
 				Agent:          s.AgentName,
@@ -361,7 +367,7 @@ func (h *Handler) SessionsSnapshot() []observability.SessionSummary {
 				DiskWriteBytes: s.DiskWriteBytes.Load(),
 				ActiveStreams:  activeStreams,
 				MaxStreams:     int(s.MaxStreams),
-				Status:         sessionStatus(lastAct),
+				Status:         status,
 				TotalObjects:   totalObj,
 				ObjectsSent:    sentObj,
 				WalkComplete:   walkDone,
@@ -533,6 +539,12 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 			}
 		}
 
+		// Status: se Closing=true, a transferência acabou e o assembler está finalizando
+		detailStatus := sessionStatus(lastAct)
+		if s.Closing.Load() {
+			detailStatus = "finalizing"
+		}
+
 		detail := &observability.SessionDetail{
 			SessionSummary: observability.SessionSummary{
 				SessionID:      id,
@@ -547,7 +559,7 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 				DiskWriteBytes: s.DiskWriteBytes.Load(),
 				ActiveStreams:  activeStreams,
 				MaxStreams:     int(s.MaxStreams),
-				Status:         sessionStatus(lastAct),
+				Status:         detailStatus,
 				TotalObjects:   totalObj,
 				ObjectsSent:    sentObj,
 				WalkComplete:   walkDone,
@@ -1940,8 +1952,12 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 
 	pSession.StreamWg.Wait()
 	pSession.Closing.Store(true)
-	h.sessions.Delete(sessionID) // remove imediatamente para rejeitar re-joins tardios
-	logger.Info("all parallel streams complete")
+	logger.Info("all parallel streams complete — ingestion finished")
+
+	// Evento de ingestão completa — a sessão permanece visível com status "finalizing"
+	if h.Events != nil {
+		h.Events.PushEvent("info", "ingestion_complete", agentName, fmt.Sprintf("%s/%s ingestion finished, assembling file", storageName, backupName), 0)
+	}
 
 	// Finaliza o assembler (flush + close)
 	assembledPath, totalBytes, err := assembler.Finalize()
@@ -1974,6 +1990,7 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	}
 	result := h.validateAndCommitWithTrailer(conn, writer, assembledPath, totalBytes, trailer, serverChecksum, storageInfo, logger)
 	h.recordSessionEnd(sessionID, agentName, storageName, backupName, "parallel", storageInfo.CompressionMode, result, now, totalBytes)
+	h.sessions.Delete(sessionID) // remove somente após commit+recordSessionEnd
 }
 
 // receiveParallelStream recebe dados de um stream paralelo usando ChunkHeader framing.
