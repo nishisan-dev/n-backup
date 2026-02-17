@@ -817,6 +817,46 @@ body {
     background: var(--accent-rose);
 }
 
+/* ============ Auto-Scaler ============ */
+
+.badge-probing {
+    background: rgba(139, 92, 246, 0.15);
+    color: #a78bfa;
+    animation: pulse 2s infinite;
+}
+
+.autoscale-metrics {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 12px;
+    align-items: center;
+}
+
+.autoscale-metric {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.autoscale-metric .stat-track {
+    width: 80px;
+}
+
+.autoscale-metric-label {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    min-width: 56px;
+}
+
+.autoscale-metric-value {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--text-primary);
+    white-space: nowrap;
+}
+
 /* ============ Storage Cards ============ */
 
 .storages-grid {

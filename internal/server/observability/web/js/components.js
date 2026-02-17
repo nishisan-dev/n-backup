@@ -362,6 +362,7 @@ const Components = {
             ${detail.bytes_received > 0 && detail.disk_write_bytes > 0 ? `<div class="info-item"><span class="info-label">Compression Ratio</span><span class="info-value">${(detail.disk_write_bytes / detail.bytes_received * 100).toFixed(1)}%</span></div>` : ''}
             ${detail.started_at ? `<div class="info-item"><span class="info-label">Duração</span><span class="info-value">${this.formatElapsed(detail.started_at)}</span></div>` : ''}
             ${detail.assembler ? this.renderAssemblerProgress(detail.assembler, detail.assembly_eta) : ''}
+            ${detail.auto_scale ? this.renderAutoScaleInfo(detail.auto_scale) : ''}
             ${progressHtml}
         `;
 
@@ -495,6 +496,61 @@ const Components = {
         } catch {
             return '—';
         }
+    },
+
+    // Renderiza seção de auto-scaler stats no detalhe da sessão
+    renderAutoScaleInfo(as) {
+        if (!as) return '';
+
+        // Badge de estado
+        const stateMap = {
+            stable: { badge: 'badge-running', label: '● stable' },
+            scaling_up: { badge: 'badge-info', label: '▲ scaling up' },
+            scaling_down: { badge: 'badge-warn', label: '▼ scaling down' },
+            probing: { badge: 'badge-probing', label: '◉ probing' },
+        };
+        const st = stateMap[as.state] || stateMap.stable;
+
+        // Efficiency gauge (0-2 range mapeado para 0-100%)
+        const effPct = Math.min(100, Math.round(as.efficiency * 50));
+        let effColor = 'low';
+        if (as.efficiency > 1.2) effColor = 'high';
+        else if (as.efficiency > 0.8) effColor = 'med';
+
+        const probeIndicator = as.probe_active
+            ? '<span class="badge badge-probing" style="margin-left: 0.5rem;">probe active</span>'
+            : '';
+
+        return `
+            <div class="info-item" style="grid-column: 1/-1; border-top: 1px solid var(--border-color); margin-top: 0.5rem; padding-top: 0.5rem;">
+                <span class="info-label">Auto-Scaler</span>
+                <div class="info-value" style="display: flex; flex-direction: column; gap: 0.5rem;">
+                    <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                        <span class="badge ${st.badge}">${st.label}</span>
+                        ${probeIndicator}
+                        <span class="text-xs font-mono">
+                            ${as.active_streams}/${as.max_streams} streams
+                        </span>
+                    </div>
+                    <div class="autoscale-metrics">
+                        <div class="autoscale-metric">
+                            <span class="autoscale-metric-label">Efficiency</span>
+                            <div class="stat-track">
+                                <div class="stat-fill ${effColor}" style="width: ${effPct}%"></div>
+                            </div>
+                            <span class="autoscale-metric-value">${as.efficiency.toFixed(2)}</span>
+                        </div>
+                        <div class="autoscale-metric">
+                            <span class="autoscale-metric-label">Producer</span>
+                            <span class="autoscale-metric-value">${as.producer_mbs.toFixed(2)} MB/s</span>
+                        </div>
+                        <div class="autoscale-metric">
+                            <span class="autoscale-metric-label">Drain</span>
+                            <span class="autoscale-metric-value">${as.drain_mbs.toFixed(2)} MB/s</span>
+                        </div>
+                    </div>
+                </div>
+            </div>`;
     },
 
     // Renderiza barra de progresso do assembler com fase e ETA
