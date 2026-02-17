@@ -216,7 +216,9 @@ body {
 }
 
 .view.active {
-    display: block;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
     animation: fadeIn 200ms ease;
 }
 
@@ -238,7 +240,6 @@ body {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
     gap: 16px;
-    margin-bottom: 20px;
 }
 
 .card {
@@ -329,10 +330,6 @@ body {
 }
 
 /* ============ Info Grid ============ */
-
-.info-card {
-    margin-bottom: 20px;
-}
 
 .info-grid {
     display: grid;
