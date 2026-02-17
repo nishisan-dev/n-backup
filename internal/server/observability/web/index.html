@@ -23,6 +23,24 @@
             <h1 class="topbar-title">NBackup <span class="topbar-subtitle">Observability</span></h1>
         </div>
         <div class="topbar-right">
+            <button class="theme-toggle" id="theme-toggle" title="Alternar tema">
+                <svg class="icon-moon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+                    stroke-width="2">
+                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                </svg>
+                <svg class="icon-sun" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+                    stroke-width="2" style="display:none">
+                    <circle cx="12" cy="12" r="5" />
+                    <line x1="12" y1="1" x2="12" y2="3" />
+                    <line x1="12" y1="21" x2="12" y2="23" />
+                    <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+                    <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+                    <line x1="1" y1="12" x2="3" y2="12" />
+                    <line x1="21" y1="12" x2="23" y2="12" />
+                    <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+                    <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+                </svg>
+            </button>
             <span class="status-pill" id="conn-status">
                 <span class="status-dot"></span>
                 <span class="status-text">Conectando...</span>
@@ -139,6 +157,22 @@
                         <span class="info-label">Status</span>
                         <span class="info-value" id="srv-status">—</span>
                     </div>
+                    <div class="info-item">
+                        <span class="info-label">Goroutines</span>
+                        <span class="info-value" id="srv-goroutines">—</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Heap Alloc</span>
+                        <span class="info-value" id="srv-heap">—</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">GC Pause</span>
+                        <span class="info-value" id="srv-gc">—</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">CPU Cores</span>
+                        <span class="info-value" id="srv-cpu">—</span>
+                    </div>
                 </div>
             </div>
 
@@ -184,6 +218,11 @@
                         <tbody id="overview-sessions-body"></tbody>
                     </table>
                 </div>
+            </div>
+
+            <div class="card" id="overview-throughput-card">
+                <h2 class="card-title">Throughput Global</h2>
+                <canvas id="global-throughput-canvas" width="800" height="120"></canvas>
             </div>
         </div>
 
@@ -246,11 +285,22 @@
         <div class="view" id="view-events">
             <div class="view-header">
                 <h2>Eventos Recentes</h2>
-                <select id="events-limit" class="select-mini">
-                    <option value="25">25</option>
-                    <option value="50" selected>50</option>
-                    <option value="100">100</option>
-                </select>
+                <div class="view-header-actions">
+                    <select id="events-limit" class="select-mini">
+                        <option value="25">25</option>
+                        <option value="50" selected>50</option>
+                        <option value="100">100</option>
+                    </select>
+                    <button class="btn-export" id="btn-export-events" title="Exportar eventos">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                            <polyline points="7 10 12 15 17 10" />
+                            <line x1="12" y1="15" x2="12" y2="3" />
+                        </svg>
+                        Export
+                    </button>
+                </div>
             </div>
             <div class="table-wrap">
                 <table class="data-table">
