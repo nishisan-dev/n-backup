@@ -29,7 +29,7 @@ echo "==> Compilando binários para ${ARCH}..."
 export GOOS=linux
 export GOARCH="${GOARCH}"
 export CGO_ENABLED=0
-LDFLAGS="-s -w -X main.version=${VERSION}"
+LDFLAGS="-s -w -X github.com/nishisan-dev/n-backup/internal/server/observability.Version=${VERSION}"
 
 mkdir -p "${DIST_DIR}"
 go build -ldflags "${LDFLAGS}" -o "${DIST_DIR}/nbackup-agent" "${PROJECT_ROOT}/cmd/nbackup-agent"
