@@ -430,6 +430,7 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 	scaler := NewAutoScaler(AutoScalerConfig{
 		Dispatcher: dispatcher,
 		Logger:     logger,
+		Mode:       entry.AutoScaler,
 	})
 	go scaler.Run(scalerCtx)
 
@@ -478,6 +479,24 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 			return totalObj.Load(), sentObj.Load(), walkDone.Load() != 0
 		})
 		defer controlCh.SetProgressProvider(nil)
+
+		controlCh.SetAutoScaleStatsProvider(func() *protocol.ControlAutoScaleStats {
+			snap := scaler.Snapshot()
+			probeActive := uint8(0)
+			if snap.ProbeActive {
+				probeActive = 1
+			}
+			return &protocol.ControlAutoScaleStats{
+				Efficiency:    snap.Efficiency,
+				ProducerMBs:   snap.ProducerMBs,
+				DrainMBs:      snap.DrainMBs,
+				ActiveStreams: snap.ActiveStreams,
+				MaxStreams:    snap.MaxStreams,
+				State:         snap.State,
+				ProbeActive:   probeActive,
+			}
+		})
+		defer controlCh.SetAutoScaleStatsProvider(nil)
 	}
 
 	go func() {

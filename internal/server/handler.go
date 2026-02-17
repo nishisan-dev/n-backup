@@ -378,6 +378,11 @@ func (h *Handler) SessionsSnapshot() []observability.SessionSummary {
 					Phase:           asmStats.Phase,
 				},
 			})
+
+			// Auto-scale info (presente apenas se o agent enviou stats)
+			if raw := s.AutoScaleInfo.Load(); raw != nil {
+				sessions[len(sessions)-1].AutoScale = raw.(*observability.AutoScaleInfo)
+			}
 		}
 		return true
 	})
@@ -528,7 +533,7 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 			}
 		}
 
-		return &observability.SessionDetail{
+		detail := &observability.SessionDetail{
 			SessionSummary: observability.SessionSummary{
 				SessionID:      id,
 				Agent:          s.AgentName,
@@ -560,7 +565,14 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 				},
 			},
 			Streams: streams,
-		}, true
+		}
+
+		// Auto-scale info
+		if raw := s.AutoScaleInfo.Load(); raw != nil {
+			detail.AutoScale = raw.(*observability.AutoScaleInfo)
+		}
+
+		return detail, true
 	}
 
 	return nil, false
@@ -1089,6 +1101,45 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 					LoadAverage:      stats.LoadAverage,
 				})
 			}
+
+		case protocol.MagicControlAutoScaleStats:
+			// Agent enviou AutoScale Stats
+			asStats, err := protocol.ReadControlAutoScaleStatsPayload(conn)
+			if err != nil {
+				logger.Warn("control channel: reading auto-scale stats payload", "error", err)
+				return
+			}
+
+			// Mapeia state numérico para string
+			stateStr := "stable"
+			switch asStats.State {
+			case protocol.AutoScaleStateScalingUp:
+				stateStr = "scaling_up"
+			case protocol.AutoScaleStateScaleDown:
+				stateStr = "scaling_down"
+			case protocol.AutoScaleStateProbing:
+				stateStr = "probing"
+			}
+
+			info := &observability.AutoScaleInfo{
+				Efficiency:    asStats.Efficiency,
+				ProducerMBs:   asStats.ProducerMBs,
+				DrainMBs:      asStats.DrainMBs,
+				ActiveStreams: asStats.ActiveStreams,
+				MaxStreams:    asStats.MaxStreams,
+				State:         stateStr,
+				ProbeActive:   asStats.ProbeActive == 1,
+			}
+
+			// Armazena na ParallelSession deste agent
+			h.sessions.Range(func(_, value any) bool {
+				ps, ok := value.(*ParallelSession)
+				if !ok || ps.AgentName != agentName {
+					return true
+				}
+				ps.AutoScaleInfo.Store(info)
+				return false
+			})
 
 		case protocol.MagicControlRotateACK:
 			// Agent confirmou drain de stream após ControlRotate
@@ -1809,6 +1860,7 @@ type ParallelSession struct {
 	ObjectsSent       atomic.Uint32 // Objetos já enviados (recebido via ControlProgress)
 	WalkComplete      atomic.Int32  // 1 = prescan concluído, total confiável (via ControlProgress)
 	ClientVersion     string        // Versão do client (protocolo v3+)
+	AutoScaleInfo     atomic.Value  // *observability.AutoScaleInfo (atualizado via ControlAutoScaleStats)
 }
 
 // handleParallelBackup processa um backup paralelo.

@@ -126,6 +126,8 @@ func TestReadControlMagic(t *testing.T) {
 		{"CDFE", MagicControlDefer},
 		{"CABT", MagicControlAbort},
 		{"CPRG", MagicControlProgress},
+		{"CSTS", MagicControlStats},
+		{"CASS", MagicControlAutoScaleStats},
 	}
 
 	for _, tt := range tests {
@@ -473,5 +475,98 @@ func TestControlStatsPayload_RoundTrip(t *testing.T) {
 	}
 	if got.LoadAverage != load {
 		t.Errorf("load: want %f, got %f", load, got.LoadAverage)
+	}
+}
+
+func TestControlAutoScaleStats_RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	stats := &ControlAutoScaleStats{
+		Efficiency:    0.85,
+		ProducerMBs:   12.5,
+		DrainMBs:      10.625,
+		ActiveStreams: 4,
+		MaxStreams:    8,
+		State:         AutoScaleStateStable,
+		ProbeActive:   0,
+	}
+
+	if err := WriteControlAutoScaleStats(&buf, stats); err != nil {
+		t.Fatalf("WriteControlAutoScaleStats failed: %v", err)
+	}
+
+	// Frame: 4B magic + 3×4B float32 + 4×1B uint8 = 20B
+	if buf.Len() != 20 {
+		t.Fatalf("expected 20 bytes, got %d", buf.Len())
+	}
+
+	got, err := ReadControlAutoScaleStats(&buf)
+	if err != nil {
+		t.Fatalf("ReadControlAutoScaleStats failed: %v", err)
+	}
+
+	if got.Efficiency != stats.Efficiency {
+		t.Errorf("efficiency: want %f, got %f", stats.Efficiency, got.Efficiency)
+	}
+	if got.ProducerMBs != stats.ProducerMBs {
+		t.Errorf("producer_mbs: want %f, got %f", stats.ProducerMBs, got.ProducerMBs)
+	}
+	if got.DrainMBs != stats.DrainMBs {
+		t.Errorf("drain_mbs: want %f, got %f", stats.DrainMBs, got.DrainMBs)
+	}
+	if got.ActiveStreams != stats.ActiveStreams {
+		t.Errorf("active_streams: want %d, got %d", stats.ActiveStreams, got.ActiveStreams)
+	}
+	if got.MaxStreams != stats.MaxStreams {
+		t.Errorf("max_streams: want %d, got %d", stats.MaxStreams, got.MaxStreams)
+	}
+	if got.State != stats.State {
+		t.Errorf("state: want %d, got %d", stats.State, got.State)
+	}
+	if got.ProbeActive != stats.ProbeActive {
+		t.Errorf("probe_active: want %d, got %d", stats.ProbeActive, got.ProbeActive)
+	}
+}
+
+func TestControlAutoScaleStats_PayloadAfterMagic(t *testing.T) {
+	var buf bytes.Buffer
+	stats := &ControlAutoScaleStats{
+		Efficiency:    1.25,
+		ProducerMBs:   20.0,
+		DrainMBs:      16.0,
+		ActiveStreams: 6,
+		MaxStreams:    8,
+		State:         AutoScaleStateProbing,
+		ProbeActive:   1,
+	}
+	WriteControlAutoScaleStats(&buf, stats)
+
+	magic, _ := ReadControlMagic(&buf)
+	if magic != MagicControlAutoScaleStats {
+		t.Fatalf("expected CASS magic, got %q", magic)
+	}
+
+	got, err := ReadControlAutoScaleStatsPayload(&buf)
+	if err != nil {
+		t.Fatalf("ReadControlAutoScaleStatsPayload failed: %v", err)
+	}
+	if got.Efficiency != stats.Efficiency {
+		t.Errorf("efficiency: want %f, got %f", stats.Efficiency, got.Efficiency)
+	}
+	if got.ActiveStreams != stats.ActiveStreams {
+		t.Errorf("active_streams: want %d, got %d", stats.ActiveStreams, got.ActiveStreams)
+	}
+	if got.State != AutoScaleStateProbing {
+		t.Errorf("state: want %d, got %d", AutoScaleStateProbing, got.State)
+	}
+	if got.ProbeActive != 1 {
+		t.Errorf("probe_active: want 1, got %d", got.ProbeActive)
+	}
+}
+
+func TestControlAutoScaleStats_InvalidMagic(t *testing.T) {
+	buf := bytes.NewBufferString("BAD!1234567890123456")
+	_, err := ReadControlAutoScaleStats(buf)
+	if err == nil {
+		t.Fatal("expected error for invalid magic")
 	}
 }

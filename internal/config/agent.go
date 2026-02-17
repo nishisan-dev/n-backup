@@ -58,13 +58,14 @@ type TLSClient struct {
 
 // BackupEntry representa um bloco de backup nomeado com storage de destino.
 type BackupEntry struct {
-	Name      string         `yaml:"name"`     // Identificador local do backup
-	Storage   string         `yaml:"storage"`  // Nome do storage no server
-	Schedule  string         `yaml:"schedule"` // Cron expression individual deste backup
-	Sources   []BackupSource `yaml:"sources"`
-	Exclude   []string       `yaml:"exclude"`
-	Parallels int            `yaml:"parallels"` // 0=desabilitado (single stream), 1-255=máx streams paralelos
-	DSCP      string         `yaml:"dscp"`      // DSCP marking (ex: "AF41", "EF"), vazio=desabilitado
+	Name       string         `yaml:"name"`     // Identificador local do backup
+	Storage    string         `yaml:"storage"`  // Nome do storage no server
+	Schedule   string         `yaml:"schedule"` // Cron expression individual deste backup
+	Sources    []BackupSource `yaml:"sources"`
+	Exclude    []string       `yaml:"exclude"`
+	Parallels  int            `yaml:"parallels"`   // 0=desabilitado (single stream), 1-255=máx streams paralelos
+	DSCP       string         `yaml:"dscp"`        // DSCP marking (ex: "AF41", "EF"), vazio=desabilitado
+	AutoScaler string         `yaml:"auto_scaler"` // "efficiency" (default) | "adaptive"
 }
 
 // BackupSource representa um diretório de origem para backup.
@@ -172,6 +173,15 @@ func (c *AgentConfig) validate() error {
 			if !validDSCP[dscp] {
 				return fmt.Errorf("backups[%d].dscp: unknown value %q (valid: EF, AF11..AF43, CS0..CS7)", i, b.DSCP)
 			}
+		}
+		// Auto-scaler mode validation
+		switch strings.ToLower(strings.TrimSpace(b.AutoScaler)) {
+		case "", "efficiency":
+			c.Backups[i].AutoScaler = "efficiency"
+		case "adaptive":
+			c.Backups[i].AutoScaler = "adaptive"
+		default:
+			return fmt.Errorf("backups[%d].auto_scaler: unknown value %q (valid: efficiency, adaptive)", i, b.AutoScaler)
 		}
 	}
 	if c.Retry.MaxAttempts <= 0 {

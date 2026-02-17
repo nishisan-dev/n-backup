@@ -71,6 +71,9 @@ type ControlChannel struct {
 	// Callback que retorna stats do sistema.
 	statsProvider func() *protocol.ControlStats
 
+	// Callback que retorna stats do auto-scaler.
+	autoScaleStatsProvider func() *protocol.ControlAutoScaleStats
+
 	// Lifecycle
 	stopCh chan struct{}
 	stopMu sync.Once
@@ -106,6 +109,12 @@ func (cc *ControlChannel) SetProgressProvider(fn func() (totalObjects, objectsSe
 // Chamado a cada ping tick; envia ControlStats ao server.
 func (cc *ControlChannel) SetStatsProvider(fn func() *protocol.ControlStats) {
 	cc.statsProvider = fn
+}
+
+// SetAutoScaleStatsProvider define o callback que fornece estatísticas do auto-scaler.
+// Chamado a cada ping tick; envia ControlAutoScaleStats ao server.
+func (cc *ControlChannel) SetAutoScaleStatsProvider(fn func() *protocol.ControlAutoScaleStats) {
+	cc.autoScaleStatsProvider = fn
 }
 
 // SendProgress envia um frame ControlProgress ao server imediatamente.
@@ -501,6 +510,12 @@ func (cc *ControlChannel) pingLoop() {
 				stats := cc.statsProvider()
 				if stats != nil {
 					err = protocol.WriteControlStats(conn, stats.CPUPercent, stats.MemoryPercent, stats.DiskUsagePercent, stats.LoadAverage)
+				}
+			}
+			if err == nil && cc.autoScaleStatsProvider != nil {
+				asStats := cc.autoScaleStatsProvider()
+				if asStats != nil {
+					err = protocol.WriteControlAutoScaleStats(conn, asStats)
 				}
 			}
 			cc.writeMu.Unlock()

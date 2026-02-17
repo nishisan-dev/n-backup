@@ -48,6 +48,7 @@ type SessionSummary struct {
 	ETA          string          `json:"eta,omitempty"` // "∞" até o agent reportar
 	AssemblyETA  string          `json:"assembly_eta,omitempty"`
 	Assembler    *AssemblerStats `json:"assembler,omitempty"`
+	AutoScale    *AutoScaleInfo  `json:"auto_scale,omitempty"`
 }
 
 // AssemblerStats representa o estado do montador de chunks.
@@ -122,6 +123,17 @@ type AgentStats struct {
 	MemoryPercent    float32 `json:"memory_percent"`
 	DiskUsagePercent float32 `json:"disk_usage_percent"`
 	LoadAverage      float32 `json:"load_average"`
+}
+
+// AutoScaleInfo contém métricas do auto-scaler recebidas do agent.
+type AutoScaleInfo struct {
+	Efficiency    float32 `json:"efficiency"`
+	ProducerMBs   float32 `json:"producer_mbs"`
+	DrainMBs      float32 `json:"drain_mbs"`
+	ActiveStreams uint8   `json:"active_streams"`
+	MaxStreams    uint8   `json:"max_streams"`
+	State         string  `json:"state"` // stable | scaling_up | scaling_down | probing
+	ProbeActive   bool    `json:"probe_active"`
 }
 
 // AgentInfo representa um agente conectado via control channel.
