@@ -482,6 +482,17 @@ body {
     color: var(--text-secondary);
 }
 
+.badge-assembling {
+    background: rgba(16, 185, 129, 0.15);
+    color: var(--accent-emerald);
+    animation: pulse 2s infinite;
+}
+
+.badge-success {
+    background: rgba(34, 197, 94, 0.15);
+    color: #22c55e;
+}
+
 .text-xs {
     font-size: 0.65rem;
     padding: 1px 6px;

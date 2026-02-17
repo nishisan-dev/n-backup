@@ -251,9 +251,11 @@ const Components = {
                         ${this.modeBadge(s.mode)}
                         ${this.compressionBadge(s.compression)}
                         ${this.statusBadge(s.status)}
+                        ${s.assembler && s.assembler.phase === 'assembling' ? '<span class="badge badge-assembling">⚙ assembling</span>' : ''}
                         <span>Início: ${this.formatTime(s.started_at)}</span>
                         <span>Último I/O: ${this.formatTime(s.last_activity)}</span>
                         ${s.eta ? `<span>ETA: ${s.eta}</span>` : ''}
+                        ${s.assembly_eta ? `<span>Assembly ETA: ${s.assembly_eta}</span>` : ''}
                     </div>
                 </div>
                 <div class="session-card-stats">
@@ -299,17 +301,9 @@ const Components = {
             <div class="info-item"><span class="info-label">Último I/O</span><span class="info-value">${this.formatDateTime(detail.last_activity)}</span></div>
             ${detail.eta ? `<div class="info-item"><span class="info-label">ETA</span><span class="info-value">${detail.eta}</span></div>` : ''}
             ${detail.client_version ? `<div class="info-item"><span class="info-label">Client Version</span><span class="info-value">${this.escapeHtml(detail.client_version)}</span></div>` : ''}
-            ${detail.assembler ? `
-                <div class="info-item" style="grid-column: 1/-1; border-top: 1px solid var(--border-color); margin-top: 0.5rem; padding-top: 0.5rem;">
-                    <span class="info-label">Assembler Status</span>
-                    <span class="info-value text-xs font-mono">
-                        Seq: ${detail.assembler.next_expected_seq} |
-                        Pending: ${detail.assembler.pending_chunks} chunks (${this.formatBytes(detail.assembler.pending_mem_bytes)}) |
-                        Total: ${this.formatBytes(detail.assembler.total_bytes)} |
-                        ${detail.assembler.finalized ? '<span class="badge badge-success">Finalized</span>' : '<span class="badge badge-info">Active</span>'}
-                    </span>
-                </div>
-            ` : ''}
+            ${detail.bytes_received > 0 && detail.disk_write_bytes > 0 ? `<div class="info-item"><span class="info-label">Compression Ratio</span><span class="info-value">${(detail.disk_write_bytes / detail.bytes_received * 100).toFixed(1)}%</span></div>` : ''}
+            ${detail.started_at ? `<div class="info-item"><span class="info-label">Duração</span><span class="info-value">${this.formatElapsed(detail.started_at)}</span></div>` : ''}
+            ${detail.assembler ? this.renderAssemblerProgress(detail.assembler, detail.assembly_eta) : ''}
             ${progressHtml}
         `;
 
@@ -408,5 +402,78 @@ const Components = {
         if (!str) return '';
         const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
         return String(str).replace(/[&<>"']/g, c => map[c]);
+    },
+
+    // Formata duração desde um timestamp ISO até agora
+    formatElapsed(isoStart) {
+        if (!isoStart) return '—';
+        try {
+            const start = new Date(isoStart);
+            const now = new Date();
+            const diffMs = now - start;
+            const secs = Math.floor(diffMs / 1000);
+            const h = Math.floor(secs / 3600);
+            const m = Math.floor((secs % 3600) / 60);
+            const s = secs % 60;
+            const parts = [];
+            if (h > 0) parts.push(`${h}h`);
+            if (m > 0) parts.push(`${m}m`);
+            parts.push(`${s}s`);
+            return parts.join(' ');
+        } catch {
+            return '—';
+        }
+    },
+
+    // Renderiza barra de progresso do assembler com fase e ETA
+    renderAssemblerProgress(asm, assemblyEta) {
+        if (!asm) return '';
+
+        const phase = asm.phase || 'receiving';
+        const total = asm.total_chunks || 0;
+        const assembled = asm.assembled_chunks || 0;
+
+        // Cores por fase
+        const phaseConfig = {
+            receiving: { color: 'var(--color-indigo)', label: '📥 Receiving', badge: 'badge-info' },
+            assembling: { color: 'var(--color-emerald, #10b981)', label: '⚙ Assembling', badge: 'badge-assembling' },
+            done: { color: 'var(--color-success, #22c55e)', label: '✓ Finalizado', badge: 'badge-success' },
+        };
+        const cfg = phaseConfig[phase] || phaseConfig.receiving;
+
+        // Barra de progresso (relevante apenas para assembling e done)
+        let progressBar = '';
+        if (phase === 'assembling' || phase === 'done') {
+            const pct = total > 0 ? Math.min(100, Math.round((assembled / total) * 100)) : 0;
+            progressBar = `
+                <div class="progress-bar-wrap" style="margin-top: 0.25rem;">
+                    <div class="progress-bar-fill" style="width: ${pct}%; background: ${cfg.color};"></div>
+                </div>
+                <span class="progress-text" style="font-size: 0.75rem;">
+                    ${assembled} / ${total} chunks (${pct}%)
+                    ${assemblyEta ? ' — ETA: ' + assemblyEta : ''}
+                </span>`;
+        }
+
+        // Info compacta
+        const pendingInfo = asm.pending_chunks > 0
+            ? `Pending: ${asm.pending_chunks} (${this.formatBytes(asm.pending_mem_bytes)})`
+            : '';
+
+        return `
+            <div class="info-item" style="grid-column: 1/-1; border-top: 1px solid var(--border-color); margin-top: 0.5rem; padding-top: 0.5rem;">
+                <span class="info-label">Assembly</span>
+                <div class="info-value" style="display: flex; flex-direction: column; gap: 0.25rem;">
+                    <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                        <span class="${cfg.badge}">${cfg.label}</span>
+                        <span class="text-xs font-mono">
+                            Seq: ${asm.next_expected_seq} |
+                            Total: ${this.formatBytes(asm.total_bytes)}
+                            ${pendingInfo ? ' | ' + pendingInfo : ''}
+                        </span>
+                    </div>
+                    ${progressBar}
+                </div>
+            </div>`;
     },
 };
