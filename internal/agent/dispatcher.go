@@ -89,10 +89,10 @@ type ParallelStream struct {
 	// senderStarted evita múltiplos sender goroutines para o mesmo stream.
 	// Reativação de stream deve reutilizar o sender existente.
 	senderStarted atomic.Bool
-	active     atomic.Bool
-	dead       atomic.Bool // permanentemente morto (esgotou retries)
-	senderDone chan struct{}
-	senderErr  chan error
+	active        atomic.Bool
+	dead          atomic.Bool // permanentemente morto (esgotou retries)
+	senderDone    chan struct{}
+	senderErr     chan error
 }
 
 // DispatcherConfig contém os parâmetros para criar um Dispatcher.
@@ -330,19 +330,28 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 				// Resume: ajusta sendOffset para o lastOffset do server
 				// Valida que o RingBuffer ainda contém os dados no resumeOffset
 				if resumeOffset > 0 && !stream.rb.ContainsRange(resumeOffset, protocol.ChunkHeaderSize) {
-					d.logger.Error("resume offset no longer in ring buffer — stream irrecoverable",
-						"stream", streamIdx, "resumeOffset", resumeOffset,
-						"rbTail", stream.rb.Tail(), "rbHead", stream.rb.Head())
-					stream.dead.Store(true)
-					d.DeactivateStream(streamIdx)
-					stream.senderErr <- fmt.Errorf("stream %d: resume offset %d expired from ring buffer", streamIdx, resumeOffset)
-					return
+					// Se resumeOffset == head, todos os dados até aqui já foram ACK'd
+					// pelo server. O stream está sincronizado e pode continuar
+					// enviando novos dados a partir do head — não é irrecuperável.
+					if resumeOffset == stream.rb.Head() {
+						d.logger.Info("resume offset equals head — all data ACK'd, continuing from head",
+							"stream", streamIdx, "resumeOffset", resumeOffset)
+					} else {
+						d.logger.Error("resume offset no longer in ring buffer — stream irrecoverable",
+							"stream", streamIdx, "resumeOffset", resumeOffset,
+							"rbTail", stream.rb.Tail(), "rbHead", stream.rb.Head())
+						stream.dead.Store(true)
+						d.DeactivateStream(streamIdx)
+						stream.senderErr <- fmt.Errorf("stream %d: resume offset %d expired from ring buffer", streamIdx, resumeOffset)
+						return
+					}
 				}
 
 				// Valida alinhamento: os primeiros bytes no resumeOffset devem
 				// formar um ChunkHeader válido (GlobalSeq + Length <= chunkSize).
 				// Se não, houve dessincronização — dados corrompidos.
-				if resumeOffset > 0 {
+				// Pula validação quando resumeOffset == head (buffer vazio nessa posição).
+				if resumeOffset > 0 && resumeOffset < stream.rb.Head() {
 					hdrBuf := make([]byte, protocol.ChunkHeaderSize)
 					n, readErr := stream.rb.ReadAt(resumeOffset, hdrBuf)
 					if readErr != nil || n < protocol.ChunkHeaderSize {
