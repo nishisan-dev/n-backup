@@ -35,6 +35,9 @@ var MagicControlAbort = [4]byte{'C', 'A', 'B', 'T'}
 // MagicControlProgress é o magic para frames ControlProgress (Agent → Server).
 var MagicControlProgress = [4]byte{'C', 'P', 'R', 'G'}
 
+// MagicControlStats é o magic para frames ControlStats (Agent → Server).
+var MagicControlStats = [4]byte{'C', 'S', 'T', 'S'}
+
 // ControlPing é enviado pelo agent para o server no canal de controle.
 // Formato: [Magic "CPNG" 4B] [Timestamp int64 8B]
 type ControlPing struct {
@@ -93,6 +96,15 @@ type ControlProgress struct {
 	TotalObjects uint32
 	ObjectsSent  uint32
 	WalkComplete bool
+}
+
+// ControlStats é enviado pelo agent ao server para reportar métricas de sistema.
+// Formato: [Magic "CSTS" 4B] [CPU float32 4B] [Mem float32 4B] [Disk float32 4B] [Load float32 4B]
+type ControlStats struct {
+	CPUPercent       float32
+	MemoryPercent    float32
+	DiskUsagePercent float32
+	LoadAverage      float32
 }
 
 // ReadControlMagic lê os 4 bytes de magic do canal de controle.
@@ -334,5 +346,49 @@ func ReadControlProgress(r io.Reader) (*ControlProgress, error) {
 		TotalObjects: binary.BigEndian.Uint32(buf[4:8]),
 		ObjectsSent:  binary.BigEndian.Uint32(buf[8:12]),
 		WalkComplete: buf[12]&1 != 0,
+	}, nil
+}
+
+// WriteControlStats escreve o frame ControlStats (Agent → Server).
+func WriteControlStats(w io.Writer, cpu, mem, disk, load float32) error {
+	buf := make([]byte, 20) // 4B magic + 4B*4 floats
+	copy(buf[0:4], MagicControlStats[:])
+	binary.BigEndian.PutUint32(buf[4:8], math.Float32bits(cpu))
+	binary.BigEndian.PutUint32(buf[8:12], math.Float32bits(mem))
+	binary.BigEndian.PutUint32(buf[12:16], math.Float32bits(disk))
+	binary.BigEndian.PutUint32(buf[16:20], math.Float32bits(load))
+	_, err := w.Write(buf)
+	return err
+}
+
+// ReadControlStatsPayload lê o payload de ControlStats (16B) após o magic já ter sido lido.
+func ReadControlStatsPayload(r io.Reader) (*ControlStats, error) {
+	buf := make([]byte, 16)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return nil, fmt.Errorf("reading control stats payload: %w", err)
+	}
+	return &ControlStats{
+		CPUPercent:       math.Float32frombits(binary.BigEndian.Uint32(buf[0:4])),
+		MemoryPercent:    math.Float32frombits(binary.BigEndian.Uint32(buf[4:8])),
+		DiskUsagePercent: math.Float32frombits(binary.BigEndian.Uint32(buf[8:12])),
+		LoadAverage:      math.Float32frombits(binary.BigEndian.Uint32(buf[12:16])),
+	}, nil
+}
+
+// ReadControlStats lê o frame ControlStats completo (magic + payload).
+func ReadControlStats(r io.Reader) (*ControlStats, error) {
+	buf := make([]byte, 20)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return nil, fmt.Errorf("reading control stats: %w", err)
+	}
+	if buf[0] != MagicControlStats[0] || buf[1] != MagicControlStats[1] ||
+		buf[2] != MagicControlStats[2] || buf[3] != MagicControlStats[3] {
+		return nil, fmt.Errorf("%w: expected CSTS, got %q", ErrInvalidMagic, string(buf[0:4]))
+	}
+	return &ControlStats{
+		CPUPercent:       math.Float32frombits(binary.BigEndian.Uint32(buf[4:8])),
+		MemoryPercent:    math.Float32frombits(binary.BigEndian.Uint32(buf[8:12])),
+		DiskUsagePercent: math.Float32frombits(binary.BigEndian.Uint32(buf[12:16])),
+		LoadAverage:      math.Float32frombits(binary.BigEndian.Uint32(buf[16:20])),
 	}, nil
 }
