@@ -245,6 +245,7 @@ backups:
   - name: "data"
     storage: "main"
     parallels: 4             # 0 = single stream, 1-8 = máximo de streams
+    auto_scaler: efficiency  # efficiency (padrão) ou adaptive
 ```
 
 ### Como Funciona
@@ -263,14 +264,35 @@ backups:
 | Parâmetro | Default | Descrição |
 |----------|---------|----------|
 | `parallels` | `0` | Número máximo de streams (0=desabilita) |
+| `auto_scaler` | `efficiency` | Modo do auto-scaler (`efficiency` ou `adaptive`) |
 | `resume.chunk_size` | `1mb` | Tamanho de cada chunk distribuído (64kb-16mb) |
 | Hysteresis window (fixo) | 3 | Janelas consecutivas para escalar |
 
 > [!TIP]
-> Use `parallels: 2-4` para links com laten̂ncia alta (WAN). Para LAN, `parallels: 0` costuma ser suficiente.
+> Use `parallels: 2-4` para links com latência alta (WAN). Para LAN, `parallels: 0` costuma ser suficiente.
 
 > [!NOTE]
 > O AutoScaler adiciona streams gradualmente com base na eficiência observada (razão producer/drain), evitando overhead desnecessário.
+
+### Modos do Auto-Scaler (v2.1.2+)
+
+O campo `auto_scaler` define a estratégia de ajuste dinâmico de streams:
+
+| Modo | Estratégia | Quando usar |
+|------|-----------|-------------|
+| `efficiency` | Threshold-based: escala quando `efficiency > 1.0`, reduz quando `< 0.7`. Histerese de 3 janelas. | Links estáveis, throughput previsível (padrão) |
+| `adaptive` | Probe-and-measure: adiciona stream, mede throughput real, mantém se ganho ≥ 5%. Cooldown após falhas. | Links WAN variáveis, throughput imprevisível |
+
+```yaml
+# Exemplo: modo adaptive para link WAN com throughput variável
+backups:
+  - name: "remote-db"
+    storage: "database"
+    parallels: 6
+    auto_scaler: adaptive
+```
+
+As estatísticas do auto-scaler (efficiency, throughput, estado) são enviadas ao server via control channel e visíveis na WebUI.
 
 ---
 

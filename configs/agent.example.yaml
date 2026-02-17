@@ -26,6 +26,7 @@ backups:
     storage: "home-dirs"
     schedule: "0 */6 * * *"        # A cada 6 horas
     parallels: 4                   # 4 streams paralelos
+    auto_scaler: efficiency        # efficiency (padrão) ou adaptive (probe-and-measure)
     sources:
       - path: /home
       - path: /etc

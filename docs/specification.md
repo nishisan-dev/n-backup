@@ -344,10 +344,12 @@ backups:
   - name: "home"
     storage: "home-dirs"
     parallels: 4         # 4 streams paralelos
+    auto_scaler: adaptive # efficiency (padrão) ou adaptive
 ```
 
 - **parallels**: `0` desabilita (single stream), `1-8` define o máximo de streams.
-- O agent usa um **Dispatcher** (round-robin) e um **AutoScaler** (histerese) para distribuir chunks entre streams.
+- **auto_scaler**: `efficiency` (threshold-based, padrão) ou `adaptive` (probe-and-measure).
+- O agent usa um **Dispatcher** (round-robin) e um **AutoScaler** (histerese ou probe) para distribuir chunks entre streams.
 
 ### 3.6 Control Channel Protocol (v1.3.8+)
 
@@ -475,6 +477,24 @@ Solicita que o agent espere antes de iniciar backup.
 
 Enviado periodicamente pelo agent junto com ControlPing. O server popula `TotalObjects`, `ObjectsSent` e `WalkComplete` na `ParallelSession` para cálculo de progresso e ETA na Web UI.
 
+##### ControlAutoScaleStats (Agent → Server) (v2.1.2+)
+
+```
+┌──────────┬────────────┬─────────────┬──────────┬──────────────┬────────────┬───────┬─────────────┐
+│ "CASS"   │ Efficiency  │ ProducerMBs  │ DrainMBs  │ ActiveStreams │ MaxStreams  │ State │ ProbeActive │
+│ 4 bytes  │ 4B float32  │ 4B float32   │ 4B float32│ 1 byte       │ 1 byte     │ 1B    │ 1 byte      │
+└──────────┴────────────┴─────────────┴──────────┴──────────────┴────────────┴───────┴─────────────┘
+```
+
+- **Magic**: `0x43 0x41 0x53 0x53` ("CASS")
+- **Efficiency**: razão producer/drain (> 1.0 = produzindo mais rápido que drenando)
+- **ProducerMBs / DrainMBs**: throughput em MB/s
+- **ActiveStreams / MaxStreams**: streams em uso e limite configurado
+- **State**: `0` = Stable, `1` = ScalingUp, `2` = ScaleDown, `3` = Probing
+- **ProbeActive**: `1` se há um probe de stream em andamento
+
+Enviado periodicamente junto com ControlPing. O server armazena as métricas na `ParallelSession` e as expõe via API de sessões e WebUI.
+
 #### RTT EWMA
 
 O RTT é calculado via Exponentially Weighted Moving Average (α = 0.25):
@@ -521,6 +541,16 @@ backups:
       - path: /app/scripts
     exclude:
       - "*.log"
+
+  - name: "home"
+    storage: "home-dirs"
+    schedule: "0 */6 * * *"
+    parallels: 4
+    auto_scaler: efficiency  # efficiency (padrão) ou adaptive
+    sources:
+      - path: /home
+    exclude:
+      - ".git/**"
 
 retry:
   max_attempts: 5
