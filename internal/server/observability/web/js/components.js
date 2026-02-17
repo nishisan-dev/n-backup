@@ -502,6 +502,12 @@ const Components = {
     renderAutoScaleInfo(as) {
         if (!as) return '';
 
+        // Se já está no máximo de streams, scaling_up não faz sentido — mostra stable
+        let effectiveState = as.state;
+        if (effectiveState === 'scaling_up' && as.active_streams >= as.max_streams) {
+            effectiveState = 'stable';
+        }
+
         // Badge de estado
         const stateMap = {
             stable: { badge: 'badge-running', label: '● stable' },
@@ -509,7 +515,7 @@ const Components = {
             scaling_down: { badge: 'badge-warn', label: '▼ scaling down' },
             probing: { badge: 'badge-probing', label: '◉ probing' },
         };
-        const st = stateMap[as.state] || stateMap.stable;
+        const st = stateMap[effectiveState] || stateMap.stable;
 
         // Efficiency gauge (0-2 range mapeado para 0-100%)
         const effPct = Math.min(100, Math.round(as.efficiency * 50));

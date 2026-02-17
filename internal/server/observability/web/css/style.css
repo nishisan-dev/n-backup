@@ -512,6 +512,12 @@ body {
     animation: pulse 2s infinite;
 }
 
+.badge-finalizing {
+    background: rgba(6, 182, 212, 0.15);
+    color: var(--accent-cyan);
+    animation: pulse 2s infinite;
+}
+
 .badge-success {
     background: rgba(34, 197, 94, 0.15);
     color: #22c55e;
