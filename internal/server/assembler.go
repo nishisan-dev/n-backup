@@ -66,6 +66,28 @@ type ChunkAssembler struct {
 	logger          *slog.Logger
 }
 
+// AssemblerStats contém métricas do estado atual do assembler.
+type AssemblerStats struct {
+	NextExpectedSeq uint32
+	PendingChunks   int
+	PendingMemBytes int64
+	TotalBytes      int64
+	Finalized       bool
+}
+
+// Stats retorna um snapshot das métricas do assembler.
+func (ca *ChunkAssembler) Stats() AssemblerStats {
+	ca.mu.Lock()
+	defer ca.mu.Unlock()
+	return AssemblerStats{
+		NextExpectedSeq: ca.nextExpectedSeq,
+		PendingChunks:   len(ca.pendingChunks),
+		PendingMemBytes: ca.pendingMemBytes,
+		TotalBytes:      ca.totalBytes,
+		Finalized:       ca.finalized,
+	}
+}
+
 // pendingChunk representa um chunk recebido fora de ordem.
 // Pode estar em memória (data) ou em arquivo temporário (filePath).
 type pendingChunk struct {

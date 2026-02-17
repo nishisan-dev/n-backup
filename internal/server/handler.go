@@ -18,6 +18,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/nishisan-dev/n-backup/internal/config"
@@ -82,6 +83,7 @@ type ControlConnInfo struct {
 	ConnectedAt time.Time
 	RemoteAddr  string
 	KeepaliveS  uint32
+	Stats       atomic.Value // *observability.AgentStats
 }
 
 // NewHandler cria um novo Handler.
@@ -140,6 +142,11 @@ func (h *Handler) ConnectedAgents() []observability.AgentInfo {
 			return true
 		})
 
+		var stats *observability.AgentStats
+		if s := cci.Stats.Load(); s != nil {
+			stats = s.(*observability.AgentStats)
+		}
+
 		agents = append(agents, observability.AgentInfo{
 			Name:          agentName,
 			RemoteAddr:    cci.RemoteAddr,
@@ -148,6 +155,7 @@ func (h *Handler) ConnectedAgents() []observability.AgentInfo {
 			KeepaliveS:    cci.KeepaliveS,
 			HasSession:    hasSession,
 			ClientVersion: clientVersion,
+			Stats:         stats,
 		})
 		return true
 	})
@@ -225,6 +233,13 @@ func (h *Handler) SessionsSnapshot() []observability.SessionSummary {
 				ObjectsSent:    sentObj,
 				WalkComplete:   walkDone,
 				ETA:            eta,
+				Assembler: &observability.AssemblerStats{
+					NextExpectedSeq: s.Assembler.Stats().NextExpectedSeq,
+					PendingChunks:   s.Assembler.Stats().PendingChunks,
+					PendingMemBytes: s.Assembler.Stats().PendingMemBytes,
+					TotalBytes:      s.Assembler.Stats().TotalBytes,
+					Finalized:       s.Assembler.Stats().Finalized,
+				},
 			})
 		}
 		return true
@@ -378,6 +393,13 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 				ObjectsSent:    sentObj,
 				WalkComplete:   walkDone,
 				ETA:            eta,
+				Assembler: &observability.AssemblerStats{
+					NextExpectedSeq: s.Assembler.Stats().NextExpectedSeq,
+					PendingChunks:   s.Assembler.Stats().PendingChunks,
+					PendingMemBytes: s.Assembler.Stats().PendingMemBytes,
+					TotalBytes:      s.Assembler.Stats().TotalBytes,
+					Finalized:       s.Assembler.Stats().Finalized,
+				},
 			},
 			Streams: streams,
 		}, true
@@ -798,7 +820,7 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 		switch magic {
 		case protocol.MagicControlPing:
 			// Agent enviou PING → responde com PONG
-			timestamp, err := protocol.ReadControlPingPayload(conn)
+			ping, err := protocol.ReadControlPingPayload(conn)
 			if err != nil {
 				logger.Warn("control channel: reading ping payload", "error", err)
 				return
@@ -811,11 +833,17 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 				serverLoad = 1.0
 			}
 
-			// TODO: implementar disk free real com syscall.Statfs
-			var diskFree uint32 = 0
+			// Disk free do volume atual (MB)
+			var diskFree uint32
+			var stat syscall.Statfs_t
+			if err := syscall.Statfs(".", &stat); err == nil {
+				// Bavail * Bsize = bytes available to non-root users
+				// / 1024 / 1024 = MB
+				diskFree = uint32(stat.Bavail * uint64(stat.Bsize) / 1024 / 1024)
+			}
 
 			writeMu.Lock()
-			err = protocol.WriteControlPong(conn, timestamp, serverLoad, diskFree)
+			err = protocol.WriteControlPong(conn, ping, serverLoad, diskFree)
 			writeMu.Unlock()
 			if err != nil {
 				logger.Warn("control channel pong write failed", "error", err)
@@ -823,9 +851,28 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 			}
 
 			logger.Debug("control channel pong sent",
-				"timestamp", timestamp,
+				"timestamp", ping,
 				"server_load", serverLoad,
 			)
+
+		case protocol.MagicControlStats:
+			// Agent enviou Stats
+			stats, err := protocol.ReadControlStatsPayload(conn)
+			if err != nil {
+				logger.Warn("control channel: reading stats payload", "error", err)
+				return
+			}
+
+			// Atualiza stats na info da conexão
+			if raw, ok := h.controlConns.Load(agentName); ok {
+				cci := raw.(*ControlConnInfo)
+				cci.Stats.Store(&observability.AgentStats{
+					CPUPercent:       stats.CPUPercent,
+					MemoryPercent:    stats.MemoryPercent,
+					DiskUsagePercent: stats.DiskUsagePercent,
+					LoadAverage:      stats.LoadAverage,
+				})
+			}
 
 		case protocol.MagicControlRotateACK:
 			// Agent confirmou drain de stream após ControlRotate

@@ -40,10 +40,20 @@ type SessionSummary struct {
 
 	// Campos de progresso vindos do agent (via ControlProgress).
 	// Zero values quando o agent não reporta progresso.
-	TotalObjects uint32 `json:"total_objects,omitempty"`
-	ObjectsSent  uint32 `json:"objects_sent,omitempty"`
-	WalkComplete bool   `json:"walk_complete,omitempty"`
-	ETA          string `json:"eta,omitempty"` // "∞" até o agent reportar
+	TotalObjects uint32          `json:"total_objects,omitempty"`
+	ObjectsSent  uint32          `json:"objects_sent,omitempty"`
+	WalkComplete bool            `json:"walk_complete,omitempty"`
+	ETA          string          `json:"eta,omitempty"` // "∞" até o agent reportar
+	Assembler    *AssemblerStats `json:"assembler,omitempty"`
+}
+
+// AssemblerStats representa o estado do montador de chunks.
+type AssemblerStats struct {
+	NextExpectedSeq uint32 `json:"next_expected_seq"`
+	PendingChunks   int    `json:"pending_chunks"`
+	PendingMemBytes int64  `json:"pending_mem_bytes"`
+	TotalBytes      int64  `json:"total_bytes"`
+	Finalized       bool   `json:"finalized"`
 }
 
 // SessionDetail é retornado por GET /api/v1/sessions/{id}.
@@ -99,13 +109,22 @@ type FlowRotationSafe struct {
 	Cooldown   string  `json:"cooldown,omitempty"`
 }
 
+// AgentStats contém métricas de sistema do agente.
+type AgentStats struct {
+	CPUPercent       float32 `json:"cpu_percent"`
+	MemoryPercent    float32 `json:"memory_percent"`
+	DiskUsagePercent float32 `json:"disk_usage_percent"`
+	LoadAverage      float32 `json:"load_average"`
+}
+
 // AgentInfo representa um agente conectado via control channel.
 type AgentInfo struct {
-	Name          string `json:"name"`
-	RemoteAddr    string `json:"remote_addr"`
-	ConnectedAt   string `json:"connected_at"`
-	ConnectedFor  string `json:"connected_for"` // duração legível (ex: "1h23m")
-	KeepaliveS    uint32 `json:"keepalive_s"`
-	HasSession    bool   `json:"has_session"`
-	ClientVersion string `json:"client_version,omitempty"` // extraído da sessão, se houver
+	Name          string      `json:"name"`
+	RemoteAddr    string      `json:"remote_addr"`
+	ConnectedAt   string      `json:"connected_at"`
+	ConnectedFor  string      `json:"connected_for"` // duração legível (ex: "1h23m")
+	KeepaliveS    uint32      `json:"keepalive_s"`
+	HasSession    bool        `json:"has_session"`
+	ClientVersion string      `json:"client_version,omitempty"` // extraído da sessão, se houver
+	Stats         *AgentStats `json:"stats,omitempty"`          // métricas atuais
 }
