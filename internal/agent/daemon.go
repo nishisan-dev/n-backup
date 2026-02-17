@@ -19,6 +19,7 @@ import (
 
 	"github.com/nishisan-dev/n-backup/internal/config"
 	"github.com/nishisan-dev/n-backup/internal/pki"
+	"github.com/nishisan-dev/n-backup/internal/protocol"
 )
 
 // RunDaemon inicia o agent em modo daemon com um cron job por backup.
@@ -48,6 +49,22 @@ func RunDaemon(configPath string, cfg *config.AgentConfig, logger *slog.Logger) 
 
 	sched.Start()
 
+	// System monitor — coleta métricas a cada 15s
+	sysMonitor := NewSystemMonitor(logger)
+	sysMonitor.Start()
+
+	if controlCh != nil {
+		controlCh.SetStatsProvider(func() *protocol.ControlStats {
+			s := sysMonitor.Stats()
+			return &protocol.ControlStats{
+				CPUPercent:       float32(s.CPUPercent),
+				MemoryPercent:    float32(s.MemoryPercent),
+				DiskUsagePercent: float32(s.DiskUsagePercent),
+				LoadAverage:      float32(s.LoadAverage),
+			}
+		})
+	}
+
 	// Stats reporter — emite métricas a cada 5 minutos
 	stats := NewStatsReporter(sched, logger)
 	stats.Start()
@@ -71,6 +88,7 @@ func RunDaemon(configPath string, cfg *config.AgentConfig, logger *slog.Logger) 
 			// Para scheduler, stats e control channel atuais
 			stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			stats.Stop()
+			sysMonitor.Stop()
 			sched.Stop(stopCtx)
 			if controlCh != nil {
 				controlCh.Stop()
@@ -93,6 +111,22 @@ func RunDaemon(configPath string, cfg *config.AgentConfig, logger *slog.Logger) 
 				return fmt.Errorf("reload scheduler: %w", err)
 			}
 			sched.Start()
+
+			// Recria SystemMonitor
+			sysMonitor = NewSystemMonitor(logger)
+			sysMonitor.Start()
+
+			if controlCh != nil {
+				controlCh.SetStatsProvider(func() *protocol.ControlStats {
+					s := sysMonitor.Stats()
+					return &protocol.ControlStats{
+						CPUPercent:       float32(s.CPUPercent),
+						MemoryPercent:    float32(s.MemoryPercent),
+						DiskUsagePercent: float32(s.DiskUsagePercent),
+						LoadAverage:      float32(s.LoadAverage),
+					}
+				})
+			}
 			stats = NewStatsReporter(sched, logger)
 			stats.Start()
 
@@ -107,6 +141,7 @@ func RunDaemon(configPath string, cfg *config.AgentConfig, logger *slog.Logger) 
 		logger.Info("received signal, shutting down", "signal", sig)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		stats.Stop()
+		sysMonitor.Stop()
 		sched.Stop(ctx)
 		if controlCh != nil {
 			controlCh.Stop()

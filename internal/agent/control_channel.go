@@ -65,6 +65,9 @@ type ControlChannel struct {
 	// Chamado a cada ping tick para enviar ControlProgress ao server.
 	progressProvider func() (totalObjects, objectsSent uint32, walkComplete bool)
 
+	// Callback que retorna stats do sistema.
+	statsProvider func() *protocol.ControlStats
+
 	// Lifecycle
 	stopCh chan struct{}
 	stopMu sync.Once
@@ -96,6 +99,12 @@ func (cc *ControlChannel) SetProgressProvider(fn func() (totalObjects, objectsSe
 	cc.progressProvider = fn
 }
 
+// SetStatsProvider define o callback que fornece estatísticas do sistema.
+// Chamado a cada ping tick; envia ControlStats ao server.
+func (cc *ControlChannel) SetStatsProvider(fn func() *protocol.ControlStats) {
+	cc.statsProvider = fn
+}
+
 // SendProgress envia um frame ControlProgress ao server imediatamente.
 // Thread-safe via writeMu.
 func (cc *ControlChannel) SendProgress(totalObjects, objectsSent uint32, walkComplete bool) error {
@@ -113,6 +122,27 @@ func (cc *ControlChannel) SendProgress(totalObjects, objectsSent uint32, walkCom
 
 	if err != nil {
 		cc.logger.Warn("failed to send ControlProgress", "error", err)
+	}
+	return err
+}
+
+// SendStats envia um frame ControlStats ao server imediatamente.
+// Thread-safe via writeMu.
+func (cc *ControlChannel) SendStats(stats *protocol.ControlStats) error {
+	cc.connMu.Lock()
+	conn := cc.conn
+	cc.connMu.Unlock()
+
+	if conn == nil {
+		return nil
+	}
+
+	cc.writeMu.Lock()
+	err := protocol.WriteControlStats(conn, stats.CPUPercent, stats.MemoryPercent, stats.DiskUsagePercent, stats.LoadAverage)
+	cc.writeMu.Unlock()
+
+	if err != nil {
+		cc.logger.Warn("failed to send ControlStats", "error", err)
 	}
 	return err
 }
@@ -441,6 +471,12 @@ func (cc *ControlChannel) pingLoop() {
 				total, sent, walk := cc.progressProvider()
 				if total > 0 {
 					err = protocol.WriteControlProgress(conn, total, sent, walk)
+				}
+			}
+			if err == nil && cc.statsProvider != nil {
+				stats := cc.statsProvider()
+				if stats != nil {
+					err = protocol.WriteControlStats(conn, stats.CPUPercent, stats.MemoryPercent, stats.DiskUsagePercent, stats.LoadAverage)
 				}
 			}
 			cc.writeMu.Unlock()
