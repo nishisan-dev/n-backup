@@ -105,7 +105,10 @@ func Stream(ctx context.Context, scanner *Scanner, dest io.Writer, progress *Pro
 func newCompressor(w io.Writer, mode byte) (io.WriteCloser, error) {
 	switch mode {
 	case protocol.CompressionZstd:
-		return zstd.NewWriter(w, zstd.WithEncoderLevel(zstd.SpeedDefault))
+		return zstd.NewWriter(w,
+			zstd.WithEncoderLevel(zstd.SpeedDefault),
+			zstd.WithEncoderConcurrency(runtime.GOMAXPROCS(0)),
+		)
 	default: // CompressionGzip
 		gzWriter, err := pgzip.NewWriterLevel(w, pgzip.BestSpeed)
 		if err != nil {
