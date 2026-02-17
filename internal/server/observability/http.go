@@ -69,14 +69,32 @@ func NewRouter(metrics HandlerMetrics, cfg *config.ServerConfig, acl *ACL, store
 	return acl.Middleware(mux)
 }
 
-// handleHealth retorna status do processo, uptime e versão.
+// handleHealth retorna status do processo, uptime, versão e métricas de runtime.
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	uptime := time.Since(startTime)
+
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+
+	var lastPauseMs float64
+	if mem.NumGC > 0 {
+		// PauseNs é um ring buffer circular de 256 posições
+		lastPauseMs = float64(mem.PauseNs[(mem.NumGC+255)%256]) / 1e6
+	}
+
 	resp := HealthResponse{
 		Status:  "ok",
 		Uptime:  uptime.String(),
 		Version: Version,
 		Go:      runtime.Version(),
+		Stats: &ServerStats{
+			GoRoutines:  runtime.NumGoroutine(),
+			HeapAllocMB: float64(mem.HeapAlloc) / (1024 * 1024),
+			HeapSysMB:   float64(mem.HeapSys) / (1024 * 1024),
+			GCPauseMs:   lastPauseMs,
+			GCCycles:    mem.NumGC,
+			CPUCores:    runtime.NumCPU(),
+		},
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

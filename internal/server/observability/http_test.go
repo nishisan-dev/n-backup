@@ -88,6 +88,20 @@ func TestHealth_ReturnsOK(t *testing.T) {
 	if resp.Version == "" {
 		t.Error("expected version field")
 	}
+
+	// Fase 5: Server Stats
+	if resp.Stats == nil {
+		t.Fatal("expected stats field in health response")
+	}
+	if resp.Stats.GoRoutines <= 0 {
+		t.Errorf("expected goroutines > 0, got %d", resp.Stats.GoRoutines)
+	}
+	if resp.Stats.CPUCores <= 0 {
+		t.Errorf("expected cpu_cores > 0, got %d", resp.Stats.CPUCores)
+	}
+	if resp.Stats.HeapAllocMB <= 0 {
+		t.Errorf("expected heap_alloc_mb > 0, got %f", resp.Stats.HeapAllocMB)
+	}
 }
 
 func TestMetrics_ReturnsData(t *testing.T) {

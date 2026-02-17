@@ -140,6 +140,15 @@ const Components = {
         document.getElementById('srv-uptime').textContent = this.formatUptime(health.uptime);
         document.getElementById('srv-go').textContent = health.go || '—';
         document.getElementById('srv-status').innerHTML = this.statusBadge(health.status === 'ok' ? 'running' : 'degraded');
+
+        // Server Stats (Fase 5)
+        if (health.stats) {
+            const s = health.stats;
+            document.getElementById('srv-goroutines').textContent = s.goroutines;
+            document.getElementById('srv-heap').textContent = s.heap_alloc_mb.toFixed(1) + ' MB';
+            document.getElementById('srv-gc').textContent = s.gc_pause_ms.toFixed(2) + ' ms';
+            document.getElementById('srv-cpu').textContent = s.cpu_cores;
+        }
     },
 
     // Renderiza tabela resumida de sessões no overview
@@ -220,13 +229,18 @@ const Components = {
         body.innerHTML = storages.map(s => {
             const pct = s.usage_percent || 0;
             let colorClass = 'low';
-            if (pct >= 90) colorClass = 'high';
-            else if (pct >= 70) colorClass = 'med';
+            let criticalClass = '';
+            let alertIcon = '';
+            if (pct >= 90) {
+                colorClass = 'high';
+                criticalClass = ' gauge-critical';
+                alertIcon = '<span class="alert-icon" title="Disco crítico!">⚠️</span>';
+            } else if (pct >= 70) colorClass = 'med';
 
             return `
-            <div class="storage-card">
+            <div class="storage-card${criticalClass}">
                 <div class="storage-header">
-                    <span class="storage-name">${this.escapeHtml(s.name)}</span>
+                    <span class="storage-name">${this.escapeHtml(s.name)}${alertIcon}</span>
                     <div class="storage-badges">
                         ${this.compressionBadge(s.compression_mode === 'zst' ? 'zst' : 'gzip')}
                         <span class="badge badge-neutral">${this.escapeHtml(s.assembler_mode)}</span>
@@ -557,5 +571,34 @@ const Components = {
                 <td>${this.formatDateTime(e.finished_at)}</td>
             </tr>
         `).join('');
+    },
+    // Exporta eventos carregados como JSON ou CSV
+    exportEvents(events, format = 'json') {
+        if (!events || events.length === 0) return;
+
+        let content, mimeType, ext;
+        if (format === 'csv') {
+            const headers = ['timestamp', 'level', 'type', 'agent', 'message'];
+            const rows = events.map(e =>
+                headers.map(h => '"' + String(e[h] || '').replace(/"/g, '""') + '"').join(',')
+            );
+            content = [headers.join(','), ...rows].join('\n');
+            mimeType = 'text/csv';
+            ext = 'csv';
+        } else {
+            content = JSON.stringify(events, null, 2);
+            mimeType = 'application/json';
+            ext = 'json';
+        }
+
+        const blob = new Blob([content], { type: mimeType });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `nbackup-events-${new Date().toISOString().slice(0, 10)}.${ext}`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
     },
 };
