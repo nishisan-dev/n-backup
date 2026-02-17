@@ -21,6 +21,7 @@ type mockMetrics struct {
 	sessions []SessionSummary
 	details  map[string]*SessionDetail
 	agents   []AgentInfo
+	storages []StorageUsage
 }
 
 func (m *mockMetrics) MetricsSnapshot() MetricsData       { return m.data }
@@ -32,13 +33,15 @@ func (m *mockMetrics) SessionDetail(id string) (*SessionDetail, bool) {
 	d, ok := m.details[id]
 	return d, ok
 }
-func (m *mockMetrics) ConnectedAgents() []AgentInfo { return m.agents }
+func (m *mockMetrics) ConnectedAgents() []AgentInfo         { return m.agents }
+func (m *mockMetrics) StorageUsageSnapshot() []StorageUsage { return m.storages }
 
 func newMockMetrics() *mockMetrics {
 	return &mockMetrics{
 		sessions: []SessionSummary{},
 		details:  map[string]*SessionDetail{},
 		agents:   []AgentInfo{},
+		storages: []StorageUsage{},
 	}
 }
 
@@ -354,5 +357,71 @@ func TestAgents_WithData(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected agent web-01 with session and version 1.7.2")
+	}
+}
+
+func TestStorages_EmptyList(t *testing.T) {
+	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t))
+
+	req := httptest.NewRequest("GET", "/api/v1/storages", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var resp []StorageUsage
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if len(resp) != 0 {
+		t.Errorf("expected empty storages, got %d", len(resp))
+	}
+}
+
+func TestStorages_WithData(t *testing.T) {
+	mock := newMockMetrics()
+	mock.storages = []StorageUsage{
+		{
+			Name:            "default",
+			BaseDir:         "/tmp/backups",
+			MaxBackups:      5,
+			CompressionMode: "gzip",
+			AssemblerMode:   "eager",
+			TotalBytes:      100 * 1024 * 1024 * 1024,
+			UsedBytes:       60 * 1024 * 1024 * 1024,
+			FreeBytes:       40 * 1024 * 1024 * 1024,
+			UsagePercent:    60.0,
+			BackupsCount:    3,
+		},
+	}
+	router := NewRouter(mock, testCfg(), localhostACL(t))
+
+	req := httptest.NewRequest("GET", "/api/v1/storages", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var resp []StorageUsage
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if len(resp) != 1 {
+		t.Fatalf("expected 1 storage, got %d", len(resp))
+	}
+	if resp[0].Name != "default" {
+		t.Errorf("expected storage name 'default', got %q", resp[0].Name)
+	}
+	if resp[0].UsagePercent != 60.0 {
+		t.Errorf("expected usage_percent 60.0, got %f", resp[0].UsagePercent)
+	}
+	if resp[0].BackupsCount != 3 {
+		t.Errorf("expected backups_count 3, got %d", resp[0].BackupsCount)
 	}
 }

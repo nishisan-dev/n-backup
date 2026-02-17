@@ -134,3 +134,17 @@ type AgentInfo struct {
 	ClientVersion string      `json:"client_version,omitempty"` // extraído da sessão, se houver
 	Stats         *AgentStats `json:"stats,omitempty"`          // métricas atuais
 }
+
+// StorageUsage representa o uso de disco real de um storage.
+type StorageUsage struct {
+	Name            string  `json:"name"`
+	BaseDir         string  `json:"base_dir"`
+	MaxBackups      int     `json:"max_backups"`
+	CompressionMode string  `json:"compression_mode"`
+	AssemblerMode   string  `json:"assembler_mode"`
+	TotalBytes      uint64  `json:"total_bytes"`
+	UsedBytes       uint64  `json:"used_bytes"`
+	FreeBytes       uint64  `json:"free_bytes"`
+	UsagePercent    float64 `json:"usage_percent"`
+	BackupsCount    int     `json:"backups_count"`
+}

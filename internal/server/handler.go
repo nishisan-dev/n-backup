@@ -169,7 +169,74 @@ func (h *Handler) ConnectedAgents() []observability.AgentInfo {
 	return agents
 }
 
-// SessionsSnapshot retorna lista de sessões ativas como DTOs.
+// StorageUsageSnapshot retorna uso de disco real para cada storage configurado.
+// Implementa observability.HandlerMetrics.
+func (h *Handler) StorageUsageSnapshot() []observability.StorageUsage {
+	var result []observability.StorageUsage
+
+	// Ordena nomes para output determinístico
+	names := make([]string, 0, len(h.cfg.Storages))
+	for name := range h.cfg.Storages {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		si := h.cfg.Storages[name]
+		su := observability.StorageUsage{
+			Name:            name,
+			BaseDir:         si.BaseDir,
+			MaxBackups:      si.MaxBackups,
+			CompressionMode: si.CompressionMode,
+			AssemblerMode:   si.AssemblerMode,
+		}
+
+		// Obtém uso de disco via Statfs
+		var stat syscall.Statfs_t
+		if err := syscall.Statfs(si.BaseDir, &stat); err == nil {
+			su.TotalBytes = stat.Blocks * uint64(stat.Bsize)
+			su.FreeBytes = stat.Bavail * uint64(stat.Bsize)
+			su.UsedBytes = su.TotalBytes - (stat.Bfree * uint64(stat.Bsize))
+			if su.TotalBytes > 0 {
+				su.UsagePercent = float64(su.UsedBytes) / float64(su.TotalBytes) * 100.0
+			}
+		}
+
+		// Conta backups existentes no diretório
+		su.BackupsCount = countBackups(si.BaseDir)
+
+		result = append(result, su)
+	}
+
+	return result
+}
+
+// countBackups conta recursivamente quantos arquivos de backup existem no diretório.
+func countBackups(baseDir string) int {
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		return 0
+	}
+
+	count := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			// Cada subdiretório é um agent/backup, conta os .tar.gz/.tar.zst dentro
+			subEntries, err := os.ReadDir(baseDir + "/" + e.Name())
+			if err != nil {
+				continue
+			}
+			for _, se := range subEntries {
+				name := se.Name()
+				if !se.IsDir() && (len(name) > 7 && name[len(name)-7:] == ".tar.gz" || len(name) > 8 && name[len(name)-8:] == ".tar.zst") {
+					count++
+				}
+			}
+		}
+	}
+	return count
+}
+
 // Implementa observability.HandlerMetrics.
 func (h *Handler) SessionsSnapshot() []observability.SessionSummary {
 	var sessions []observability.SessionSummary
