@@ -349,6 +349,18 @@ func ReadControlProgress(r io.Reader) (*ControlProgress, error) {
 	}, nil
 }
 
+// WriteControlStatsPayload escreve apenas o payload de stats (16B) sem magic.
+// Usado no handshake do control channel para enviar stats iniciais inline.
+func WriteControlStatsPayload(w io.Writer, cpu, mem, disk, load float32) error {
+	buf := make([]byte, 16)
+	binary.BigEndian.PutUint32(buf[0:4], math.Float32bits(cpu))
+	binary.BigEndian.PutUint32(buf[4:8], math.Float32bits(mem))
+	binary.BigEndian.PutUint32(buf[8:12], math.Float32bits(disk))
+	binary.BigEndian.PutUint32(buf[12:16], math.Float32bits(load))
+	_, err := w.Write(buf)
+	return err
+}
+
 // WriteControlStats escreve o frame ControlStats (Agent → Server).
 func WriteControlStats(w io.Writer, cpu, mem, disk, load float32) error {
 	buf := make([]byte, 20) // 4B magic + 4B*4 floats

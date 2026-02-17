@@ -32,6 +32,9 @@ const maxMissedPings = 3
 // ewmaAlpha é o fator de suavização para o EWMA do RTT.
 const ewmaAlpha = 0.25
 
+// Version é a versão do agent, preenchida via ldflags no build (-X ...Version=x.y.z).
+var Version = "dev"
+
 // ControlChannel gerencia uma conexão TLS persistente com o server para
 // keep-alive (PING/PONG), medição contínua de RTT, pre-flight check,
 // e recepção de comandos do server (ControlRotate para flow rotation graceful).
@@ -314,6 +317,27 @@ func (cc *ControlChannel) connect() error {
 	handshake[6] = byte(intervalSecs >> 8)
 	handshake[7] = byte(intervalSecs)
 	if _, err := tlsConn.Write(handshake); err != nil {
+		tlsConn.Close()
+		return err
+	}
+
+	// Envia version do agent (string terminada em newline)
+	if _, err := tlsConn.Write([]byte(Version + "\n")); err != nil {
+		tlsConn.Close()
+		return err
+	}
+
+	// Envia stats iniciais (16B: CPU, Mem, Disk, Load)
+	var cpu, mem, disk, load float32
+	if cc.statsProvider != nil {
+		if st := cc.statsProvider(); st != nil {
+			cpu = st.CPUPercent
+			mem = st.MemoryPercent
+			disk = st.DiskUsagePercent
+			load = st.LoadAverage
+		}
+	}
+	if err := protocol.WriteControlStatsPayload(tlsConn, cpu, mem, disk, load); err != nil {
 		tlsConn.Close()
 		return err
 	}

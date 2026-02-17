@@ -80,11 +80,12 @@ type Handler struct {
 
 // ControlConnInfo armazena metadata de um control channel conectado.
 type ControlConnInfo struct {
-	Conn        net.Conn
-	ConnectedAt time.Time
-	RemoteAddr  string
-	KeepaliveS  uint32
-	Stats       atomic.Value // *observability.AgentStats
+	Conn          net.Conn
+	ConnectedAt   time.Time
+	RemoteAddr    string
+	KeepaliveS    uint32
+	ClientVersion string
+	Stats         atomic.Value // *observability.AgentStats
 }
 
 // NewHandler cria um novo Handler.
@@ -124,19 +125,23 @@ func (h *Handler) ConnectedAgents() []observability.AgentInfo {
 
 		// Verifica se há sessão ativa para este agent e extrai client version
 		hasSession := false
-		clientVersion := ""
+		clientVersion := cci.ClientVersion // versão do handshake do control channel
 		h.sessions.Range(func(_, sv interface{}) bool {
 			switch s := sv.(type) {
 			case *PartialSession:
 				if s.AgentName == agentName {
 					hasSession = true
-					clientVersion = s.ClientVersion
+					if s.ClientVersion != "" {
+						clientVersion = s.ClientVersion // sessão tem prioridade
+					}
 					return false
 				}
 			case *ParallelSession:
 				if s.AgentName == agentName {
 					hasSession = true
-					clientVersion = s.ClientVersion
+					if s.ClientVersion != "" {
+						clientVersion = s.ClientVersion // sessão tem prioridade
+					}
 					return false
 				}
 			}
@@ -818,6 +823,24 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 	// Read timeout = 2.5x keepalive_interval para tolerar jitter + 1 ping perdido
 	readTimeout := time.Duration(intervalSecs) * time.Second * 5 / 2
 
+	// Lê version do agent (string terminada em newline)
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	clientVersion, err := readUntilNewline(conn)
+	if err != nil {
+		logger.Error("control channel: reading client version", "error", err)
+		return
+	}
+	conn.SetReadDeadline(time.Time{})
+
+	// Lê stats iniciais do agent (16B: CPU, Mem, Disk, Load)
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	initialStats, err := protocol.ReadControlStatsPayload(conn)
+	if err != nil {
+		logger.Error("control channel: reading initial stats", "error", err)
+		return
+	}
+	conn.SetReadDeadline(time.Time{})
+
 	// Lê agent name do TLS peer cert CN (para registrar control conn por agent)
 	agentName := h.extractAgentName(conn, logger)
 	if agentName == "" {
@@ -827,11 +850,18 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 	// Registra control conn e mutex de write para este agent
 	writeMu := &sync.Mutex{}
 	cci := &ControlConnInfo{
-		Conn:        conn,
-		ConnectedAt: time.Now(),
-		RemoteAddr:  conn.RemoteAddr().String(),
-		KeepaliveS:  intervalSecs,
+		Conn:          conn,
+		ConnectedAt:   time.Now(),
+		RemoteAddr:    conn.RemoteAddr().String(),
+		KeepaliveS:    intervalSecs,
+		ClientVersion: clientVersion,
 	}
+	cci.Stats.Store(&observability.AgentStats{
+		CPUPercent:       initialStats.CPUPercent,
+		MemoryPercent:    initialStats.MemoryPercent,
+		DiskUsagePercent: initialStats.DiskUsagePercent,
+		LoadAverage:      initialStats.LoadAverage,
+	})
 	h.controlConns.Store(agentName, cci)
 	h.controlConnsMu.Store(agentName, writeMu)
 	defer h.controlConns.Delete(agentName)
