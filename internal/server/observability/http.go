@@ -28,6 +28,7 @@ type HandlerMetrics interface {
 	SessionDetail(id string) (*SessionDetail, bool)
 	ConnectedAgents() []AgentInfo
 	StorageUsageSnapshot() []StorageUsage
+	SessionHistorySnapshot() []SessionHistoryEntry
 }
 
 // MetricsData contém os dados de métricas coletados do Handler.
@@ -50,6 +51,7 @@ func NewRouter(metrics HandlerMetrics, cfg *config.ServerConfig, acl *ACL, store
 	mux.HandleFunc("GET /api/v1/sessions/{id}", makeSessionDetailHandler(metrics))
 	mux.HandleFunc("GET /api/v1/agents", makeAgentsHandler(metrics))
 	mux.HandleFunc("GET /api/v1/storages", makeStoragesHandler(metrics))
+	mux.HandleFunc("GET /api/v1/sessions/history", makeSessionHistoryHandler(metrics))
 	mux.HandleFunc("GET /api/v1/config/effective", makeConfigHandler(cfg))
 
 	// Events endpoint (se store fornecido)
@@ -178,6 +180,17 @@ func makeStoragesHandler(metrics HandlerMetrics) http.HandlerFunc {
 			storages = []StorageUsage{}
 		}
 		writeJSON(w, http.StatusOK, storages)
+	}
+}
+
+// makeSessionHistoryHandler retorna um handler que lista sessões finalizadas.
+func makeSessionHistoryHandler(metrics HandlerMetrics) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		history := metrics.SessionHistorySnapshot()
+		if history == nil {
+			history = []SessionHistoryEntry{}
+		}
+		writeJSON(w, http.StatusOK, history)
 	}
 }
 

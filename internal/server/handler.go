@@ -76,6 +76,9 @@ type Handler struct {
 
 	// Events store para observabilidade e persistência (nil quando WebUI desabilitada).
 	Events *observability.EventStore
+
+	// SessionHistory mantém histórico de sessões finalizadas (nil quando WebUI desabilitada).
+	SessionHistory *observability.SessionHistoryRing
 }
 
 // ControlConnInfo armazena metadata de um control channel conectado.
@@ -235,6 +238,36 @@ func countBackups(baseDir string) int {
 		}
 	}
 	return count
+}
+
+// recordSessionEnd registra uma sessão finalizada no SessionHistoryRing.
+// Chamado quando um backup (single ou parallel) termina com qualquer resultado.
+func (h *Handler) recordSessionEnd(sessionID, agent, storage, backup, mode, compression, result string, startedAt time.Time, bytesTotal int64) {
+	if h.SessionHistory == nil {
+		return
+	}
+	now := time.Now()
+	h.SessionHistory.Push(observability.SessionHistoryEntry{
+		SessionID:   sessionID,
+		Agent:       agent,
+		Storage:     storage,
+		Backup:      backup,
+		Mode:        mode,
+		Compression: compression,
+		StartedAt:   startedAt.Format(time.RFC3339),
+		FinishedAt:  now.Format(time.RFC3339),
+		Duration:    now.Sub(startedAt).Truncate(time.Second).String(),
+		BytesTotal:  bytesTotal,
+		Result:      result,
+	})
+}
+
+// SessionHistorySnapshot retorna as últimas sessões finalizadas.
+func (h *Handler) SessionHistorySnapshot() []observability.SessionHistoryEntry {
+	if h.SessionHistory == nil {
+		return []observability.SessionHistoryEntry{}
+	}
+	return h.SessionHistory.Recent(0)
 }
 
 // Implementa observability.HandlerMetrics.
@@ -1279,7 +1312,8 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	h.sessions.Delete(sessionID)
 
 	// Validação do trailer e commit
-	h.validateAndCommit(conn, writer, tmpPath, bytesReceived, storageInfo, logger)
+	result, dataSize := h.validateAndCommit(conn, writer, tmpPath, bytesReceived, storageInfo, logger)
+	h.recordSessionEnd(sessionID, agentName, storageName, backupName, "single", storageInfo.CompressionMode, result, now, dataSize)
 }
 
 // handleResume processa um pedido de resume do agent.
@@ -1378,7 +1412,8 @@ func (h *Handler) handleResume(ctx context.Context, conn net.Conn, logger *slog.
 		return
 	}
 
-	h.validateAndCommit(conn, writer, session.TmpPath, totalBytes, storageInfo, logger)
+	result, dataSize := h.validateAndCommit(conn, writer, session.TmpPath, totalBytes, storageInfo, logger)
+	h.recordSessionEnd(resume.SessionID, session.AgentName, session.StorageName, session.BackupName, "single", session.CompressionMode, result, session.CreatedAt, dataSize)
 }
 
 // receiveWithSACK lê dados do conn, escreve no tmpFile, e envia SACKs periódicos.
@@ -1442,14 +1477,15 @@ func (h *Handler) receiveWithSACK(ctx context.Context, reader io.Reader, sackWri
 }
 
 // validateAndCommit valida o trailer, checksum e comita o backup.
-func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath string, totalBytes int64, storageInfo config.StorageInfo, logger *slog.Logger) {
+// Retorna (resultado, dataSize). resultado: "ok", "checksum_mismatch" ou "write_error".
+func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath string, totalBytes int64, storageInfo config.StorageInfo, logger *slog.Logger) (string, int64) {
 	const trailerSize int64 = 4 + 32 + 8
 
 	if totalBytes < trailerSize {
 		logger.Error("received data too small", "bytes", totalBytes)
 		writer.Abort(tmpPath)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
-		return
+		return "write_error", 0
 	}
 
 	// Lê o trailer dos últimos 44 bytes do arquivo
@@ -1458,7 +1494,7 @@ func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath
 		logger.Error("reading trailer from file", "error", err)
 		writer.Abort(tmpPath)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
-		return
+		return "write_error", 0
 	}
 
 	// Trunca o arquivo para remover o trailer (mantém apenas os dados)
@@ -1467,7 +1503,7 @@ func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath
 		logger.Error("truncating temp file", "error", err)
 		writer.Abort(tmpPath)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
-		return
+		return "write_error", dataSize
 	}
 
 	// Calcula SHA-256 dos dados (sem trailer)
@@ -1476,7 +1512,7 @@ func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath
 		logger.Error("computing server checksum", "error", err)
 		writer.Abort(tmpPath)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
-		return
+		return "write_error", dataSize
 	}
 
 	// Compara checksums
@@ -1487,7 +1523,7 @@ func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath
 		)
 		writer.Abort(tmpPath)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusChecksumMismatch)
-		return
+		return "checksum_mismatch", dataSize
 	}
 
 	// Commit (rename atômico)
@@ -1495,7 +1531,7 @@ func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath
 	if err != nil {
 		logger.Error("committing backup", "error", err)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
-		return
+		return "write_error", dataSize
 	}
 
 	// Rotação
@@ -1510,17 +1546,19 @@ func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath
 	)
 
 	protocol.WriteFinalACK(conn, protocol.FinalStatusOK)
+	return "ok", dataSize
 }
 
 // validateAndCommitWithTrailer valida e comita um backup paralelo.
 // Diferente de validateAndCommit, o Trailer já foi recebido separadamente
 // pela conn de controle (não embutido no arquivo). O arquivo contém apenas dados.
-func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWriter, tmpPath string, totalBytes int64, trailer *protocol.Trailer, serverChecksum [32]byte, storageInfo config.StorageInfo, logger *slog.Logger) {
+// Retorna o resultado: "ok", "checksum_mismatch" ou "write_error".
+func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWriter, tmpPath string, totalBytes int64, trailer *protocol.Trailer, serverChecksum [32]byte, storageInfo config.StorageInfo, logger *slog.Logger) string {
 	if totalBytes == 0 {
 		logger.Error("no data received")
 		writer.Abort(tmpPath)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
-		return
+		return "write_error"
 	}
 
 	// Compara checksums
@@ -1531,7 +1569,7 @@ func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWrit
 		)
 		writer.Abort(tmpPath)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusChecksumMismatch)
-		return
+		return "checksum_mismatch"
 	}
 
 	// Verifica tamanho
@@ -1542,7 +1580,7 @@ func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWrit
 		)
 		writer.Abort(tmpPath)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
-		return
+		return "write_error"
 	}
 
 	// Commit (rename atômico)
@@ -1550,7 +1588,7 @@ func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWrit
 	if err != nil {
 		logger.Error("committing backup", "error", err)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
-		return
+		return "write_error"
 	}
 
 	// Rotação
@@ -1565,6 +1603,7 @@ func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWrit
 	)
 
 	protocol.WriteFinalACK(conn, protocol.FinalStatusOK)
+	return "ok"
 }
 
 // maxHandshakeFieldLen é o comprimento máximo permitido para campos do handshake
@@ -1824,7 +1863,8 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
 		return
 	}
-	h.validateAndCommitWithTrailer(conn, writer, assembledPath, totalBytes, trailer, serverChecksum, storageInfo, logger)
+	result := h.validateAndCommitWithTrailer(conn, writer, assembledPath, totalBytes, trailer, serverChecksum, storageInfo, logger)
+	h.recordSessionEnd(sessionID, agentName, storageName, backupName, "parallel", storageInfo.CompressionMode, result, now, totalBytes)
 }
 
 // receiveParallelStream recebe dados de um stream paralelo usando ChunkHeader framing.

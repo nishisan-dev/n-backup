@@ -33,8 +33,9 @@ func (m *mockMetrics) SessionDetail(id string) (*SessionDetail, bool) {
 	d, ok := m.details[id]
 	return d, ok
 }
-func (m *mockMetrics) ConnectedAgents() []AgentInfo         { return m.agents }
-func (m *mockMetrics) StorageUsageSnapshot() []StorageUsage { return m.storages }
+func (m *mockMetrics) ConnectedAgents() []AgentInfo                  { return m.agents }
+func (m *mockMetrics) StorageUsageSnapshot() []StorageUsage          { return m.storages }
+func (m *mockMetrics) SessionHistorySnapshot() []SessionHistoryEntry { return nil }
 
 func newMockMetrics() *mockMetrics {
 	return &mockMetrics{

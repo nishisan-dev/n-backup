@@ -180,6 +180,9 @@ func startWebUI(ctx context.Context, cfg *config.ServerConfig, handler *Handler,
 	}
 	handler.Events = store
 
+	// Cria ring para histórico de sessões finalizadas
+	handler.SessionHistory = observability.NewSessionHistoryRing(200)
+
 	router := observability.NewRouter(handler, cfg, acl, store)
 
 	webSrv := &http.Server{

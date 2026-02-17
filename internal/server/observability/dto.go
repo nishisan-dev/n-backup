@@ -148,3 +148,18 @@ type StorageUsage struct {
 	UsagePercent    float64 `json:"usage_percent"`
 	BackupsCount    int     `json:"backups_count"`
 }
+
+// SessionHistoryEntry representa uma sessão de backup finalizada.
+type SessionHistoryEntry struct {
+	SessionID   string `json:"session_id"`
+	Agent       string `json:"agent"`
+	Storage     string `json:"storage"`
+	Backup      string `json:"backup,omitempty"`
+	Mode        string `json:"mode"`        // single | parallel
+	Compression string `json:"compression"` // gzip | zstd
+	StartedAt   string `json:"started_at"`
+	FinishedAt  string `json:"finished_at"`
+	Duration    string `json:"duration"`
+	BytesTotal  int64  `json:"bytes_total"`
+	Result      string `json:"result"` // ok | checksum_mismatch | write_error | timeout | error
+}
