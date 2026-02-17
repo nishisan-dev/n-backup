@@ -338,7 +338,60 @@ daemon:
 
 ---
 
-## 8. Estrutura do Projeto
+## 8. Observabilidade (WebUI — v2.0.0+)
+
+O nbackup-server embarca uma **SPA de observabilidade** acessível via HTTP, servida a partir de assets estáticos incorporados no binário (`go:embed`). Um listener HTTP dedicado, protegido por ACL baseada em IP/CIDR, expõe endpoints REST e a interface web.
+
+### APIs REST
+
+| Endpoint | Descrição |
+|----------|-----------|
+| `GET /api/v1/health` | Status do server |
+| `GET /api/v1/metrics` | Bytes recebidos, sessões |
+| `GET /api/v1/sessions` | Sessões ativas |
+| `GET /api/v1/sessions/{id}` | Detalhe de sessão (streams, sparklines, assembler) |
+| `GET /api/v1/sessions/history` | Histórico de sessões finalizadas (ring buffer) |
+| `GET /api/v1/agents` | Agentes conectados com stats (CPU, RAM, Disco) |
+| `GET /api/v1/storages` | Storages com uso de disco (usado/total/percentual) |
+| `GET /api/v1/events` | Eventos recentes (ring buffer + persistência JSONL) |
+| `GET /api/v1/config/effective` | Configuração efetiva do server |
+
+### WebUI (SPA)
+
+- **Vanilla JS** + CSS (sem framework), embarcado via `go:embed`
+- **Polling adaptativo**: atualiza dados a cada 2s (ativo) e views sob demanda
+- **Views**: Overview, Sessions, Events, Config
+- **Session Detail**: sparklines de throughput (Canvas), streams com uptime/reconnects, assembler progress
+- **Session History**: tabela com badges coloridos por resultado (ok/checksum/write_error/timeout)
+- **Connected Agents**: tabela com stats em gauges visuais (CPU/RAM/Disk)
+- **Storages**: gauges de uso de disco com thresholds visuais (verde/amarelo/vermelho)
+
+### Componentes
+
+| Componente | Arquivo | Responsabilidade |
+|-----------|---------|------------------|
+| **Observability HTTP** | `internal/server/observability/http.go` | Router, handlers REST, ACL |
+| **DTOs** | `internal/server/observability/dto.go` | Structs para serialização JSON |
+| **Event Store** | `internal/server/observability/event_store.go` | Persistência JSONL com rotação |
+| **Session History** | `internal/server/observability/session_history.go` | Ring buffer de sessões finalizadas |
+| **WebUI Assets** | `internal/server/observability/web/` | SPA (HTML, CSS, JS) embarcados |
+
+### Configuração
+
+```yaml
+observability:
+  enabled: true
+  listen_addr: ":8080"
+  allowed_cidrs:
+    - "10.0.0.0/8"
+    - "127.0.0.1/32"
+  events_max_lines: 10000         # Rotação do JSONL de eventos
+  session_history_size: 200       # Sessões finalizadas no ring buffer
+```
+
+---
+
+## 9. Estrutura do Projeto
 
 ```
 n-backup/
@@ -370,7 +423,13 @@ n-backup/
 │       ├── assembler.go             #   Reassembly de chunks paralelos
 │       ├── handler.go               #   Protocolo handler + handleControlChannel
 │       ├── server.go                #   TLS listener
-│       └── storage.go               #   Escrita atômica + rotação
+│       ├── storage.go               #   Escrita atômica + rotação
+│       └── observability/           #   WebUI + APIs REST
+│           ├── http.go              #     Router e handlers
+│           ├── dto.go               #     DTOs de serialização
+│           ├── event_store.go       #     Persistência JSONL de eventos
+│           ├── session_history.go   #     Ring buffer de histórico
+│           └── web/                 #     SPA embarcado (go:embed)
 ├── configs/                          # Exemplos de configuração
 │   ├── agent.example.yaml
 │   └── server.example.yaml
@@ -394,24 +453,25 @@ n-backup/
 
 ---
 
-## 9. Decisões Arquiteturais
+## 10. Decisões Arquiteturais
 
 | # | Decisão | Alternativas Consideradas | Justificativa |
 |---|---------|--------------------------|---------------|
 | 1 | **TCP puro + mTLS** em vez de HTTP/2 ou gRPC | HTTP/2, gRPC, SSH pipe | Fluxo unidirecional sem necessidade de multiplexação HTTP. Zero overhead por byte transferido. |
 | 2 | **Protocolo binário customizado** | Protocol Buffers, JSON-RPC | Header mínimo (~60 bytes/sessão). O payload é stream raw — qualquer envelope adicional seria overhead puro. |
-| 3 | **pgzip** em vez de gzip stdlib | gzip stdlib, Zstd, LZ4 | Compressão paralela multi-core (klauspost/pgzip). Compatível com `tar xzf`. Até 3x mais rápido que stdlib. Zstd planejado para v2. |
+| 3 | **pgzip + Zstd** | gzip stdlib, LZ4 | pgzip para compressão paralela (klauspost). Zstd para alta razão de compressão com baixa latência. Selecionável por storage via `compression_mode`. |
 | 4 | **Ring buffer em memória** | Write-ahead log em disco, sem resume | Simplicidade e performance. Disco seria mais resiliente mas adicionaria I/O na origem — contradiz o princípio zero-footprint. |
 | 5 | **Escrita atômica** (`.tmp` + rename) | Escrita direta, journaling | Rename é atômico no Linux (mesmo inode). Garante que um backup parcial nunca substitui um completo. |
-| 6 | **Rotação por índice** (N mais recentes) | Rotação por tempo, GFS | Simplicade. Rotação por tempo pode ser implementada no v2. |
+| 6 | **Rotação por índice** (N mais recentes) | Rotação por tempo, GFS | Simplicidade. Rotação por tempo pode ser implementada futuramente. |
 | 7 | **`slog` (stdlib)** | Zap, Zerolog, Logrus | Zero dependências externas. Performance adequada. JSON structured por padrão. |
 | 8 | **Named Storages** (mapa no server) | Storage único, filesystem routing | Permite políticas de rotação independentes por tipo de backup (scripts vs dados vs configs). |
+| 9 | **SPA embarcado** (`go:embed`) | Grafana, Prometheus UI | Zero dependências externas. Single binary deployment. Assets estáticos servidos diretamente do binário. |
 
 ---
 
-## 10. Referências
+## 11. Referências
 
 - [Especificação Técnica](specification.md) — Detalhes completos do protocolo binário, frames e sessão
 - [Guia de Instalação](installation.md) — Build, PKI/mTLS, configuração, systemd
-- [Guia de Uso](usage.md) — Comandos CLI, daemon, retry, rotação, troubleshooting
+- [Guia de Uso](usage.md) — Comandos CLI, daemon, retry, rotação, troubleshooting, WebUI
 - Diagramas: [`docs/diagrams/`](diagrams/)

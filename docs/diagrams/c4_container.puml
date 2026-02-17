@@ -26,6 +26,7 @@ package "Host de Destino" as dest {
     component "Protocol Handler" as proto
     component "Storage Writer" as sw
     component "Rotation Manager" as rot
+    component "Observability HTTP" as obs
     component "Config" as cfg_s
   }
   database "Filesystem\n(Destino)" as fs_dest
@@ -49,6 +50,9 @@ proto --> sw : data stream
 sw --> fs_dest : .tmp → rename\n(atomic write)
 sw --> rot : após checksum OK
 rot --> fs_dest : remove antigos
+
+admin --> obs : HTTP :8080\n(WebUI + REST API)
+obs ..> proto : snapshots\n(métricas, sessões)
 
 note right of net
   Protocolo NBKP binário
