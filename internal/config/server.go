@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nishisan-dev/n-backup/internal/protocol"
 	"gopkg.in/yaml.v3"
 )
 
@@ -66,6 +67,27 @@ type StorageInfo struct {
 	AssemblerMode          string `yaml:"assembler_mode"`              // eager|lazy (default: eager)
 	AssemblerPendingMem    string `yaml:"assembler_pending_mem_limit"` // ex: "8mb" (default: 8mb)
 	AssemblerPendingMemRaw int64  `yaml:"-"`
+	CompressionMode        string `yaml:"compression_mode"` // gzip|zst (default: gzip)
+}
+
+// CompressionModeByte converte o compression_mode string para a constante de protocolo.
+func (s StorageInfo) CompressionModeByte() byte {
+	switch s.CompressionMode {
+	case "zst":
+		return protocol.CompressionZstd
+	default:
+		return protocol.CompressionGzip
+	}
+}
+
+// FileExtension retorna a extensão de arquivo para backups deste storage.
+func (s StorageInfo) FileExtension() string {
+	switch s.CompressionMode {
+	case "zst":
+		return ".tar.zst"
+	default:
+		return ".tar.gz"
+	}
 }
 
 // GetStorage retorna o StorageInfo pelo nome ou false se não existir.
@@ -136,6 +158,15 @@ func (c *ServerConfig) validate() error {
 			return fmt.Errorf("storages.%s.assembler_pending_mem_limit must be > 0, got %s", name, s.AssemblerPendingMem)
 		}
 		s.AssemblerPendingMemRaw = parsed
+
+		// Compression mode: default gzip
+		if s.CompressionMode == "" {
+			s.CompressionMode = "gzip"
+		}
+		s.CompressionMode = strings.ToLower(strings.TrimSpace(s.CompressionMode))
+		if s.CompressionMode != "gzip" && s.CompressionMode != "zst" {
+			return fmt.Errorf("storages.%s.compression_mode must be gzip or zst, got %q", name, s.CompressionMode)
+		}
 
 		c.Storages[name] = s
 	}
