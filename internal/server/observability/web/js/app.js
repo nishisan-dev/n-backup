@@ -9,6 +9,7 @@
     let currentView = 'overview';
     let selectedSessionId = null;
     let isVisible = true;
+    let isNavigating = false; // guard contra loops hash ↔ switchView
 
     // Ring buffer de dados de throughput por sessão
     // Chave: session_id → { net: number[], disk: number[], lastBytes: number, lastDisk: number }
@@ -21,9 +22,43 @@
     // Cache dos eventos carregados (para export)
     let cachedEvents = [];
 
+    // ============ Hash Routing ============
+
+    const VALID_VIEWS = ['overview', 'sessions', 'events', 'config'];
+
+    function pushRoute(hash) {
+        if (window.location.hash === '#' + hash) return;
+        isNavigating = true;
+        window.location.hash = hash;
+        isNavigating = false;
+    }
+
+    function handleHashChange() {
+        if (isNavigating) return;
+
+        const raw = window.location.hash.replace(/^#\/?/, '') || 'overview';
+        const parts = raw.split('/');
+        const view = parts[0];
+
+        if (!VALID_VIEWS.includes(view)) {
+            pushRoute('overview');
+            return;
+        }
+
+        // Se é deep-link para sessão: #sessions/{id}
+        if (view === 'sessions' && parts[1]) {
+            if (currentView !== 'sessions') {
+                switchView('sessions', true);
+            }
+            showSessionDetail(decodeURIComponent(parts[1]), true);
+        } else {
+            switchView(view, true);
+        }
+    }
+
     // ============ Navigation ============
 
-    function switchView(view) {
+    function switchView(view, fromHash) {
         currentView = view;
         selectedSessionId = null;
 
@@ -42,14 +77,24 @@
             document.getElementById('session-detail').style.display = 'none';
         }
 
+        // Sincroniza hash (somente se disparado por UI, não por hash)
+        if (!fromHash) {
+            pushRoute(view);
+        }
+
         // Fetch imediatamente ao trocar de view
         fetchCurrentView();
     }
 
-    function showSessionDetail(sessionId) {
+    function showSessionDetail(sessionId, fromHash) {
         selectedSessionId = sessionId;
         document.getElementById('sessions-list').style.display = 'none';
         document.getElementById('session-detail').style.display = '';
+
+        if (!fromHash) {
+            pushRoute(`sessions/${encodeURIComponent(sessionId)}`);
+        }
+
         fetchSessionDetail(sessionId);
     }
 
@@ -250,6 +295,7 @@
         selectedSessionId = null;
         document.getElementById('sessions-list').style.display = '';
         document.getElementById('session-detail').style.display = 'none';
+        pushRoute('sessions');
         fetchSessions();
     });
 
@@ -263,6 +309,9 @@
             fetchCurrentView(); // Fetch imediato ao voltar
         }
     });
+
+    // Hash change (browser back/forward + manual edit)
+    window.addEventListener('hashchange', handleHashChange);
 
     // ============ Sparkline Data ============
 
@@ -346,5 +395,14 @@
     // ============ Init ============
 
     initTheme();
+
+    // Restaura rota da hash (ou fallback para overview)
+    const initHash = window.location.hash.replace(/^#\/?/, '');
+    if (initHash) {
+        handleHashChange();
+    } else {
+        switchView('overview');
+    }
+
     startPolling();
 })();
