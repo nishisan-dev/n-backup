@@ -125,9 +125,10 @@ func makeConfigHandler(cfg *config.ServerConfig) http.HandlerFunc {
 		storages := make(map[string]StorageSafe, len(cfg.Storages))
 		for name, s := range cfg.Storages {
 			storages[name] = StorageSafe{
-				BaseDir:       s.BaseDir,
-				MaxBackups:    s.MaxBackups,
-				AssemblerMode: s.AssemblerMode,
+				BaseDir:         s.BaseDir,
+				MaxBackups:      s.MaxBackups,
+				AssemblerMode:   s.AssemblerMode,
+				CompressionMode: s.CompressionMode,
 			}
 		}
 

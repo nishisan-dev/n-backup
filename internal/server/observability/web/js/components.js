@@ -92,6 +92,13 @@ const Components = {
         return `<span class="${cls}">${mode || 'single'}</span>`;
     },
 
+    // Badge de compressão
+    compressionBadge(compression) {
+        const label = compression === 'zst' ? 'zstd' : (compression || 'gzip');
+        const cls = compression === 'zst' ? 'badge badge-info' : 'badge badge-neutral';
+        return `<span class="${cls}">${label}</span>`;
+    },
+
     // Badge de level (eventos)
     levelBadge(level) {
         const cls = `badge badge-${level || 'info'}`;
@@ -242,6 +249,7 @@ const Components = {
                     </div>
                     <div class="session-meta">
                         ${this.modeBadge(s.mode)}
+                        ${this.compressionBadge(s.compression)}
                         ${this.statusBadge(s.status)}
                         <span>Início: ${this.formatTime(s.started_at)}</span>
                         <span>Último I/O: ${this.formatTime(s.last_activity)}</span>
@@ -283,6 +291,7 @@ const Components = {
         infoGrid.innerHTML = `
             <div class="info-item"><span class="info-label">Session ID</span><span class="info-value">${detail.session_id}</span></div>
             <div class="info-item"><span class="info-label">Modo</span><span class="info-value">${this.modeBadge(detail.mode)}</span></div>
+            <div class="info-item"><span class="info-label">Compressão</span><span class="info-value">${this.compressionBadge(detail.compression)}</span></div>
             <div class="info-item"><span class="info-label">Status</span><span class="info-value">${this.statusBadge(detail.status)}</span></div>
             <div class="info-item"><span class="info-label">Recebido</span><span class="info-value">${this.formatBytes(detail.bytes_received)}</span></div>
             <div class="info-item"><span class="info-label">Disk Write</span><span class="info-value">${this.formatBytes(detail.disk_write_bytes)}</span></div>

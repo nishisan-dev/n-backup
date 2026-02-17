@@ -30,6 +30,7 @@ type SessionSummary struct {
 	Backup         string `json:"backup,omitempty"`
 	ClientVersion  string `json:"client_version"` // Versão do client
 	Mode           string `json:"mode"`           // single | parallel
+	Compression    string `json:"compression"`    // gzip | zst
 	StartedAt      string `json:"started_at"`
 	LastActivity   string `json:"last_activity"`
 	BytesReceived  int64  `json:"bytes_received"`
@@ -96,9 +97,10 @@ type ConfigEffective struct {
 
 // StorageSafe é uma visão segura (sem paths absolutos internos) de um storage.
 type StorageSafe struct {
-	BaseDir       string `json:"base_dir"`
-	MaxBackups    int    `json:"max_backups"`
-	AssemblerMode string `json:"assembler_mode"`
+	BaseDir         string `json:"base_dir"`
+	MaxBackups      int    `json:"max_backups"`
+	AssemblerMode   string `json:"assembler_mode"`
+	CompressionMode string `json:"compression_mode"`
 }
 
 // FlowRotationSafe é uma visão segura da config de flow rotation.
