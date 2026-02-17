@@ -14,6 +14,13 @@
     // Chave: session_id → { net: number[], disk: number[], lastBytes: number, lastDisk: number }
     const sparkHistory = {};
 
+    // Ring buffer de throughput global (MB/s agregado de todas as sessões)
+    const globalThroughput = [];
+    let lastGlobalTraffic = null;
+
+    // Cache dos eventos carregados (para export)
+    let cachedEvents = [];
+
     // ============ Navigation ============
 
     function switchView(view) {
@@ -65,6 +72,20 @@
             Components.renderOverviewAgents(agents);
             Components.renderOverviewStorages(storages);
             Components.renderOverviewSessions(sessions);
+
+            // Throughput global: calcula delta de traffic_in total
+            if (lastGlobalTraffic !== null) {
+                const delta = Math.max(0, metrics.traffic_in_bytes - lastGlobalTraffic);
+                const mbps = delta / (1024 * 1024) / (POLL_INTERVAL / 1000);
+                globalThroughput.push(mbps);
+                if (globalThroughput.length > SPARK_MAX_POINTS) globalThroughput.shift();
+
+                const canvas = document.getElementById('global-throughput-canvas');
+                if (canvas && globalThroughput.length > 1) {
+                    Components.drawSparkline(canvas, globalThroughput, '#06b6d4');
+                }
+            }
+            lastGlobalTraffic = metrics.traffic_in_bytes;
 
             // Atualiza topbar
             document.getElementById('version-badge').textContent = health.version || 'dev';
@@ -122,6 +143,7 @@
             const limit = parseInt(document.getElementById('events-limit').value) || 50;
             const events = await API.events(limit);
             updateConnectionStatus('connected');
+            cachedEvents = events; // cache para export
             Components.renderEvents(events);
         } catch (err) {
             updateConnectionStatus('error');
@@ -287,7 +309,42 @@
         }
     }
 
+    // ============ Theme Toggle ============
+
+    function initTheme() {
+        const saved = localStorage.getItem('nbackup-theme');
+        if (saved) {
+            document.documentElement.setAttribute('data-theme', saved);
+        }
+        updateThemeIcons();
+    }
+
+    function toggleTheme() {
+        const current = document.documentElement.getAttribute('data-theme');
+        const next = current === 'light' ? 'dark' : 'light';
+        document.documentElement.setAttribute('data-theme', next);
+        localStorage.setItem('nbackup-theme', next);
+        updateThemeIcons();
+    }
+
+    function updateThemeIcons() {
+        const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+        const btn = document.getElementById('theme-toggle');
+        if (!btn) return;
+        btn.querySelector('.icon-moon').style.display = isLight ? 'none' : '';
+        btn.querySelector('.icon-sun').style.display = isLight ? '' : 'none';
+    }
+
+    document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
+
+    // ============ Export Events ============
+
+    document.getElementById('btn-export-events').addEventListener('click', () => {
+        Components.exportEvents(cachedEvents, 'json');
+    });
+
     // ============ Init ============
 
+    initTheme();
     startPolling();
 })();
