@@ -63,7 +63,7 @@ func localhostACL(t *testing.T) *ACL {
 }
 
 func TestHealth_ReturnsOK(t *testing.T) {
-	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t))
+	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/health", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -97,7 +97,7 @@ func TestMetrics_ReturnsData(t *testing.T) {
 		ActiveConns: 3,
 		Sessions:    2,
 	}
-	router := NewRouter(mock, testCfg(), localhostACL(t))
+	router := NewRouter(mock, testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/metrics", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -124,7 +124,7 @@ func TestMetrics_ReturnsData(t *testing.T) {
 }
 
 func TestSessions_EmptyList(t *testing.T) {
-	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t))
+	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/sessions", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -149,7 +149,7 @@ func TestSessions_WithData(t *testing.T) {
 	mock.sessions = []SessionSummary{
 		{SessionID: "abc123", Agent: "web-01", Mode: "parallel", ActiveStreams: 4, MaxStreams: 8, Status: "running"},
 	}
-	router := NewRouter(mock, testCfg(), localhostACL(t))
+	router := NewRouter(mock, testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/sessions", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -173,7 +173,7 @@ func TestSessions_WithData(t *testing.T) {
 }
 
 func TestSessionDetail_NotFound(t *testing.T) {
-	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t))
+	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/sessions/nonexistent", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -196,7 +196,7 @@ func TestSessionDetail_Found(t *testing.T) {
 			{Index: 1, OffsetBytes: 2048, MBps: 3.2},
 		},
 	}
-	router := NewRouter(mock, testCfg(), localhostACL(t))
+	router := NewRouter(mock, testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/sessions/abc123", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -220,7 +220,7 @@ func TestSessionDetail_Found(t *testing.T) {
 }
 
 func TestConfigEffective(t *testing.T) {
-	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t))
+	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/config/effective", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -254,7 +254,7 @@ func TestACL_BlocksHealthEndpoint(t *testing.T) {
 	acl := NewACL([]*net.IPNet{
 		mustParseCIDR("10.0.0.0/8"),
 	})
-	router := NewRouter(newMockMetrics(), testCfg(), acl)
+	router := NewRouter(newMockMetrics(), testCfg(), acl, nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/health", nil)
 	req.RemoteAddr = "192.168.1.1:12345" // não permitido
@@ -267,7 +267,7 @@ func TestACL_BlocksHealthEndpoint(t *testing.T) {
 }
 
 func TestRoot_ReturnsSPA(t *testing.T) {
-	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t))
+	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -283,7 +283,7 @@ func TestRoot_ReturnsSPA(t *testing.T) {
 }
 
 func TestNotFound_Returns404(t *testing.T) {
-	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t))
+	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/nonexistent", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -304,7 +304,7 @@ func mustParseCIDR(s string) *net.IPNet {
 }
 
 func TestAgents_EmptyList(t *testing.T) {
-	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t))
+	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -330,7 +330,7 @@ func TestAgents_WithData(t *testing.T) {
 		{Name: "web-01", RemoteAddr: "10.0.0.1:54321", ConnectedAt: "2025-01-01T00:00:00Z", ConnectedFor: "1h0m0s", KeepaliveS: 30, HasSession: true, ClientVersion: "1.7.2"},
 		{Name: "db-01", RemoteAddr: "10.0.0.2:54322", ConnectedAt: "2025-01-01T00:00:00Z", ConnectedFor: "30m0s", KeepaliveS: 15, HasSession: false},
 	}
-	router := NewRouter(mock, testCfg(), localhostACL(t))
+	router := NewRouter(mock, testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -361,7 +361,7 @@ func TestAgents_WithData(t *testing.T) {
 }
 
 func TestStorages_EmptyList(t *testing.T) {
-	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t))
+	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/storages", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -397,7 +397,7 @@ func TestStorages_WithData(t *testing.T) {
 			BackupsCount:    3,
 		},
 	}
-	router := NewRouter(mock, testCfg(), localhostACL(t))
+	router := NewRouter(mock, testCfg(), localhostACL(t), nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/storages", nil)
 	req.RemoteAddr = "127.0.0.1:12345"

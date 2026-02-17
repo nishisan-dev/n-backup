@@ -74,8 +74,8 @@ type Handler struct {
 	DiskWrite   atomic.Int64 // bytes escritos em disco (acumulado desde último reset)
 	ActiveConns atomic.Int32 // conexões ativas no momento
 
-	// Events ring buffer para observabilidade (nil quando WebUI desabilitada).
-	Events *observability.EventRing
+	// Events store para observabilidade e persistência (nil quando WebUI desabilitada).
+	Events *observability.EventStore
 }
 
 // ControlConnInfo armazena metadata de um control channel conectado.

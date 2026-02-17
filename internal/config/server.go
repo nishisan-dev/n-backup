@@ -34,6 +34,10 @@ type WebUIConfig struct {
 	IdleTimeout  time.Duration `yaml:"idle_timeout"`  // default: 60s
 	AllowOrigins []string      `yaml:"allow_origins"` // IP ou CIDR (deny-by-default)
 
+	// Persistência de eventos
+	EventsFile     string `yaml:"events_file"`      // default: "events.jsonl"
+	EventsMaxLines int    `yaml:"events_max_lines"` // default: 10000
+
 	// Parsed é preenchido em validate(); não vem do YAML.
 	ParsedCIDRs []*net.IPNet `yaml:"-"`
 }
@@ -203,6 +207,12 @@ func (c *ServerConfig) validate() error {
 		}
 		if c.WebUI.IdleTimeout <= 0 {
 			c.WebUI.IdleTimeout = 60 * time.Second
+		}
+		if c.WebUI.EventsFile == "" {
+			c.WebUI.EventsFile = "events.jsonl"
+		}
+		if c.WebUI.EventsMaxLines <= 0 {
+			c.WebUI.EventsMaxLines = 10000
 		}
 		if len(c.WebUI.AllowOrigins) == 0 {
 			return fmt.Errorf("web_ui.allow_origins is required when web_ui is enabled (deny-by-default)")
