@@ -99,6 +99,7 @@ func ReadHandshake(r io.Reader) (*Handshake, error) {
 }
 
 // ReadACK lê o frame ACK (Server → Client).
+// Formato v4: [Status 1B] [Message UTF-8] ['\n'] [SessionID UTF-8] ['\n'] [CompressionMode 1B]
 func ReadACK(r io.Reader) (*ACK, error) {
 	// Lê status
 	var status [1]byte
@@ -121,10 +122,17 @@ func ReadACK(r io.Reader) (*ACK, error) {
 	}
 	sessionID = sessionID[:len(sessionID)-1]
 
+	// Lê compression mode (1 byte) — v4+
+	var compMode [1]byte
+	if _, err := io.ReadFull(br, compMode[:]); err != nil {
+		return nil, fmt.Errorf("reading ack compression mode: %w", err)
+	}
+
 	return &ACK{
-		Status:    status[0],
-		Message:   msg,
-		SessionID: sessionID,
+		Status:          status[0],
+		Message:         msg,
+		SessionID:       sessionID,
+		CompressionMode: compMode[0],
 	}, nil
 }
 

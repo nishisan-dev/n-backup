@@ -35,7 +35,7 @@ type ParallelACK struct {
 }
 
 // ProtocolVersion é a versão atual do protocolo.
-const ProtocolVersion byte = 0x03
+const ProtocolVersion byte = 0x04
 
 // Status codes para ACK (Server → Client após Handshake).
 const (
@@ -85,10 +85,17 @@ type Handshake struct {
 
 // ACK representa a resposta do server ao handshake.
 type ACK struct {
-	Status    byte
-	Message   string
-	SessionID string // UUID da sessão (gerado pelo server)
+	Status          byte
+	Message         string
+	SessionID       string // UUID da sessão (gerado pelo server)
+	CompressionMode byte   // Tipo de compressão negociado (v4+)
 }
+
+// Compression mode constants.
+const (
+	CompressionGzip byte = 0x00 // gzip (pgzip paralelo) — default
+	CompressionZstd byte = 0x01 // zstd (klauspost/compress)
+)
 
 // Trailer representa o frame de finalização enviado pelo client.
 type Trailer struct {

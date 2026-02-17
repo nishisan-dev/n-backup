@@ -45,22 +45,24 @@ func TestHandshake_RoundTrip(t *testing.T) {
 
 func TestACK_RoundTrip(t *testing.T) {
 	tests := []struct {
-		name      string
-		status    byte
-		message   string
-		sessionID string
+		name            string
+		status          byte
+		message         string
+		sessionID       string
+		compressionMode byte
 	}{
-		{"GO with session", StatusGo, "", "abc-123"},
-		{"FULL with message", StatusFull, "disk is full", ""},
-		{"BUSY with message", StatusBusy, "backup in progress", ""},
-		{"REJECT with message", StatusReject, "agent not authorized", ""},
+		{"GO with session gzip", StatusGo, "", "abc-123", CompressionGzip},
+		{"GO with session zstd", StatusGo, "", "abc-456", CompressionZstd},
+		{"FULL with message", StatusFull, "disk is full", "", CompressionGzip},
+		{"BUSY with message", StatusBusy, "backup in progress", "", CompressionGzip},
+		{"REJECT with message", StatusReject, "agent not authorized", "", CompressionGzip},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
 
-			if err := WriteACK(&buf, tt.status, tt.message, tt.sessionID); err != nil {
+			if err := WriteACK(&buf, tt.status, tt.message, tt.sessionID, tt.compressionMode); err != nil {
 				t.Fatalf("WriteACK: %v", err)
 			}
 
@@ -77,6 +79,9 @@ func TestACK_RoundTrip(t *testing.T) {
 			}
 			if ack.SessionID != tt.sessionID {
 				t.Errorf("expected sessionID %q, got %q", tt.sessionID, ack.SessionID)
+			}
+			if ack.CompressionMode != tt.compressionMode {
+				t.Errorf("expected compressionMode %d, got %d", tt.compressionMode, ack.CompressionMode)
 			}
 		})
 	}

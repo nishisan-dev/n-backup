@@ -47,8 +47,36 @@ func WriteHandshake(w io.Writer, agentName, storageName, backupName, clientVersi
 }
 
 // WriteACK escreve o frame ACK (Server → Client).
-// Formato: [Status 1B] [Message UTF-8 (opt)] ['\n' 1B] [SessionID UTF-8 (opt)] ['\n' 1B]
-func WriteACK(w io.Writer, status byte, message string, sessionID string) error {
+// Formato v4: [Status 1B] [Message UTF-8 (opt)] ['\n' 1B] [SessionID UTF-8 (opt)] ['\n' 1B] [CompressionMode 1B]
+// Para agents v3 (handshakeVersion < 0x04), o caller deve usar compressionMode=CompressionGzip
+// e o agent v3 simplesmente não lerá o byte extra (a conn segue para stream de dados).
+func WriteACK(w io.Writer, status byte, message string, sessionID string, compressionMode byte) error {
+	if _, err := w.Write([]byte{status}); err != nil {
+		return fmt.Errorf("writing ack status: %w", err)
+	}
+	if message != "" {
+		if _, err := w.Write([]byte(message)); err != nil {
+			return fmt.Errorf("writing ack message: %w", err)
+		}
+	}
+	if _, err := w.Write([]byte{'\n'}); err != nil {
+		return fmt.Errorf("writing ack delimiter: %w", err)
+	}
+	if _, err := w.Write([]byte(sessionID)); err != nil {
+		return fmt.Errorf("writing ack session id: %w", err)
+	}
+	if _, err := w.Write([]byte{'\n'}); err != nil {
+		return fmt.Errorf("writing ack session delimiter: %w", err)
+	}
+	if _, err := w.Write([]byte{compressionMode}); err != nil {
+		return fmt.Errorf("writing ack compression mode: %w", err)
+	}
+	return nil
+}
+
+// WriteACKLegacy escreve o frame ACK sem CompressionMode (backward compat v3).
+// Usado para agents que não suportam o campo extra.
+func WriteACKLegacy(w io.Writer, status byte, message string, sessionID string) error {
 	if _, err := w.Write([]byte{status}); err != nil {
 		return fmt.Errorf("writing ack status: %w", err)
 	}
