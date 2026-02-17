@@ -566,6 +566,20 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 	return nil, false
 }
 
+// formatBytesGo formata bytes em string legível (ex: "12.3 MB").
+func formatBytesGo(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
 // sessionStatus determina o status de uma sessão baseado na última atividade.
 func sessionStatus(lastActivity time.Time) string {
 	idle := time.Since(lastActivity)
@@ -2097,9 +2111,15 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 		}
 		logger.Error("receiving parallel stream", "error", err, "bytes", bytesReceived)
 		pSession.StreamConns.Delete(pj.StreamIndex)
+		if h.Events != nil {
+			h.Events.PushEvent("warn", "stream_disconnected", pSession.AgentName, fmt.Sprintf("stream %d disconnected with error: %v", pj.StreamIndex, err), int(pj.StreamIndex))
+		}
 		return
 	}
 
 	pSession.StreamConns.Delete(pj.StreamIndex)
+	if h.Events != nil {
+		h.Events.PushEvent("info", "stream_disconnected", pSession.AgentName, fmt.Sprintf("stream %d disconnected (normal, %s received)", pj.StreamIndex, formatBytesGo(bytesReceived)), int(pj.StreamIndex))
+	}
 	logger.Info("parallel stream complete", "bytes", bytesReceived)
 }

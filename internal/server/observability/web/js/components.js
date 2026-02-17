@@ -404,11 +404,17 @@ const Components = {
         if (detail.streams && detail.streams.length > 0) {
             streamsTitle.style.display = '';
             streamsWrap.style.display = '';
-            streamsBody.innerHTML = detail.streams.map(st => {
-                const streamStatus = st.status || (st.active ? 'running' : 'inactive');
+
+            // Agrupa: ativos primeiro, disconnected abaixo
+            const active = detail.streams.filter(st => st.status !== 'disconnected');
+            const disconnected = detail.streams.filter(st => st.status === 'disconnected');
+
+            const renderRow = (st, dimmed) => {
+                const streamStatus = st.status || (st.active ? 'running' : 'disconnected');
+                const rowClass = dimmed ? ' class="stream-disconnected"' : '';
 
                 return `
-                    <tr>
+                    <tr${rowClass}>
                         <td>#${st.index}</td>
                         <td>${this.formatBytes(st.offset_bytes)}</td>
                         <td>${st.mbps.toFixed(2)}</td>
@@ -418,7 +424,15 @@ const Components = {
                         <td>${this.statusBadge(streamStatus)}</td>
                     </tr>
                 `;
-            }).join('');
+            };
+
+            let rows = active.map(st => renderRow(st, false)).join('');
+            if (disconnected.length > 0) {
+                const cols = 7;
+                rows += `<tr class="stream-separator"><td colspan="${cols}">${disconnected.length} stream${disconnected.length > 1 ? 's' : ''} disconnected</td></tr>`;
+                rows += disconnected.map(st => renderRow(st, true)).join('');
+            }
+            streamsBody.innerHTML = rows;
         } else {
             streamsTitle.style.display = 'none';
             streamsWrap.style.display = 'none';
