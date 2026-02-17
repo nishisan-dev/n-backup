@@ -136,26 +136,67 @@ const Components = {
     },
 
     // Renderiza tabela resumida de sessões no overview
+    // Gera HTML para uma barra de stat (gauge)
+    renderStatBar(label, percent) {
+        let colorClass = 'low';
+        if (percent >= 80) colorClass = 'high';
+        else if (percent >= 50) colorClass = 'med';
+
+        return `
+            <div class="stat-row">
+                <span class="stat-label">${label}</span>
+                <div class="stat-track">
+                    <div class="stat-fill ${colorClass}" style="width: ${Math.min(percent, 100)}%"></div>
+                </div>
+                <span class="stat-value">${percent.toFixed(0)}%</span>
+            </div>
+        `;
+    },
+
     renderOverviewAgents(agents) {
         const card = document.getElementById('overview-agents-card');
         const body = document.getElementById('overview-agents-body');
+        const headerRow = card.querySelector('thead tr');
 
         if (!agents || agents.length === 0) {
             card.style.display = 'none';
             return;
         }
 
+        // Ensure header has correct columns (hacky check/update)
+        if (headerRow && !headerRow.innerHTML.includes('Stats')) {
+            headerRow.innerHTML = `
+                <th>Agent</th>
+                <th>IP</th>
+                <th>Stats (CPU / Mem / Disk)</th>
+                <th>Conectado há</th>
+                <th>Keepalive</th>
+                <th>Versão</th>
+                <th>Sessão</th>
+            `;
+        }
+
         card.style.display = '';
-        body.innerHTML = agents.map(a => `
+        body.innerHTML = agents.map(a => {
+            const stats = a.stats
+                ? `<div class="stat-group" title="Load Avg: ${a.stats.load_average.toFixed(2)}">
+                     ${this.renderStatBar('C', a.stats.cpu_percent)}
+                     ${this.renderStatBar('M', a.stats.memory_percent)}
+                     ${this.renderStatBar('D', a.stats.disk_usage_percent)}
+                   </div>`
+                : '<span class="text-muted">—</span>';
+
+            return `
             <tr>
                 <td><strong>${this.escapeHtml(a.name)}</strong></td>
                 <td>${this.escapeHtml(a.remote_addr)}</td>
+                <td>${stats}</td>
                 <td>${this.escapeHtml(a.connected_for)}</td>
                 <td>${a.keepalive_s}s</td>
                 <td>${a.client_version ? `<span class="badge badge-neutral text-xs">${this.escapeHtml(a.client_version)}</span>` : '<span class="text-muted">—</span>'}</td>
                 <td>${a.has_session ? '<span class="badge badge-running">backup</span>' : '<span class="badge badge-connected">idle</span>'}</td>
             </tr>
-        `).join('');
+        `}).join('');
     },
 
     renderOverviewSessions(sessions) {
@@ -249,6 +290,17 @@ const Components = {
             <div class="info-item"><span class="info-label">Último I/O</span><span class="info-value">${this.formatDateTime(detail.last_activity)}</span></div>
             ${detail.eta ? `<div class="info-item"><span class="info-label">ETA</span><span class="info-value">${detail.eta}</span></div>` : ''}
             ${detail.client_version ? `<div class="info-item"><span class="info-label">Client Version</span><span class="info-value">${this.escapeHtml(detail.client_version)}</span></div>` : ''}
+            ${detail.assembler ? `
+                <div class="info-item" style="grid-column: 1/-1; border-top: 1px solid var(--border-color); margin-top: 0.5rem; padding-top: 0.5rem;">
+                    <span class="info-label">Assembler Status</span>
+                    <span class="info-value text-xs font-mono">
+                        Seq: ${detail.assembler.next_expected_seq} |
+                        Pending: ${detail.assembler.pending_chunks} chunks (${this.formatBytes(detail.assembler.pending_mem_bytes)}) |
+                        Total: ${this.formatBytes(detail.assembler.total_bytes)} |
+                        ${detail.assembler.finalized ? '<span class="badge badge-success">Finalized</span>' : '<span class="badge badge-info">Active</span>'}
+                    </span>
+                </div>
+            ` : ''}
             ${progressHtml}
         `;
 

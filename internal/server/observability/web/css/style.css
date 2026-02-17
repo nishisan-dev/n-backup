@@ -724,10 +724,62 @@ body {
     white-space: nowrap;
 }
 
-@media (max-width: 768px) {
-    .sparkline-section {
-        grid-template-columns: 1fr;
-    }
+
+/* ============ Stat Bars (Gauges) ============ */
+
+.stat-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 140px;
+    padding: 4px 0;
+}
+
+.stat-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.65rem;
+}
+
+.stat-label {
+    width: 12px;
+    color: var(--text-muted);
+    font-weight: 600;
+}
+
+.stat-track {
+    flex: 1;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.stat-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.3s ease, background-color 0.3s ease;
+}
+
+.stat-value {
+    width: 24px;
+    text-align: right;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+}
+
+/* Colors for stats */
+.stat-fill.low {
+    background: var(--accent-emerald);
+}
+
+.stat-fill.med {
+    background: var(--accent-amber);
+}
+
+.stat-fill.high {
+    background: var(--accent-rose);
 }
 
 /* ============ Responsive ============ */
