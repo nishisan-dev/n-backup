@@ -33,13 +33,16 @@ type StreamResult struct {
 // Se progress não for nil, alimenta contadores de bytes e objetos.
 // Se onObject não for nil, é chamado após cada objeto processado (usado para contadores externos).
 // Retorna o checksum e total de bytes escritos no destino.
-func Stream(ctx context.Context, scanner *Scanner, dest io.Writer, progress *ProgressReporter, onObject func(), compressionMode byte) (*StreamResult, error) {
+func Stream(ctx context.Context, scanner *Scanner, dest io.Writer, progress *ProgressReporter, onObject func(), compressionMode byte, bandwidthLimit int64) (*StreamResult, error) {
 	// Buffer de escrita para reduzir syscalls na conexão TLS
 	bufDest := bufio.NewWriterSize(dest, 256*1024) // 256KB
 
+	// Aplica throttle sobre o buffer de escrita (antes do hash, para não atrasar o cálculo)
+	throttled := NewThrottledWriter(ctx, bufDest, bandwidthLimit)
+
 	// Cria o hash inline
 	hasher := sha256.New()
-	counter := &countWriter{w: io.MultiWriter(bufDest, hasher), progress: progress}
+	counter := &countWriter{w: io.MultiWriter(throttled, hasher), progress: progress}
 
 	// Cria compressor com base no modo negociado
 	compressor, err := newCompressor(counter, compressionMode)

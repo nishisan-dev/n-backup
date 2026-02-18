@@ -113,7 +113,7 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 
 	go func() {
 		defer close(producerDone)
-		producerResult, producerErr = Stream(ctx, scanner, rb, progress, nil, compressionMode)
+		producerResult, producerErr = Stream(ctx, scanner, rb, progress, nil, compressionMode, entry.BandwidthLimitRaw)
 		rb.Close() // sinaliza EOF para o sender
 	}()
 
@@ -501,7 +501,7 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 
 	go func() {
 		defer close(producerDone)
-		producerResult, producerErr = Stream(ctx, scanner, dispatcher, progress, onObject, compressionMode)
+		producerResult, producerErr = Stream(ctx, scanner, dispatcher, progress, onObject, compressionMode, entry.BandwidthLimitRaw)
 		dispatcher.Flush() // emite chunk parcial pendente no buffer de acumulação
 		dispatcher.Close() // sinaliza EOF para todos os senders
 	}()
