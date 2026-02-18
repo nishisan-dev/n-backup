@@ -29,6 +29,7 @@ type HandlerMetrics interface {
 	ConnectedAgents() []AgentInfo
 	StorageUsageSnapshot() []StorageUsage
 	SessionHistorySnapshot() []SessionHistoryEntry
+	ActiveSessionHistorySnapshot(sessionID string, limit int) []ActiveSessionSnapshotEntry
 }
 
 // MetricsData contém os dados de métricas coletados do Handler.
@@ -52,6 +53,7 @@ func NewRouter(metrics HandlerMetrics, cfg *config.ServerConfig, acl *ACL, store
 	mux.HandleFunc("GET /api/v1/agents", makeAgentsHandler(metrics))
 	mux.HandleFunc("GET /api/v1/storages", makeStoragesHandler(metrics))
 	mux.HandleFunc("GET /api/v1/sessions/history", makeSessionHistoryHandler(metrics))
+	mux.HandleFunc("GET /api/v1/sessions/active-history", makeActiveSessionHistoryHandler(metrics))
 	mux.HandleFunc("GET /api/v1/config/effective", makeConfigHandler(cfg))
 
 	// Events endpoint (se store fornecido)
@@ -207,6 +209,19 @@ func makeSessionHistoryHandler(metrics HandlerMetrics) http.HandlerFunc {
 		history := metrics.SessionHistorySnapshot()
 		if history == nil {
 			history = []SessionHistoryEntry{}
+		}
+		writeJSON(w, http.StatusOK, history)
+	}
+}
+
+// makeActiveSessionHistoryHandler retorna snapshots históricos de sessões ativas.
+func makeActiveSessionHistoryHandler(metrics HandlerMetrics) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		limit := parseInt(r.URL.Query().Get("limit"), 120)
+		sessionID := r.URL.Query().Get("session_id")
+		history := metrics.ActiveSessionHistorySnapshot(sessionID, limit)
+		if history == nil {
+			history = []ActiveSessionSnapshotEntry{}
 		}
 		writeJSON(w, http.StatusOK, history)
 	}

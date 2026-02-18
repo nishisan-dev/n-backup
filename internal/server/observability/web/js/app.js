@@ -18,6 +18,9 @@
     // Ring buffer de throughput global (MB/s agregado de todas as sessões)
     const globalThroughput = [];
     let lastGlobalTraffic = null;
+    let smoothedGlobalThroughput = null;
+
+    const SMOOTHING_ALPHA = 0.28;
 
     // Cache dos eventos carregados (para export)
     let cachedEvents = [];
@@ -122,7 +125,8 @@
             if (lastGlobalTraffic !== null) {
                 const delta = Math.max(0, metrics.traffic_in_bytes - lastGlobalTraffic);
                 const mbps = delta / (1024 * 1024) / (POLL_INTERVAL / 1000);
-                globalThroughput.push(mbps);
+                smoothedGlobalThroughput = smoothEwma(smoothedGlobalThroughput, mbps);
+                globalThroughput.push(smoothedGlobalThroughput);
                 if (globalThroughput.length > SPARK_MAX_POINTS) globalThroughput.shift();
 
                 const canvas = document.getElementById('global-throughput-canvas');
@@ -318,7 +322,7 @@
     function updateSparkHistory(session) {
         const id = session.session_id;
         if (!sparkHistory[id]) {
-            sparkHistory[id] = { net: [], disk: [], lastBytes: session.bytes_received, lastDisk: session.disk_write_bytes || 0 };
+            sparkHistory[id] = { net: [], disk: [], lastBytes: session.bytes_received, lastDisk: session.disk_write_bytes || 0, smoothNet: null, smoothDisk: null };
             return;
         }
 
@@ -328,19 +332,26 @@
         // Calcula delta em MB/s para rede
         const netDelta = Math.max(0, session.bytes_received - h.lastBytes);
         const netMBps = netDelta / (1024 * 1024) / intervalSecs;
-        h.net.push(netMBps);
+        h.smoothNet = smoothEwma(h.smoothNet, netMBps);
+        h.net.push(h.smoothNet);
         h.lastBytes = session.bytes_received;
 
         // Calcula delta em MB/s para disco
         const diskBytes = session.disk_write_bytes || 0;
         const diskDelta = Math.max(0, diskBytes - h.lastDisk);
         const diskMBps = diskDelta / (1024 * 1024) / intervalSecs;
-        h.disk.push(diskMBps);
+        h.smoothDisk = smoothEwma(h.smoothDisk, diskMBps);
+        h.disk.push(h.smoothDisk);
         h.lastDisk = diskBytes;
 
         // Trim to max points
         if (h.net.length > SPARK_MAX_POINTS) h.net.shift();
         if (h.disk.length > SPARK_MAX_POINTS) h.disk.shift();
+    }
+
+    function smoothEwma(previous, current) {
+        if (previous == null) return current;
+        return previous + SMOOTHING_ALPHA * (current - previous);
     }
 
     function drawSessionSparklines(sessionId) {

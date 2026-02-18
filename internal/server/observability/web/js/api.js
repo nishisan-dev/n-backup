@@ -20,4 +20,8 @@ const API = {
     agents() { return this.get('/api/v1/agents'); },
     storages() { return this.get('/api/v1/storages'); },
     sessionsHistory() { return this.get('/api/v1/sessions/history'); },
+    activeSessionsHistory(limit = 120, sessionId = "") {
+        const sid = sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : "";
+        return this.get(`/api/v1/sessions/active-history?limit=${limit}${sid}`);
+    },
 };

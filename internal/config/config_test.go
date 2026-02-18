@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadAgentConfig_ExampleFile(t *testing.T) {
@@ -113,6 +114,19 @@ func TestLoadServerConfig_ExampleFile(t *testing.T) {
 	}
 	if home.AssemblerMode != "lazy" {
 		t.Errorf("expected home-dirs.assembler_mode lazy, got %q", home.AssemblerMode)
+	}
+
+	if cfg.WebUI.EventsFile != "/var/lib/nbackup/events.jsonl" {
+		t.Errorf("expected web_ui.events_file set, got %q", cfg.WebUI.EventsFile)
+	}
+	if cfg.WebUI.SessionHistoryFile != "/var/lib/nbackup/session-history.jsonl" {
+		t.Errorf("expected web_ui.session_history_file set, got %q", cfg.WebUI.SessionHistoryFile)
+	}
+	if cfg.WebUI.ActiveSessionsFile != "/var/lib/nbackup/active-sessions.jsonl" {
+		t.Errorf("expected web_ui.active_sessions_file set, got %q", cfg.WebUI.ActiveSessionsFile)
+	}
+	if cfg.WebUI.ActiveSnapshotInterval != 5*time.Minute {
+		t.Errorf("expected web_ui.active_snapshot_interval 5m, got %s", cfg.WebUI.ActiveSnapshotInterval)
 	}
 }
 

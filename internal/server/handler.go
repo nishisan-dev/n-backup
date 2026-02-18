@@ -78,7 +78,10 @@ type Handler struct {
 	Events *observability.EventStore
 
 	// SessionHistory mantém histórico de sessões finalizadas (nil quando WebUI desabilitada).
-	SessionHistory *observability.SessionHistoryRing
+	SessionHistory *observability.SessionHistoryStore
+
+	// ActiveSessionHistory mantém snapshots periódicos de sessões ativas (nil quando WebUI desabilitada).
+	ActiveSessionHistory *observability.ActiveSessionStore
 }
 
 // ControlConnInfo armazena metadata de um control channel conectado.
@@ -278,6 +281,14 @@ func (h *Handler) SessionHistorySnapshot() []observability.SessionHistoryEntry {
 		return []observability.SessionHistoryEntry{}
 	}
 	return h.SessionHistory.Recent(0)
+}
+
+// ActiveSessionHistorySnapshot retorna snapshots periódicos de sessões ativas.
+func (h *Handler) ActiveSessionHistorySnapshot(sessionID string, limit int) []observability.ActiveSessionSnapshotEntry {
+	if h.ActiveSessionHistory == nil {
+		return []observability.ActiveSessionSnapshotEntry{}
+	}
+	return h.ActiveSessionHistory.Recent(limit, sessionID)
 }
 
 // Implementa observability.HandlerMetrics.

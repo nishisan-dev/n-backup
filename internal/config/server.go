@@ -38,6 +38,15 @@ type WebUIConfig struct {
 	EventsFile     string `yaml:"events_file"`      // default: "events.jsonl"
 	EventsMaxLines int    `yaml:"events_max_lines"` // default: 10000
 
+	// Persistência de histórico de sessões finalizadas
+	SessionHistoryFile     string `yaml:"session_history_file"`      // default: "session-history.jsonl"
+	SessionHistoryMaxLines int    `yaml:"session_history_max_lines"` // default: 5000
+
+	// Snapshots periódicos de sessões ativas
+	ActiveSessionsFile     string        `yaml:"active_sessions_file"`      // default: "active-sessions.jsonl"
+	ActiveSessionsMaxLines int           `yaml:"active_sessions_max_lines"` // default: 20000
+	ActiveSnapshotInterval time.Duration `yaml:"active_snapshot_interval"`  // default: 5m
+
 	// Parsed é preenchido em validate(); não vem do YAML.
 	ParsedCIDRs []*net.IPNet `yaml:"-"`
 }
@@ -213,6 +222,21 @@ func (c *ServerConfig) validate() error {
 		}
 		if c.WebUI.EventsMaxLines <= 0 {
 			c.WebUI.EventsMaxLines = 10000
+		}
+		if c.WebUI.SessionHistoryFile == "" {
+			c.WebUI.SessionHistoryFile = "session-history.jsonl"
+		}
+		if c.WebUI.SessionHistoryMaxLines <= 0 {
+			c.WebUI.SessionHistoryMaxLines = 5000
+		}
+		if c.WebUI.ActiveSessionsFile == "" {
+			c.WebUI.ActiveSessionsFile = "active-sessions.jsonl"
+		}
+		if c.WebUI.ActiveSessionsMaxLines <= 0 {
+			c.WebUI.ActiveSessionsMaxLines = 20000
+		}
+		if c.WebUI.ActiveSnapshotInterval <= 0 {
+			c.WebUI.ActiveSnapshotInterval = 5 * time.Minute
 		}
 		if len(c.WebUI.AllowOrigins) == 0 {
 			return fmt.Errorf("web_ui.allow_origins is required when web_ui is enabled (deny-by-default)")

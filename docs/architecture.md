@@ -350,7 +350,8 @@ O nbackup-server embarca uma **SPA de observabilidade** acessível via HTTP, ser
 | `GET /api/v1/metrics` | Bytes recebidos, sessões |
 | `GET /api/v1/sessions` | Sessões ativas |
 | `GET /api/v1/sessions/{id}` | Detalhe de sessão (streams, sparklines, assembler) |
-| `GET /api/v1/sessions/history` | Histórico de sessões finalizadas (ring buffer) |
+| `GET /api/v1/sessions/history` | Histórico de sessões finalizadas (ring buffer + JSONL) |
+| `GET /api/v1/sessions/active-history` | Snapshots periódicos de sessões ativas (JSONL) |
 | `GET /api/v1/agents` | Agentes conectados com stats (CPU, RAM, Disco) |
 | `GET /api/v1/storages` | Storages com uso de disco (usado/total/percentual) |
 | `GET /api/v1/events` | Eventos recentes (ring buffer + persistência JSONL) |
@@ -373,7 +374,8 @@ O nbackup-server embarca uma **SPA de observabilidade** acessível via HTTP, ser
 | **Observability HTTP** | `internal/server/observability/http.go` | Router, handlers REST, ACL |
 | **DTOs** | `internal/server/observability/dto.go` | Structs para serialização JSON |
 | **Event Store** | `internal/server/observability/event_store.go` | Persistência JSONL com rotação |
-| **Session History** | `internal/server/observability/session_history.go` | Ring buffer de sessões finalizadas |
+| **Session History Store** | `internal/server/observability/session_history_store.go` | Ring + persistência JSONL de sessões finalizadas |
+| **Active Session Store** | `internal/server/observability/active_session_store.go` | Snapshots periódicos de sessões ativas (ring + JSONL) |
 | **WebUI Assets** | `internal/server/observability/web/` | SPA (HTML, CSS, JS) embarcados |
 
 ### Configuração
@@ -385,8 +387,12 @@ observability:
   allowed_cidrs:
     - "10.0.0.0/8"
     - "127.0.0.1/32"
-  events_max_lines: 10000         # Rotação do JSONL de eventos
-  session_history_size: 200       # Sessões finalizadas no ring buffer
+  events_max_lines: 10000            # Rotação do JSONL de eventos
+  session_history_file: "session-history.jsonl"
+  session_history_max_lines: 5000
+  active_sessions_file: "active-sessions.jsonl"
+  active_sessions_max_lines: 20000
+  active_snapshot_interval: 5m
 ```
 
 ---
