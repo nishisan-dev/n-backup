@@ -585,15 +585,55 @@ func TestEndToEnd_ParallelBackupSession(t *testing.T) {
 	// Fecha stream 0 (EOF) — server receiveParallelStream termina
 	stream0Conn.CloseWrite()
 
-	// Aguarda server processar antes de enviar trailer
+	// Aguarda server processar antes de enviar CIDN
 	time.Sleep(200 * time.Millisecond)
 
-	// 6. Envia Trailer direto pela conn primária (sem ChunkHeader framing)
+	// 6. Estabelece control channel e envia ControlIngestionDone (CIDN).
+	//    O server exige este sinal antes de prosseguir com Finalize().
+	ctrlConn, err := tls.Dial("tcp", ln.Addr().String(), clientTLSCfg)
+	if err != nil {
+		t.Fatalf("TLS dial control channel: %v", err)
+	}
+	defer ctrlConn.Close()
+
+	// Control channel handshake: magic "CTRL" (4B) + keepalive interval (4B uint32 BE)
+	ctrlHandshake := make([]byte, 8)
+	copy(ctrlHandshake[0:4], []byte("CTRL"))
+	ctrlHandshake[4] = 0
+	ctrlHandshake[5] = 0
+	ctrlHandshake[6] = 0
+	ctrlHandshake[7] = 30 // 30 seconds keepalive
+	if _, err := ctrlConn.Write(ctrlHandshake); err != nil {
+		t.Fatalf("writing control channel handshake: %v", err)
+	}
+
+	// Version string (newline-terminated)
+	if _, err := ctrlConn.Write([]byte("v1.2.3\n")); err != nil {
+		t.Fatalf("writing control channel version: %v", err)
+	}
+
+	// Initial stats payload (16B zeros: CPU, Mem, Disk, Load — all 0.0)
+	if _, err := ctrlConn.Write(make([]byte, 16)); err != nil {
+		t.Fatalf("writing control channel initial stats: %v", err)
+	}
+
+	// Aguarda server registrar o control channel
+	time.Sleep(100 * time.Millisecond)
+
+	// Envia ControlIngestionDone com sessionID
+	if err := protocol.WriteControlIngestionDone(ctrlConn, sessionID); err != nil {
+		t.Fatalf("WriteControlIngestionDone: %v", err)
+	}
+
+	// Aguarda server processar CIDN antes de enviar trailer
+	time.Sleep(100 * time.Millisecond)
+
+	// 7. Envia Trailer direto pela conn primária (sem ChunkHeader framing)
 	if err := protocol.WriteTrailer(conn, checksum, size); err != nil {
 		t.Fatalf("WriteTrailer: %v", err)
 	}
 
-	// 7. Final ACK
+	// 8. Final ACK
 	finalACK, err := protocol.ReadFinalACK(conn)
 	if err != nil {
 		t.Fatalf("ReadFinalACK: %v", err)
@@ -603,7 +643,7 @@ func TestEndToEnd_ParallelBackupSession(t *testing.T) {
 		t.Fatalf("expected FinalStatusOK, got %d", finalACK.Status)
 	}
 
-	// 8. Verifica backup gravado
+	// 9. Verifica backup gravado
 	backupDir := filepath.Join(storageDir, agentName, testBackupName)
 	entries, err := os.ReadDir(backupDir)
 	if err != nil {
