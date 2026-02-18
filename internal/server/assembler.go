@@ -50,28 +50,29 @@ type ChunkAssemblerOptions struct {
 // Resultado: para o caso normal (single-stream ou round-robin sequencial),
 // zero arquivos temporários são criados.
 type ChunkAssembler struct {
-	sessionID       string
-	baseDir         string // diretório do agent
-	outPath         string // caminho do arquivo de saída
-	outFile         *os.File
-	outBuf          *bufio.Writer
-	hasher          hash.Hash
-	checksum        [32]byte
-	finalized       bool
-	chunkDir        string // subdir para chunks out-of-order
-	chunkDirExists  bool   // lazy creation — só cria se necessário
-	nextExpectedSeq uint32
-	pendingChunks   map[uint32]pendingChunk // chunks out-of-order aguardando
-	pendingMemBytes int64                   // bytes pendentes em memória
-	pendingMemLimit int64                   // limite de pendência em memória
-	mode            string
-	lazyMaxSeq      uint32
-	totalBytes      int64
-	mu              sync.Mutex
-	logger          *slog.Logger
+	sessionID      string
+	baseDir        string // diretório do agent
+	outPath        string // caminho do arquivo de saída
+	outFile        *os.File
+	outBuf         *bufio.Writer
+	hasher         hash.Hash
+	checksum       [32]byte
+	chunkDir       string // subdir para chunks out-of-order
+	chunkDirExists bool   // lazy creation — só cria se necessário
+	pendingChunks  map[uint32]pendingChunk // chunks out-of-order aguardando (protegido por mu)
+	pendingMemLimit int64                  // limite de pendência em memória (imutável)
+	mode           string                  // assembler mode (imutável)
+	mu             sync.Mutex              // protege pendingChunks, outBuf, outFile, chunkDirExists
+	logger         *slog.Logger
 
-	// Observability: contadores atômicos para progresso de assembly.
-	// Usados fora do mutex pelo Stats() para permitir leitura sem contention.
+	// Campos atômicos — lidos por Stats() sem lock.
+	// Escritos sob ca.mu pelos métodos de mutação.
+	nextExpectedSeq atomic.Uint32 // próximo seq esperado (in-order)
+	pendingMemBytes atomic.Int64  // bytes pendentes em memória
+	totalBytes      atomic.Int64  // total de bytes escritos no output
+	finalized       atomic.Bool   // true após Finalize() completar
+	pendingCount    atomic.Int32  // len(pendingChunks) mantido via atomic
+	lazyMaxSeq      atomic.Uint32 // maior seq recebido em lazy mode
 	assembling      atomic.Bool   // true durante finalizeLazy()
 	assembledChunks atomic.Uint32 // chunks já montados no finalize lazy
 }
@@ -89,18 +90,14 @@ type AssemblerStats struct {
 }
 
 // Stats retorna um snapshot das métricas do assembler.
+// Lock-free: lê apenas campos atômicos para evitar contention com Finalize().
 func (ca *ChunkAssembler) Stats() AssemblerStats {
-	ca.mu.Lock()
-	finalized := ca.finalized
-	nextSeq := ca.nextExpectedSeq
-	pending := len(ca.pendingChunks)
-	pendingMem := ca.pendingMemBytes
-	totalBytes := ca.totalBytes
-	mode := ca.mode
-	lazyMax := ca.lazyMaxSeq
-	ca.mu.Unlock()
-
-	// Phase e TotalChunks determinados fora do lock (assembling/assembledChunks são atomics)
+	finalized := ca.finalized.Load()
+	nextSeq := ca.nextExpectedSeq.Load()
+	pending := int(ca.pendingCount.Load())
+	pendingMem := ca.pendingMemBytes.Load()
+	totalBytes := ca.totalBytes.Load()
+	lazyMax := ca.lazyMaxSeq.Load()
 	assembling := ca.assembling.Load()
 	assembled := ca.assembledChunks.Load()
 
@@ -109,7 +106,7 @@ func (ca *ChunkAssembler) Stats() AssemblerStats {
 	switch {
 	case finalized:
 		phase = "done"
-		if mode == AssemblerModeLazy {
+		if ca.mode == AssemblerModeLazy {
 			totalChunks = lazyMax + 1
 		} else {
 			totalChunks = nextSeq
@@ -120,7 +117,7 @@ func (ca *ChunkAssembler) Stats() AssemblerStats {
 		totalChunks = lazyMax + 1
 	default:
 		phase = "receiving"
-		if mode == AssemblerModeLazy {
+		if ca.mode == AssemblerModeLazy {
 			totalChunks = lazyMax + 1
 		} else {
 			totalChunks = nextSeq
@@ -189,7 +186,7 @@ func NewChunkAssemblerWithOptions(sessionID, agentDir string, logger *slog.Logge
 	chunkDir := filepath.Join(agentDir, fmt.Sprintf("chunks_%s", sessionID))
 	hasher := sha256.New()
 
-	return &ChunkAssembler{
+	ca := &ChunkAssembler{
 		sessionID:       sessionID,
 		baseDir:         agentDir,
 		outPath:         outPath,
@@ -198,12 +195,13 @@ func NewChunkAssemblerWithOptions(sessionID, agentDir string, logger *slog.Logge
 		hasher:          hasher,
 		chunkDir:        chunkDir,
 		chunkDirExists:  false,
-		nextExpectedSeq: 0,
 		pendingChunks:   make(map[uint32]pendingChunk),
 		pendingMemLimit: pendingMemLimit,
 		mode:            mode,
 		logger:          logger,
-	}, nil
+	}
+	ca.nextExpectedSeq.Store(0)
+	return ca, nil
 }
 
 // WriteChunk recebe um chunk com sua sequência global e dados.
@@ -232,14 +230,15 @@ func (ca *ChunkAssembler) WriteChunk(globalSeq uint32, data io.Reader, length in
 		return ca.writeChunkLazy(globalSeq, buf)
 	}
 
-	if globalSeq == ca.nextExpectedSeq {
+	nextSeq := ca.nextExpectedSeq.Load()
+	if globalSeq == nextSeq {
 		// In-order: escreve direto no arquivo de saída (operação local, rápida)
 		n, err := ca.outBuf.Write(buf)
 		if err != nil {
 			return fmt.Errorf("writing chunk seq %d to output: %w", globalSeq, err)
 		}
-		ca.totalBytes += int64(n)
-		ca.nextExpectedSeq++
+		ca.totalBytes.Add(int64(n))
+		ca.nextExpectedSeq.Store(nextSeq + 1)
 
 		ca.logger.Debug("chunk written in-order", "globalSeq", globalSeq, "bytes", n)
 
@@ -247,9 +246,9 @@ func (ca *ChunkAssembler) WriteChunk(globalSeq uint32, data io.Reader, length in
 		return ca.flushPending()
 	}
 
-	if globalSeq < ca.nextExpectedSeq {
+	if globalSeq < nextSeq {
 		// Chunk duplicado ou atrasado — ignora (dados já foram lidos acima, sem leak)
-		ca.logger.Warn("ignoring duplicate/late chunk", "globalSeq", globalSeq, "expected", ca.nextExpectedSeq)
+		ca.logger.Warn("ignoring duplicate/late chunk", "globalSeq", globalSeq, "expected", nextSeq)
 		return nil
 	}
 
@@ -264,8 +263,8 @@ func (ca *ChunkAssembler) writeChunkLazy(globalSeq uint32, buf []byte) error {
 		ca.logger.Warn("ignoring duplicate chunk in lazy mode", "globalSeq", globalSeq)
 		return nil
 	}
-	if len(ca.pendingChunks) == 0 || globalSeq > ca.lazyMaxSeq {
-		ca.lazyMaxSeq = globalSeq
+	if len(ca.pendingChunks) == 0 || globalSeq > ca.lazyMaxSeq.Load() {
+		ca.lazyMaxSeq.Store(globalSeq)
 	}
 
 	path, err := ca.chunkPath(globalSeq)
@@ -277,7 +276,8 @@ func (ca *ChunkAssembler) writeChunkLazy(globalSeq uint32, buf []byte) error {
 	}
 
 	ca.pendingChunks[globalSeq] = pendingChunk{filePath: path, length: int64(len(buf))}
-	ca.totalBytes += int64(len(buf))
+	ca.pendingCount.Add(1)
+	ca.totalBytes.Add(int64(len(buf)))
 	return nil
 }
 
@@ -285,7 +285,8 @@ func (ca *ChunkAssembler) writeChunkLazy(globalSeq uint32, buf []byte) error {
 // Deve ser chamado com ca.mu held.
 func (ca *ChunkAssembler) flushPending() error {
 	for {
-		pc, ok := ca.pendingChunks[ca.nextExpectedSeq]
+		nextSeq := ca.nextExpectedSeq.Load()
+		pc, ok := ca.pendingChunks[nextSeq]
 		if !ok {
 			break
 		}
@@ -295,35 +296,36 @@ func (ca *ChunkAssembler) flushPending() error {
 			// Pendente em memória: escreve direto no output.
 			written, err := ca.outBuf.Write(pc.data)
 			if err != nil {
-				return fmt.Errorf("flushing in-memory pending chunk seq %d: %w", ca.nextExpectedSeq, err)
+				return fmt.Errorf("flushing in-memory pending chunk seq %d: %w", nextSeq, err)
 			}
 			n = int64(written)
-			ca.pendingMemBytes -= int64(len(pc.data))
-			if ca.pendingMemBytes < 0 {
-				ca.pendingMemBytes = 0
+			newMem := ca.pendingMemBytes.Add(-int64(len(pc.data)))
+			if newMem < 0 {
+				ca.pendingMemBytes.Store(0)
 			}
 		} else {
 			// Pendente em disco: faz copy do arquivo temporário.
 			f, err := os.Open(pc.filePath)
 			if err != nil {
-				return fmt.Errorf("opening pending chunk seq %d: %w", ca.nextExpectedSeq, err)
+				return fmt.Errorf("opening pending chunk seq %d: %w", nextSeq, err)
 			}
 
 			n, err = io.Copy(ca.outBuf, f)
 			f.Close()
 			if err != nil {
-				return fmt.Errorf("flushing pending chunk seq %d: %w", ca.nextExpectedSeq, err)
+				return fmt.Errorf("flushing pending chunk seq %d: %w", nextSeq, err)
 			}
 
 			// Remove arquivo temporário
 			os.Remove(pc.filePath)
 		}
-		ca.totalBytes += n
+		ca.totalBytes.Add(n)
 
-		ca.logger.Debug("pending chunk flushed", "globalSeq", ca.nextExpectedSeq, "bytes", n)
+		ca.logger.Debug("pending chunk flushed", "globalSeq", nextSeq, "bytes", n)
 
-		delete(ca.pendingChunks, ca.nextExpectedSeq)
-		ca.nextExpectedSeq++
+		delete(ca.pendingChunks, nextSeq)
+		ca.pendingCount.Add(-1)
+		ca.nextExpectedSeq.Store(nextSeq + 1)
 	}
 
 	return nil
@@ -333,16 +335,18 @@ func (ca *ChunkAssembler) flushPending() error {
 // Recebe os dados já materializados em memória (lidos fora do mutex).
 // Deve ser chamado com ca.mu held.
 func (ca *ChunkAssembler) saveOutOfOrder(globalSeq uint32, data []byte) error {
+	currentMem := ca.pendingMemBytes.Load()
 	// Prioriza memória para evitar write/read extra em discos lentos (ex: USB).
-	if ca.pendingMemBytes+int64(len(data)) <= ca.pendingMemLimit {
+	if currentMem+int64(len(data)) <= ca.pendingMemLimit {
 		copyBuf := append([]byte(nil), data...)
 		ca.pendingChunks[globalSeq] = pendingChunk{data: copyBuf, length: int64(len(copyBuf))}
-		ca.pendingMemBytes += int64(len(copyBuf))
+		ca.pendingCount.Add(1)
+		newMem := ca.pendingMemBytes.Add(int64(len(copyBuf)))
 		ca.logger.Debug("chunk saved out-of-order in memory",
 			"globalSeq", globalSeq,
 			"bytes", len(copyBuf),
-			"pending", len(ca.pendingChunks),
-			"pendingMemBytes", ca.pendingMemBytes,
+			"pending", ca.pendingCount.Load(),
+			"pendingMemBytes", newMem,
 			"pendingMemLimit", ca.pendingMemLimit)
 		return nil
 	}
@@ -370,11 +374,12 @@ func (ca *ChunkAssembler) saveOutOfOrder(globalSeq uint32, data []byte) error {
 	}
 
 	ca.pendingChunks[globalSeq] = pendingChunk{filePath: path, length: int64(n)}
+	ca.pendingCount.Add(1)
 	ca.logger.Debug("chunk saved out-of-order on disk",
 		"globalSeq", globalSeq,
 		"bytes", n,
-		"pending", len(ca.pendingChunks),
-		"pendingMemBytes", ca.pendingMemBytes,
+		"pending", ca.pendingCount.Load(),
+		"pendingMemBytes", ca.pendingMemBytes.Load(),
 		"pendingMemLimit", ca.pendingMemLimit)
 
 	return nil
@@ -400,8 +405,6 @@ func (ca *ChunkAssembler) Finalize() (string, int64, error) {
 	defer ca.mu.Unlock()
 
 	if ca.mode == AssemblerModeLazy {
-		// Seta flag de assembling ANTES do lock para que Stats() possa ler.
-		// O lock é segurado por Finalize() mas assembling é atomic.
 		ca.assembling.Store(true)
 		defer ca.assembling.Store(false)
 		if err := ca.finalizeLazy(); err != nil {
@@ -409,10 +412,11 @@ func (ca *ChunkAssembler) Finalize() (string, int64, error) {
 		}
 	}
 
-	if len(ca.pendingChunks) > 0 {
+	pendingCnt := ca.pendingCount.Load()
+	if pendingCnt > 0 {
 		ca.logger.Warn("finalizing with pending out-of-order chunks",
-			"pending", len(ca.pendingChunks),
-			"nextExpected", ca.nextExpectedSeq,
+			"pending", pendingCnt,
+			"nextExpected", ca.nextExpectedSeq.Load(),
 		)
 	}
 
@@ -424,15 +428,16 @@ func (ca *ChunkAssembler) Finalize() (string, int64, error) {
 		return "", 0, fmt.Errorf("closing output file: %w", err)
 	}
 	copy(ca.checksum[:], ca.hasher.Sum(nil))
-	ca.finalized = true
+	ca.finalized.Store(true)
 
+	total := ca.totalBytes.Load()
 	ca.logger.Info("assembly finalized",
 		"session", ca.sessionID,
-		"totalBytes", ca.totalBytes,
-		"nextExpectedSeq", ca.nextExpectedSeq,
+		"totalBytes", total,
+		"nextExpectedSeq", ca.nextExpectedSeq.Load(),
 	)
 
-	return ca.outPath, ca.totalBytes, nil
+	return ca.outPath, total, nil
 }
 
 // finalizeLazy monta os chunks staged em ordem de sequência e remove os temporários.
@@ -442,7 +447,8 @@ func (ca *ChunkAssembler) finalizeLazy() error {
 		return nil
 	}
 
-	for seq := uint32(0); seq <= ca.lazyMaxSeq; seq++ {
+	lazyMax := ca.lazyMaxSeq.Load()
+	for seq := uint32(0); seq <= lazyMax; seq++ {
 		pc, ok := ca.pendingChunks[seq]
 		if !ok {
 			return fmt.Errorf("missing chunk seq %d in lazy assembly", seq)
@@ -458,6 +464,7 @@ func (ca *ChunkAssembler) finalizeLazy() error {
 		f.Close()
 		os.Remove(pc.filePath)
 		delete(ca.pendingChunks, seq)
+		ca.pendingCount.Add(-1)
 		ca.assembledChunks.Add(1)
 	}
 
@@ -467,13 +474,12 @@ func (ca *ChunkAssembler) finalizeLazy() error {
 // Checksum retorna o SHA-256 do arquivo montado.
 // Só é válido após Finalize.
 func (ca *ChunkAssembler) Checksum() ([32]byte, error) {
-	ca.mu.Lock()
-	defer ca.mu.Unlock()
-
-	if !ca.finalized {
+	if !ca.finalized.Load() {
 		var zero [32]byte
 		return zero, fmt.Errorf("assembly checksum unavailable before finalize")
 	}
+	// checksum é escrito uma vez em Finalize() antes de finalized.Store(true).
+	// Portanto é safe ler sem lock após finalized == true (happens-before).
 	return ca.checksum, nil
 }
 
@@ -483,7 +489,7 @@ func (ca *ChunkAssembler) Cleanup() error {
 	defer ca.mu.Unlock()
 
 	// Se não foi finalizado, fecha e remove o arquivo de saída parcial
-	if ca.outFile != nil && !ca.finalized {
+	if ca.outFile != nil && !ca.finalized.Load() {
 		ca.outFile.Close()
 		ca.outFile = nil
 		os.Remove(ca.outPath)
@@ -493,7 +499,8 @@ func (ca *ChunkAssembler) Cleanup() error {
 		os.RemoveAll(ca.chunkDir)
 	}
 	ca.pendingChunks = make(map[uint32]pendingChunk)
-	ca.pendingMemBytes = 0
+	ca.pendingCount.Store(0)
+	ca.pendingMemBytes.Store(0)
 	return nil
 }
 
