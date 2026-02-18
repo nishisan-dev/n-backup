@@ -37,9 +37,10 @@ tar -cvf - -C / app/scripts/ home/ etc/ | gzip | ssh "$REMOTE_HOST" "cat > '$REM
 ### 2.3 Streaming Pipeline
 
 ```
-fs.WalkDir ──▶ tar.Writer ──▶ pgzip.Writer ──▶ RingBuffer ──▶ tls.Conn ──▶ Server (io.Copy → disk)
-     │                                    │
-     └── excludes/includes (glob)           └── backpressure (bloqueia se cheio)
+fs.WalkDir ──▶ tar.Writer ──▶ pgzip.Writer ──▶ ThrottledWriter ──▶ RingBuffer ──▶ tls.Conn ──▶ Server (io.Copy → disk)
+     │                                    │             │
+     └── excludes/includes (glob)          │             └── backpressure (bloqueia se cheio)
+                                           └── rate.Limiter (Token Bucket, golang.org/x/time/rate)
 ```
 
 - O RingBuffer implementa `io.Writer` e aplica backpressure quando cheio.
@@ -349,6 +350,10 @@ backups:
 
 - **parallels**: `0` desabilita (single stream), `1-8` define o máximo de streams.
 - **auto_scaler**: `efficiency` (threshold-based, padrão) ou `adaptive` (probe-and-measure).
+- **bandwidth_limit**: limite de upload em Bytes/segundo (ex: `50mb`, `1gb`). Mínimo: `64kb`. Vazio = sem limite.
+  - Para single-stream: aplicado sobre o buffer de escrita antes do hash inline.
+  - Para parallel-stream: aplicado sobre o fluxo agregado antes da distribuição pelo Dispatcher.
+  - Implementado via Token Bucket (`golang.org/x/time/rate`).
 - O agent usa um **Dispatcher** (round-robin) e um **AutoScaler** (histerese ou probe) para distribuir chunks entre streams.
 
 ### 3.6 Control Channel Protocol (v1.3.8+)
@@ -547,6 +552,7 @@ backups:
     schedule: "0 */6 * * *"
     parallels: 4
     auto_scaler: efficiency  # efficiency (padrão) ou adaptive
+    bandwidth_limit: "100mb"  # Limite de upload: 100 MB/s (opcional, vazio=sem limite)
     sources:
       - path: /home
     exclude:

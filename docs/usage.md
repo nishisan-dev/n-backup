@@ -246,6 +246,8 @@ backups:
     storage: "main"
     parallels: 4             # 0 = single stream, 1-8 = máximo de streams
     auto_scaler: efficiency  # efficiency (padrão) ou adaptive
+    bandwidth_limit: "100mb"  # Limite de upload: 100 MB/s (opcional, vazio=sem limite)
+    sources:
 ```
 
 ### Como Funciona
@@ -293,6 +295,39 @@ backups:
 ```
 
 As estatísticas do auto-scaler (efficiency, throughput, estado) são enviadas ao server via control channel e visíveis na WebUI.
+
+---
+
+## Bandwidth Throttling
+
+O agent permite limitar a largura de banda de upload por backup entry, evitando saturação do link:
+
+```yaml
+backups:
+  - name: "data"
+    storage: "main"
+    bandwidth_limit: "50mb"     # Limite de 50 MB/s
+    parallels: 4
+```
+
+### Como Funciona
+
+- O throttle é baseado em **Token Bucket** (via `golang.org/x/time/rate`), limitando a taxa de escrita no pipeline.
+- Para **single-stream**: o throttle é aplicado no buffer de escrita antes do hash inline.
+- Para **parallel-stream**: o throttle é aplicado sobre o fluxo agregado, antes da distribuição round-robin pelo Dispatcher — garantindo que a soma de todos os streams respeite o limite.
+- Se `bandwidth_limit` não for configurado, não há limitação.
+
+### Parâmetros
+
+| Parâmetro | Default | Descrição |
+|----------|---------|----------|
+| `bandwidth_limit` | vazio (sem limite) | Taxa máxima de upload em Bytes/segundo (ex: `50mb`, `1gb`, `256kb`) |
+
+> [!NOTE]
+> O valor mínimo aceito é `64kb`. Valores abaixo disso são rejeitados na validação da configuração.
+
+> [!TIP]
+> Use `bandwidth_limit` em links compartilhados para evitar impacto em outros serviços. Em redes dedicadas, deixe sem limite para throughput máximo.
 
 ---
 

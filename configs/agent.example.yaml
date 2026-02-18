@@ -27,6 +27,7 @@ backups:
     schedule: "0 */6 * * *"        # A cada 6 horas
     parallels: 4                   # 4 streams paralelos
     auto_scaler: efficiency        # efficiency (padrão) ou adaptive (probe-and-measure)
+    bandwidth_limit: "100mb"       # Limite de upload: 100 MB/s (opcional, vazio=sem limite, mínimo: 64kb)
     sources:
       - path: /home
       - path: /etc
