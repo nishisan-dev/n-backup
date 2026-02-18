@@ -1220,23 +1220,27 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 
 		case protocol.MagicControlIngestionDone:
 			// Agent sinalizou que toda a ingestão foi completada com sucesso
-			protocol.ReadControlIngestionDonePayload(conn) // no-op
+			cidnSessionID, err := protocol.ReadControlIngestionDonePayload(conn)
+			if err != nil {
+				logger.Warn("control channel: reading ControlIngestionDone payload", "error", err)
+				return
+			}
 
-			logger.Info("control channel: received ControlIngestionDone")
+			logger.Info("control channel: received ControlIngestionDone", "session", cidnSessionID)
 
-			h.sessions.Range(func(_, value any) bool {
-				ps, ok := value.(*ParallelSession)
-				if !ok || ps.AgentName != agentName {
-					return true
+			// Lookup direto por sessionID — sem ambiguidade em multi-sessão
+			if val, ok := h.sessions.Load(cidnSessionID); ok {
+				if ps, ok := val.(*ParallelSession); ok {
+					ps.ingestionOnce.Do(func() {
+						close(ps.IngestionDone)
+					})
 				}
-				ps.ingestionOnce.Do(func() {
-					close(ps.IngestionDone)
-				})
-				return false
-			})
+			} else {
+				logger.Warn("control channel: ControlIngestionDone for unknown session", "session", cidnSessionID)
+			}
 
 			if h.Events != nil {
-				h.Events.PushEvent("info", "ingestion_done_signal", agentName, "agent confirmed all data sent", 0)
+				h.Events.PushEvent("info", "ingestion_done_signal", agentName, fmt.Sprintf("agent confirmed all data sent (session %s)", cidnSessionID), 0)
 			}
 
 		default:

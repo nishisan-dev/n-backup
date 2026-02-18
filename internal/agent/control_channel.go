@@ -6,6 +6,7 @@ package agent
 
 import (
 	"crypto/tls"
+	"fmt"
 	"log/slog"
 	"math"
 	"net"
@@ -182,22 +183,23 @@ func (cc *ControlChannel) SendRotateACK(streamIndex uint8) error {
 
 // SendIngestionDone envia ControlIngestionDone ao server pelo canal de controle.
 // Sinaliza que o agent terminou de enviar todos os chunks com sucesso.
+// Retorna erro se o control channel estiver desconectado.
 // Thread-safe via writeMu.
-func (cc *ControlChannel) SendIngestionDone() error {
+func (cc *ControlChannel) SendIngestionDone(sessionID string) error {
 	cc.connMu.Lock()
 	conn := cc.conn
 	cc.connMu.Unlock()
 
 	if conn == nil {
-		return nil
+		return fmt.Errorf("control channel unavailable: cannot send ControlIngestionDone for session %s", sessionID)
 	}
 
 	cc.writeMu.Lock()
-	err := protocol.WriteControlIngestionDone(conn)
+	err := protocol.WriteControlIngestionDone(conn, sessionID)
 	cc.writeMu.Unlock()
 
 	if err != nil {
-		cc.logger.Warn("failed to send ControlIngestionDone", "error", err)
+		cc.logger.Warn("failed to send ControlIngestionDone", "error", err, "session", sessionID)
 	}
 	return err
 }
