@@ -7,6 +7,7 @@ require (
 	github.com/klauspost/pgzip v1.2.6
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/shirou/gopsutil/v3 v3.24.5
+	golang.org/x/time v0.14.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
