@@ -1218,6 +1218,27 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 				"walk_complete", prog.WalkComplete,
 			)
 
+		case protocol.MagicControlIngestionDone:
+			// Agent sinalizou que toda a ingestão foi completada com sucesso
+			protocol.ReadControlIngestionDonePayload(conn) // no-op
+
+			logger.Info("control channel: received ControlIngestionDone")
+
+			h.sessions.Range(func(_, value any) bool {
+				ps, ok := value.(*ParallelSession)
+				if !ok || ps.AgentName != agentName {
+					return true
+				}
+				ps.ingestionOnce.Do(func() {
+					close(ps.IngestionDone)
+				})
+				return false
+			})
+
+			if h.Events != nil {
+				h.Events.PushEvent("info", "ingestion_done_signal", agentName, "agent confirmed all data sent", 0)
+			}
+
 		default:
 			logger.Warn("control channel: unknown magic", "magic", string(magic[:]))
 			return
@@ -1885,6 +1906,8 @@ type ParallelSession struct {
 	WalkComplete      atomic.Int32  // 1 = prescan concluído, total confiável (via ControlProgress)
 	ClientVersion     string        // Versão do client (protocolo v3+)
 	AutoScaleInfo     atomic.Value  // *observability.AutoScaleInfo (atualizado via ControlAutoScaleStats)
+	IngestionDone     chan struct{} // fechado quando agent envia ControlIngestionDone
+	ingestionOnce     sync.Once     // garante close único do IngestionDone
 }
 
 // handleParallelBackup processa um backup paralelo.
@@ -1937,6 +1960,7 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		StreamReady:   make(chan struct{}),
 		Done:          make(chan struct{}),
 		CreatedAt:     now,
+		IngestionDone: make(chan struct{}),
 	}
 	pSession.LastActivity.Store(now.UnixNano())
 	h.sessions.Store(sessionID, pSession)
@@ -1961,9 +1985,29 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		return
 	}
 
+	// Espera sinal explícito do agent (ControlIngestionDone) ou timeout.
+	// StreamWg.Wait() só garante cleanup das goroutines após o sinal.
+	select {
+	case <-pSession.IngestionDone:
+		logger.Info("agent confirmed ingestion complete")
+	case <-time.After(25 * time.Hour):
+		logger.Error("ingestion timeout — agent never confirmed completion")
+		h.sessions.Delete(sessionID)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+		if h.Events != nil {
+			h.Events.PushEvent("error", "ingestion_timeout", agentName, fmt.Sprintf("%s/%s timed out waiting for ControlIngestionDone", storageName, backupName), 0)
+		}
+		return
+	case <-ctx.Done():
+		logger.Error("context cancelled waiting for ingestion done")
+		h.sessions.Delete(sessionID)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+		return
+	}
+
 	pSession.StreamWg.Wait()
 	pSession.Closing.Store(true)
-	logger.Info("all parallel streams complete — ingestion finished")
+	logger.Info("all parallel streams complete — proceeding to finalize")
 
 	// Evento de ingestão completa — a sessão permanece visível com status "finalizing"
 	if h.Events != nil {

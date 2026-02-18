@@ -180,6 +180,28 @@ func (cc *ControlChannel) SendRotateACK(streamIndex uint8) error {
 	return err
 }
 
+// SendIngestionDone envia ControlIngestionDone ao server pelo canal de controle.
+// Sinaliza que o agent terminou de enviar todos os chunks com sucesso.
+// Thread-safe via writeMu.
+func (cc *ControlChannel) SendIngestionDone() error {
+	cc.connMu.Lock()
+	conn := cc.conn
+	cc.connMu.Unlock()
+
+	if conn == nil {
+		return nil
+	}
+
+	cc.writeMu.Lock()
+	err := protocol.WriteControlIngestionDone(conn)
+	cc.writeMu.Unlock()
+
+	if err != nil {
+		cc.logger.Warn("failed to send ControlIngestionDone", "error", err)
+	}
+	return err
+}
+
 // Start inicia a goroutine de manutenção do canal de controle.
 func (cc *ControlChannel) Start() {
 	cc.wg.Add(1)

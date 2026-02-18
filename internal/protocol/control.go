@@ -41,6 +41,11 @@ var MagicControlStats = [4]byte{'C', 'S', 'T', 'S'}
 // MagicControlAutoScaleStats é o magic para frames ControlAutoScaleStats (Agent → Server).
 var MagicControlAutoScaleStats = [4]byte{'C', 'A', 'S', 'S'}
 
+// MagicControlIngestionDone é o magic para frames ControlIngestionDone (Agent → Server).
+// Sinaliza explicitamente que o agent terminou de enviar todos os chunks com sucesso.
+// Formato: [Magic "CIDN" 4B] — sem payload.
+var MagicControlIngestionDone = [4]byte{'C', 'I', 'D', 'N'}
+
 // ControlPing é enviado pelo agent para o server no canal de controle.
 // Formato: [Magic "CPNG" 4B] [Timestamp int64 8B]
 type ControlPing struct {
@@ -485,4 +490,17 @@ func ReadControlAutoScaleStats(r io.Reader) (*ControlAutoScaleStats, error) {
 		State:         buf[18],
 		ProbeActive:   buf[19],
 	}, nil
+}
+
+// WriteControlIngestionDone escreve o frame ControlIngestionDone (Agent → Server).
+// Frame: [Magic 4B] — sem payload.
+func WriteControlIngestionDone(w io.Writer) error {
+	_, err := w.Write(MagicControlIngestionDone[:])
+	return err
+}
+
+// ReadControlIngestionDonePayload é um no-op (sem payload).
+// Mantido para consistência com os demais frames; o magic já foi lido pelo dispatcher.
+func ReadControlIngestionDonePayload(_ io.Reader) error {
+	return nil
 }
