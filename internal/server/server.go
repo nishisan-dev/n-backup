@@ -180,8 +180,20 @@ func startWebUI(ctx context.Context, cfg *config.ServerConfig, handler *Handler,
 	}
 	handler.Events = store
 
-	// Cria ring para histórico de sessões finalizadas
-	handler.SessionHistory = observability.NewSessionHistoryRing(200)
+	// Cria store para histórico de sessões finalizadas
+	sessionStore, err := observability.NewSessionHistoryStore(cfg.WebUI.SessionHistoryFile, 200, cfg.WebUI.SessionHistoryMaxLines)
+	if err != nil {
+		logger.Error("creating session history store", "error", err, "path", cfg.WebUI.SessionHistoryFile)
+		sessionStore, _ = observability.NewSessionHistoryStore(filepath.Join(os.TempDir(), "nbackup-session-history.jsonl"), 200, cfg.WebUI.SessionHistoryMaxLines)
+	}
+	handler.SessionHistory = sessionStore
+
+	activeStore, err := observability.NewActiveSessionStore(cfg.WebUI.ActiveSessionsFile, 4000, cfg.WebUI.ActiveSessionsMaxLines)
+	if err != nil {
+		logger.Error("creating active session store", "error", err, "path", cfg.WebUI.ActiveSessionsFile)
+		activeStore, _ = observability.NewActiveSessionStore(filepath.Join(os.TempDir(), "nbackup-active-sessions.jsonl"), 4000, cfg.WebUI.ActiveSessionsMaxLines)
+	}
+	handler.ActiveSessionHistory = activeStore
 
 	router := observability.NewRouter(handler, cfg, acl, store)
 
@@ -203,6 +215,32 @@ func startWebUI(ctx context.Context, cfg *config.ServerConfig, handler *Handler,
 	}()
 
 	go func() {
+		ticker := time.NewTicker(cfg.WebUI.ActiveSnapshotInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if handler.ActiveSessionHistory == nil {
+					continue
+				}
+				sessions := handler.SessionsSnapshot()
+				if len(sessions) == 0 {
+					continue
+				}
+				now := time.Now()
+				for _, sess := range sessions {
+					handler.ActiveSessionHistory.PushSnapshot(sess, now)
+				}
+				if handler.Events != nil {
+					handler.Events.PushEvent("info", "active_snapshot", "", fmt.Sprintf("saved %d active session snapshots", len(sessions)), 0)
+				}
+			}
+		}
+	}()
+
+	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -211,6 +249,16 @@ func startWebUI(ctx context.Context, cfg *config.ServerConfig, handler *Handler,
 		}
 		if err := store.Close(); err != nil {
 			logger.Error("event store close error", "error", err)
+		}
+		if sessionStore != nil {
+			if err := sessionStore.Close(); err != nil {
+				logger.Error("session history store close error", "error", err)
+			}
+		}
+		if activeStore != nil {
+			if err := activeStore.Close(); err != nil {
+				logger.Error("active session store close error", "error", err)
+			}
 		}
 		logger.Info("web UI shutdown complete")
 	}()

@@ -36,6 +36,9 @@ func (m *mockMetrics) SessionDetail(id string) (*SessionDetail, bool) {
 func (m *mockMetrics) ConnectedAgents() []AgentInfo                  { return m.agents }
 func (m *mockMetrics) StorageUsageSnapshot() []StorageUsage          { return m.storages }
 func (m *mockMetrics) SessionHistorySnapshot() []SessionHistoryEntry { return nil }
+func (m *mockMetrics) ActiveSessionHistorySnapshot(sessionID string, limit int) []ActiveSessionSnapshotEntry {
+	return nil
+}
 
 func newMockMetrics() *mockMetrics {
 	return &mockMetrics{
@@ -438,5 +441,26 @@ func TestStorages_WithData(t *testing.T) {
 	}
 	if resp[0].BackupsCount != 3 {
 		t.Errorf("expected backups_count 3, got %d", resp[0].BackupsCount)
+	}
+}
+
+func TestActiveSessionHistory_ReturnsArray(t *testing.T) {
+	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t), nil)
+
+	req := httptest.NewRequest("GET", "/api/v1/sessions/active-history?limit=10", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var resp []ActiveSessionSnapshotEntry
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if len(resp) != 0 {
+		t.Fatalf("expected empty array, got %d", len(resp))
 	}
 }
