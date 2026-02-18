@@ -539,11 +539,11 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 	// Sinaliza ao server que toda a ingestão foi completada com sucesso.
 	// O server espera este frame antes de prosseguir com Finalize().
 	if controlCh != nil {
-		if err := controlCh.SendIngestionDone(); err != nil {
-			logger.Warn("failed to send ControlIngestionDone", "error", err)
-		} else {
-			logger.Info("sent ControlIngestionDone to server")
+		if err := controlCh.SendIngestionDone(sessionID); err != nil {
+			logger.Error("failed to send ControlIngestionDone — server may timeout waiting", "error", err)
+			return fmt.Errorf("signaling ingestion done: %w", err)
 		}
+		logger.Info("sent ControlIngestionDone to server", "session", sessionID)
 	}
 
 	// Envia Trailer direto pela conn primária (sem ChunkHeader framing).

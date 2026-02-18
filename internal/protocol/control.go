@@ -493,14 +493,32 @@ func ReadControlAutoScaleStats(r io.Reader) (*ControlAutoScaleStats, error) {
 }
 
 // WriteControlIngestionDone escreve o frame ControlIngestionDone (Agent → Server).
-// Frame: [Magic 4B] — sem payload.
-func WriteControlIngestionDone(w io.Writer) error {
-	_, err := w.Write(MagicControlIngestionDone[:])
+// Frame: [Magic 4B][SessionIDLen 1B][SessionID ...B]
+func WriteControlIngestionDone(w io.Writer, sessionID string) error {
+	if len(sessionID) > 255 {
+		return fmt.Errorf("sessionID too long for ControlIngestionDone: %d", len(sessionID))
+	}
+	buf := make([]byte, 4+1+len(sessionID))
+	copy(buf[0:4], MagicControlIngestionDone[:])
+	buf[4] = byte(len(sessionID))
+	copy(buf[5:], sessionID)
+	_, err := w.Write(buf)
 	return err
 }
 
-// ReadControlIngestionDonePayload é um no-op (sem payload).
-// Mantido para consistência com os demais frames; o magic já foi lido pelo dispatcher.
-func ReadControlIngestionDonePayload(_ io.Reader) error {
-	return nil
+// ReadControlIngestionDonePayload lê o payload de ControlIngestionDone.
+// Retorna o sessionID informado pelo agent.
+// O magic já foi lido pelo dispatcher.
+func ReadControlIngestionDonePayload(r io.Reader) (sessionID string, err error) {
+	var lenBuf [1]byte
+	if _, err = io.ReadFull(r, lenBuf[:]); err != nil {
+		return "", fmt.Errorf("reading ControlIngestionDone sessionID length: %w", err)
+	}
+	sid := make([]byte, lenBuf[0])
+	if len(sid) > 0 {
+		if _, err = io.ReadFull(r, sid); err != nil {
+			return "", fmt.Errorf("reading ControlIngestionDone sessionID: %w", err)
+		}
+	}
+	return string(sid), nil
 }
