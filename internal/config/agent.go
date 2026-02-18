@@ -58,14 +58,16 @@ type TLSClient struct {
 
 // BackupEntry representa um bloco de backup nomeado com storage de destino.
 type BackupEntry struct {
-	Name       string         `yaml:"name"`     // Identificador local do backup
-	Storage    string         `yaml:"storage"`  // Nome do storage no server
-	Schedule   string         `yaml:"schedule"` // Cron expression individual deste backup
-	Sources    []BackupSource `yaml:"sources"`
-	Exclude    []string       `yaml:"exclude"`
-	Parallels  int            `yaml:"parallels"`   // 0=desabilitado (single stream), 1-255=máx streams paralelos
-	DSCP       string         `yaml:"dscp"`        // DSCP marking (ex: "AF41", "EF"), vazio=desabilitado
-	AutoScaler string         `yaml:"auto_scaler"` // "efficiency" (default) | "adaptive"
+	Name            string         `yaml:"name"`            // Identificador local do backup
+	Storage         string         `yaml:"storage"`         // Nome do storage no server
+	Schedule        string         `yaml:"schedule"`        // Cron expression individual deste backup
+	Sources         []BackupSource `yaml:"sources"`
+	Exclude         []string       `yaml:"exclude"`
+	Parallels       int            `yaml:"parallels"`       // 0=desabilitado (single stream), 1-255=máx streams paralelos
+	DSCP            string         `yaml:"dscp"`            // DSCP marking (ex: "AF41", "EF"), vazio=desabilitado
+	AutoScaler      string         `yaml:"auto_scaler"`     // "efficiency" (default) | "adaptive"
+	BandwidthLimit  string         `yaml:"bandwidth_limit"` // Limite de upload em Bytes/seg (ex: "50mb", "1gb"), vazio=sem limite
+	BandwidthLimitRaw int64        `yaml:"-"`               // valor parseado em bytes/seg
 }
 
 // BackupSource representa um diretório de origem para backup.
@@ -182,6 +184,17 @@ func (c *AgentConfig) validate() error {
 			c.Backups[i].AutoScaler = "adaptive"
 		default:
 			return fmt.Errorf("backups[%d].auto_scaler: unknown value %q (valid: efficiency, adaptive)", i, b.AutoScaler)
+		}
+		// Bandwidth limit validation
+		if b.BandwidthLimit != "" {
+			bwParsed, err := ParseByteSize(b.BandwidthLimit)
+			if err != nil {
+				return fmt.Errorf("backups[%d].bandwidth_limit: %w", i, err)
+			}
+			if bwParsed < 64*1024 {
+				return fmt.Errorf("backups[%d].bandwidth_limit must be at least 64kb, got %s", i, b.BandwidthLimit)
+			}
+			c.Backups[i].BandwidthLimitRaw = bwParsed
 		}
 	}
 	if c.Retry.MaxAttempts <= 0 {
