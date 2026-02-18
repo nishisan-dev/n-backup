@@ -62,6 +62,15 @@ func TestLoadAgentConfig_ExampleFile(t *testing.T) {
 	if cfg.Backups[1].Parallels != 4 {
 		t.Errorf("expected backups[1].parallels 4, got %d", cfg.Backups[1].Parallels)
 	}
+	// backups[1] tem bandwidth_limit: "100mb" no example
+	expectedBW := int64(100 * 1024 * 1024)
+	if cfg.Backups[1].BandwidthLimitRaw != expectedBW {
+		t.Errorf("expected backups[1].BandwidthLimitRaw %d, got %d", expectedBW, cfg.Backups[1].BandwidthLimitRaw)
+	}
+	// backups[0] não tem bandwidth_limit, deve ser 0
+	if cfg.Backups[0].BandwidthLimitRaw != 0 {
+		t.Errorf("expected backups[0].BandwidthLimitRaw 0, got %d", cfg.Backups[0].BandwidthLimitRaw)
+	}
 }
 
 func TestLoadServerConfig_ExampleFile(t *testing.T) {
@@ -386,6 +395,97 @@ func TestLoadAgentConfig_DefaultRetry(t *testing.T) {
 	}
 	if cfg.Retry.MaxAttempts != 5 {
 		t.Errorf("expected default max_attempts 5, got %d", cfg.Retry.MaxAttempts)
+	}
+}
+
+func TestLoadAgentConfig_BandwidthLimitValid(t *testing.T) {
+	content := `
+agent:
+  name: "test-agent"
+server:
+  address: "localhost:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  client_cert: /tmp/client.pem
+  client_key: /tmp/client-key.pem
+backups:
+  - name: "test"
+    storage: "default"
+    schedule: "0 2 * * *"
+    bandwidth_limit: "50mb"
+    sources:
+      - path: /tmp
+`
+	cfgPath := writeTempConfig(t, content)
+	cfg, err := LoadAgentConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expectedBytes := int64(50 * 1024 * 1024)
+	if cfg.Backups[0].BandwidthLimitRaw != expectedBytes {
+		t.Errorf("expected BandwidthLimitRaw %d, got %d", expectedBytes, cfg.Backups[0].BandwidthLimitRaw)
+	}
+}
+
+func TestLoadAgentConfig_BandwidthLimitDefault(t *testing.T) {
+	cfgPath := writeTempConfig(t, validAgentYAML)
+	cfg, err := LoadAgentConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Sem bandwidth_limit configurado, deve ser 0 (sem limite)
+	if cfg.Backups[0].BandwidthLimitRaw != 0 {
+		t.Errorf("expected BandwidthLimitRaw 0 (no limit), got %d", cfg.Backups[0].BandwidthLimitRaw)
+	}
+}
+
+func TestLoadAgentConfig_BandwidthLimitTooLow(t *testing.T) {
+	content := `
+agent:
+  name: "test-agent"
+server:
+  address: "localhost:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  client_cert: /tmp/client.pem
+  client_key: /tmp/client-key.pem
+backups:
+  - name: "test"
+    storage: "default"
+    schedule: "0 2 * * *"
+    bandwidth_limit: "32kb"
+    sources:
+      - path: /tmp
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadAgentConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for bandwidth_limit below 64kb minimum")
+	}
+}
+
+func TestLoadAgentConfig_BandwidthLimitInvalid(t *testing.T) {
+	content := `
+agent:
+  name: "test-agent"
+server:
+  address: "localhost:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  client_cert: /tmp/client.pem
+  client_key: /tmp/client-key.pem
+backups:
+  - name: "test"
+    storage: "default"
+    schedule: "0 2 * * *"
+    bandwidth_limit: "not-a-size"
+    sources:
+      - path: /tmp
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadAgentConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for invalid bandwidth_limit format")
 	}
 }
 
