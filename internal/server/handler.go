@@ -349,8 +349,8 @@ func (h *Handler) SessionsSnapshot() []observability.SessionSummary {
 
 			// AssemblyETA: calculado quando o assembler está na fase assembling
 			var assemblyETA string
-			if asmStats.Phase == "assembling" && asmStats.TotalChunks > 0 && asmStats.AssembledChunks > 0 {
-				elapsed := time.Since(s.CreatedAt).Seconds()
+			if asmStats.Phase == "assembling" && asmStats.TotalChunks > 0 && asmStats.AssembledChunks > 0 && !asmStats.AssemblyStartedAt.IsZero() {
+				elapsed := time.Since(asmStats.AssemblyStartedAt).Seconds()
 				rate := float64(asmStats.AssembledChunks) / elapsed
 				remaining := float64(asmStats.TotalChunks - asmStats.AssembledChunks)
 				if rate > 0 {
@@ -540,8 +540,8 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 
 		// AssemblyETA: calculado quando o assembler está na fase assembling
 		var assemblyETA string
-		if asmStats.Phase == "assembling" && asmStats.TotalChunks > 0 && asmStats.AssembledChunks > 0 {
-			elapsed := time.Since(s.CreatedAt).Seconds()
+		if asmStats.Phase == "assembling" && asmStats.TotalChunks > 0 && asmStats.AssembledChunks > 0 && !asmStats.AssemblyStartedAt.IsZero() {
+			elapsed := time.Since(asmStats.AssemblyStartedAt).Seconds()
 			rate := float64(asmStats.AssembledChunks) / elapsed
 			remaining := float64(asmStats.TotalChunks - asmStats.AssembledChunks)
 			if rate > 0 {

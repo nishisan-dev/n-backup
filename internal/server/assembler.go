@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // maxChunkLength é o tamanho máximo aceitável de um chunk.
@@ -50,43 +51,45 @@ type ChunkAssemblerOptions struct {
 // Resultado: para o caso normal (single-stream ou round-robin sequencial),
 // zero arquivos temporários são criados.
 type ChunkAssembler struct {
-	sessionID      string
-	baseDir        string // diretório do agent
-	outPath        string // caminho do arquivo de saída
-	outFile        *os.File
-	outBuf         *bufio.Writer
-	hasher         hash.Hash
-	checksum       [32]byte
-	chunkDir       string // subdir para chunks out-of-order
-	chunkDirExists bool   // lazy creation — só cria se necessário
-	pendingChunks  map[uint32]pendingChunk // chunks out-of-order aguardando (protegido por mu)
-	pendingMemLimit int64                  // limite de pendência em memória (imutável)
-	mode           string                  // assembler mode (imutável)
-	mu             sync.Mutex              // protege pendingChunks, outBuf, outFile, chunkDirExists
-	logger         *slog.Logger
+	sessionID       string
+	baseDir         string // diretório do agent
+	outPath         string // caminho do arquivo de saída
+	outFile         *os.File
+	outBuf          *bufio.Writer
+	hasher          hash.Hash
+	checksum        [32]byte
+	chunkDir        string                  // subdir para chunks out-of-order
+	chunkDirExists  bool                    // lazy creation — só cria se necessário
+	pendingChunks   map[uint32]pendingChunk // chunks out-of-order aguardando (protegido por mu)
+	pendingMemLimit int64                   // limite de pendência em memória (imutável)
+	mode            string                  // assembler mode (imutável)
+	mu              sync.Mutex              // protege pendingChunks, outBuf, outFile, chunkDirExists
+	logger          *slog.Logger
 
 	// Campos atômicos — lidos por Stats() sem lock.
 	// Escritos sob ca.mu pelos métodos de mutação.
-	nextExpectedSeq atomic.Uint32 // próximo seq esperado (in-order)
-	pendingMemBytes atomic.Int64  // bytes pendentes em memória
-	totalBytes      atomic.Int64  // total de bytes escritos no output
-	finalized       atomic.Bool   // true após Finalize() completar
-	pendingCount    atomic.Int32  // len(pendingChunks) mantido via atomic
-	lazyMaxSeq      atomic.Uint32 // maior seq recebido em lazy mode
-	assembling      atomic.Bool   // true durante finalizeLazy()
-	assembledChunks atomic.Uint32 // chunks já montados no finalize lazy
+	nextExpectedSeq   atomic.Uint32 // próximo seq esperado (in-order)
+	pendingMemBytes   atomic.Int64  // bytes pendentes em memória
+	totalBytes        atomic.Int64  // total de bytes escritos no output
+	finalized         atomic.Bool   // true após Finalize() completar
+	pendingCount      atomic.Int32  // len(pendingChunks) mantido via atomic
+	lazyMaxSeq        atomic.Uint32 // maior seq recebido em lazy mode
+	assembling        atomic.Bool   // true durante finalizeLazy()
+	assembledChunks   atomic.Uint32 // chunks já montados no finalize lazy
+	assemblyStartedAt atomic.Value  // time.Time — quando finalizeLazy() iniciou
 }
 
 // AssemblerStats contém métricas do estado atual do assembler.
 type AssemblerStats struct {
-	NextExpectedSeq uint32
-	PendingChunks   int
-	PendingMemBytes int64
-	TotalBytes      int64
-	Finalized       bool
-	TotalChunks     uint32 // total de chunks a montar (lazy: lazyMaxSeq+1, eager: nextExpectedSeq)
-	AssembledChunks uint32 // chunks já montados no finalize (relevante para lazy)
-	Phase           string // "receiving" | "assembling" | "done"
+	NextExpectedSeq   uint32
+	PendingChunks     int
+	PendingMemBytes   int64
+	TotalBytes        int64
+	Finalized         bool
+	TotalChunks       uint32    // total de chunks a montar (lazy: lazyMaxSeq+1, eager: nextExpectedSeq)
+	AssembledChunks   uint32    // chunks já montados no finalize (relevante para lazy)
+	Phase             string    // "receiving" | "assembling" | "done"
+	AssemblyStartedAt time.Time // quando o assembly lazy iniciou (zero se não aplicável)
 }
 
 // Stats retorna um snapshot das métricas do assembler.
@@ -100,6 +103,10 @@ func (ca *ChunkAssembler) Stats() AssemblerStats {
 	lazyMax := ca.lazyMaxSeq.Load()
 	assembling := ca.assembling.Load()
 	assembled := ca.assembledChunks.Load()
+	var assemblyStartedAt time.Time
+	if v := ca.assemblyStartedAt.Load(); v != nil {
+		assemblyStartedAt = v.(time.Time)
+	}
 
 	var phase string
 	var totalChunks uint32
@@ -125,14 +132,15 @@ func (ca *ChunkAssembler) Stats() AssemblerStats {
 	}
 
 	return AssemblerStats{
-		NextExpectedSeq: nextSeq,
-		PendingChunks:   pending,
-		PendingMemBytes: pendingMem,
-		TotalBytes:      totalBytes,
-		Finalized:       finalized,
-		TotalChunks:     totalChunks,
-		AssembledChunks: assembled,
-		Phase:           phase,
+		NextExpectedSeq:   nextSeq,
+		PendingChunks:     pending,
+		PendingMemBytes:   pendingMem,
+		TotalBytes:        totalBytes,
+		Finalized:         finalized,
+		TotalChunks:       totalChunks,
+		AssembledChunks:   assembled,
+		Phase:             phase,
+		AssemblyStartedAt: assemblyStartedAt,
 	}
 }
 
@@ -405,6 +413,7 @@ func (ca *ChunkAssembler) Finalize() (string, int64, error) {
 	defer ca.mu.Unlock()
 
 	if ca.mode == AssemblerModeLazy {
+		ca.assemblyStartedAt.Store(time.Now())
 		ca.assembling.Store(true)
 		defer ca.assembling.Store(false)
 		if err := ca.finalizeLazy(); err != nil {
