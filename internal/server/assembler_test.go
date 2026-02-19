@@ -145,12 +145,12 @@ func TestChunkAssembler_OutOfOrder_UsesShardedChunkPath(t *testing.T) {
 	}
 	defer ca.Cleanup()
 
-	const seq uint32 = 513 // 0x201 -> shard 0x01
+	const seq uint32 = 513 // 0x0201 -> level1=01, level2=02
 	if err := ca.WriteChunk(seq, bytes.NewReader([]byte("ZZ")), 2); err != nil {
 		t.Fatalf("WriteChunk(%d): %v", seq, err)
 	}
 
-	expectedPath := filepath.Join(ca.ChunkDir(), "01", "chunk_0000000513.tmp")
+	expectedPath := filepath.Join(ca.ChunkDir(), "01", "02", "chunk_0000000513.tmp")
 	if _, err := os.Stat(expectedPath); err != nil {
 		t.Fatalf("expected sharded chunk file at %q: %v", expectedPath, err)
 	}
@@ -301,7 +301,7 @@ func TestChunkAssembler_EagerDiskSpill_Sharded_StillAssembles(t *testing.T) {
 		t.Fatalf("WriteChunk(1): %v", err)
 	}
 
-	expectedPath := filepath.Join(ca.ChunkDir(), "02", "chunk_0000000002.tmp")
+	expectedPath := filepath.Join(ca.ChunkDir(), "02", "00", "chunk_0000000002.tmp")
 	if _, err := os.Stat(expectedPath); !os.IsNotExist(err) {
 		t.Fatalf("chunk file should have been consumed and removed after flush: %v", err)
 	}
@@ -358,5 +358,27 @@ func TestChunkAssembler_LazyMode_ShardedPaths_StillAssembles(t *testing.T) {
 	}
 	if string(content) != "AAAABBBB" {
 		t.Fatalf("expected %q, got %q", "AAAABBBB", content)
+	}
+}
+
+func TestChunkAssembler_TwoLevelSharding_LargeSeq(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	ca, err := NewChunkAssemblerWithMemLimit("test-two-level-large", tmpDir, logger, 1)
+	if err != nil {
+		t.Fatalf("NewChunkAssemblerWithMemLimit: %v", err)
+	}
+	defer ca.Cleanup()
+
+	// seq=66051 = 0x010203 -> level1: 66051%256=3 -> "03", level2: (66051/256)%256=258%256=2 -> "02"
+	const seq uint32 = 66051
+	if err := ca.WriteChunk(seq, bytes.NewReader([]byte("XX")), 2); err != nil {
+		t.Fatalf("WriteChunk(%d): %v", seq, err)
+	}
+
+	expectedPath := filepath.Join(ca.ChunkDir(), "03", "02", "chunk_0000066051.tmp")
+	if _, err := os.Stat(expectedPath); err != nil {
+		t.Fatalf("expected two-level sharded chunk file at %q: %v", expectedPath, err)
 	}
 }

@@ -27,8 +27,8 @@ const maxChunkLength = 32 * 1024 * 1024 // 32MB
 // mantidos em memória antes de fazer spill para disco.
 const defaultPendingMemLimit int64 = 8 * 1024 * 1024 // 8MB
 
-// chunkShardFanout define quantos subdiretórios usamos para distribuir
-// arquivos de chunk no staging.
+// chunkShardFanout define quantos subdiretórios por nível usamos para
+// distribuir arquivos de chunk no staging (2 níveis = fanout² shards).
 const chunkShardFanout uint32 = 256
 
 const (
@@ -393,10 +393,13 @@ func (ca *ChunkAssembler) saveOutOfOrder(globalSeq uint32, data []byte) error {
 	return nil
 }
 
-// chunkPath retorna o caminho de staging do chunk usando directory sharding.
+// chunkPath retorna o caminho de staging do chunk usando directory sharding
+// de 2 níveis (fanout² = 65536 shards possíveis).
 // Deve ser chamado com ca.mu held.
 func (ca *ChunkAssembler) chunkPath(globalSeq uint32) (string, error) {
-	shardDir := filepath.Join(ca.chunkDir, fmt.Sprintf("%02x", globalSeq%chunkShardFanout))
+	level1 := fmt.Sprintf("%02x", globalSeq%chunkShardFanout)
+	level2 := fmt.Sprintf("%02x", (globalSeq/chunkShardFanout)%chunkShardFanout)
+	shardDir := filepath.Join(ca.chunkDir, level1, level2)
 	if err := os.MkdirAll(shardDir, 0755); err != nil {
 		return "", fmt.Errorf("creating chunk shard directory: %w", err)
 	}
