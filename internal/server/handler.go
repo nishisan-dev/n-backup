@@ -15,7 +15,9 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -217,29 +219,19 @@ func (h *Handler) StorageUsageSnapshot() []observability.StorageUsage {
 	return result
 }
 
-// countBackups conta recursivamente quantos arquivos de backup existem no diretório.
+// countBackups conta recursivamente quantos arquivos de backup (.tar.gz / .tar.zst)
+// existem em qualquer nível de profundidade abaixo de baseDir.
 func countBackups(baseDir string) int {
-	entries, err := os.ReadDir(baseDir)
-	if err != nil {
-		return 0
-	}
-
 	count := 0
-	for _, e := range entries {
-		if e.IsDir() {
-			// Cada subdiretório é um agent/backup, conta os .tar.gz/.tar.zst dentro
-			subEntries, err := os.ReadDir(baseDir + "/" + e.Name())
-			if err != nil {
-				continue
-			}
-			for _, se := range subEntries {
-				name := se.Name()
-				if !se.IsDir() && (len(name) > 7 && name[len(name)-7:] == ".tar.gz" || len(name) > 8 && name[len(name)-8:] == ".tar.zst") {
-					count++
-				}
-			}
+	_ = filepath.WalkDir(baseDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // ignora erros de permissão e continua
 		}
-	}
+		if !d.IsDir() && (strings.HasSuffix(d.Name(), ".tar.gz") || strings.HasSuffix(d.Name(), ".tar.zst")) {
+			count++
+		}
+		return nil
+	})
 	return count
 }
 
