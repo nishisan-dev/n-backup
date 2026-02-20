@@ -392,7 +392,7 @@ func TestEndToEnd_Rotation(t *testing.T) {
 		os.WriteFile(filepath.Join(agentDir, name), []byte("data"), 0644)
 	}
 
-	if err := server.Rotate(agentDir, 3); err != nil {
+	if _, err := server.Rotate(agentDir, 3); err != nil {
 		t.Fatalf("Rotate: %v", err)
 	}
 
