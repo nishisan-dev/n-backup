@@ -221,11 +221,16 @@ func (h *Handler) StorageUsageSnapshot() []observability.StorageUsage {
 
 // countBackups conta recursivamente quantos arquivos de backup (.tar.gz / .tar.zst)
 // existem em qualquer nível de profundidade abaixo de baseDir.
+// Ignora diretórios de chunks temporários (chunks_*) para evitar percorrer
+// a estrutura de sharding (256×256 subpastas) durante backups ativos.
 func countBackups(baseDir string) int {
 	count := 0
 	_ = filepath.WalkDir(baseDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil // ignora erros de permissão e continua
+		}
+		if d.IsDir() && strings.HasPrefix(d.Name(), "chunks_") {
+			return filepath.SkipDir
 		}
 		if !d.IsDir() && (strings.HasSuffix(d.Name(), ".tar.gz") || strings.HasSuffix(d.Name(), ".tar.zst")) {
 			count++
