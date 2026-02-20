@@ -1674,8 +1674,15 @@ func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath
 	}
 
 	// Rotação
-	if err := Rotate(writer.AgentDir(), storageInfo.MaxBackups); err != nil {
+	removed, err := Rotate(writer.AgentDir(), storageInfo.MaxBackups)
+	if err != nil {
 		logger.Warn("rotation failed", "error", err)
+	}
+	for _, name := range removed {
+		logger.Info("backup rotated (deleted)", "file", name)
+		if h.Events != nil {
+			h.Events.PushEvent("warn", "backup_rotated", writer.AgentName(), fmt.Sprintf("deleted old backup: %s", name), 0)
+		}
 	}
 
 	logger.Info("backup committed",
@@ -1731,8 +1738,15 @@ func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWrit
 	}
 
 	// Rotação
-	if err := Rotate(writer.AgentDir(), storageInfo.MaxBackups); err != nil {
+	removed, err := Rotate(writer.AgentDir(), storageInfo.MaxBackups)
+	if err != nil {
 		logger.Warn("rotation failed", "error", err)
+	}
+	for _, name := range removed {
+		logger.Info("backup rotated (deleted)", "file", name)
+		if h.Events != nil {
+			h.Events.PushEvent("warn", "backup_rotated", writer.AgentName(), fmt.Sprintf("deleted old backup: %s", name), 0)
+		}
 	}
 
 	logger.Info("backup committed",

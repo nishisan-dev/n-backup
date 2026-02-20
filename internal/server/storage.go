@@ -80,15 +80,21 @@ func (w *AtomicWriter) AgentDir() string {
 	return w.agentDir
 }
 
+// AgentName retorna o nome do agent associado a este writer.
+func (w *AtomicWriter) AgentName() string {
+	return w.agentName
+}
+
 // Rotate remove backups excedentes, mantendo os maxBackups mais recentes.
-func Rotate(agentDir string, maxBackups int) error {
+// Retorna a lista de nomes de arquivos removidos para auditoria/eventos.
+func Rotate(agentDir string, maxBackups int) ([]string, error) {
 	if maxBackups <= 0 {
-		return nil
+		return nil, nil
 	}
 
 	entries, err := os.ReadDir(agentDir)
 	if err != nil {
-		return fmt.Errorf("reading agent directory: %w", err)
+		return nil, fmt.Errorf("reading agent directory: %w", err)
 	}
 
 	// Filtra apenas arquivos de backup (.tar.gz e .tar.zst)
@@ -103,17 +109,19 @@ func Rotate(agentDir string, maxBackups int) error {
 	sort.Strings(backups)
 
 	// Remove os mais antigos que excedam o limite
+	var removed []string
 	if len(backups) > maxBackups {
 		toRemove := backups[:len(backups)-maxBackups]
 		for _, name := range toRemove {
 			path := filepath.Join(agentDir, name)
 			if err := os.Remove(path); err != nil {
-				return fmt.Errorf("removing old backup %s: %w", name, err)
+				return removed, fmt.Errorf("removing old backup %s: %w", name, err)
 			}
+			removed = append(removed, name)
 		}
 	}
 
-	return nil
+	return removed, nil
 }
 
 // isBackupFile verifica se o nome do arquivo é um backup válido (.tar.gz ou .tar.zst).

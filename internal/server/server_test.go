@@ -107,8 +107,14 @@ func TestRotate_KeepsMaxBackups(t *testing.T) {
 	}
 
 	// Rotação com max_backups = 3
-	if err := Rotate(dir, 3); err != nil {
+	removed, err := Rotate(dir, 3)
+	if err != nil {
 		t.Fatalf("Rotate: %v", err)
+	}
+
+	// Verifica que os 4 mais antigos foram retornados como removidos
+	if len(removed) != 4 {
+		t.Errorf("expected 4 removed, got %d: %v", len(removed), removed)
 	}
 
 	// Verifica que apenas 3 restam
@@ -143,7 +149,7 @@ func TestRotate_NoAction_UnderLimit(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "2026-02-10T02-00-00.tar.gz"), []byte("data"), 0644)
 	os.WriteFile(filepath.Join(dir, "2026-02-11T02-00-00.tar.gz"), []byte("data"), 0644)
 
-	if err := Rotate(dir, 5); err != nil {
+	if _, err := Rotate(dir, 5); err != nil {
 		t.Fatalf("Rotate: %v", err)
 	}
 
@@ -162,7 +168,7 @@ func TestRotate_IgnoresNonTarGz(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("data"), 0644)
 	os.WriteFile(filepath.Join(dir, "backup-123.tmp"), []byte("data"), 0644)
 
-	if err := Rotate(dir, 1); err != nil {
+	if _, err := Rotate(dir, 1); err != nil {
 		t.Fatalf("Rotate: %v", err)
 	}
 
