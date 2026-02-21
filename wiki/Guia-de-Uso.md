@@ -354,25 +354,41 @@ daemon:
 
 ## Rotação Automática (Server)
 
-Cada storage nomeado mantém no máximo `max_backups` por agent. Os mais antigos são removidos automaticamente após cada backup bem-sucedido.
+Cada storage nomeado mantém no máximo `max_backups` por agent. Os mais antigos são removidos automaticamente após cada backup bem-sucedido. A rotação **registra eventos e logs** com a lista dos arquivos removidos para auditoria.
 
 ```yaml
 storages:
   scripts:
     base_dir: /var/backups/scripts
     max_backups: 5
+    compression_mode: gzip
     assembler_mode: eager
     assembler_pending_mem_limit: 8mb
+    chunk_shard_levels: 1          # 1 (padrão) ou 2 níveis de sharding de chunks no staging
   home-dirs:
     base_dir: /var/backups/home
     max_backups: 10
+    compression_mode: zst
     assembler_mode: lazy
     assembler_pending_mem_limit: 8mb
+    chunk_shard_levels: 2          # 2 níveis — recomendado para backups paralelos intensos (≥ 4 streams)
 ```
+
+### Chunk Shard Levels (v2.6.0+)
+
+O `chunk_shard_levels` controla como os chunks temporários são armazenados no staging durante o assembler:
+
+| Valor | Descrição |
+|-------|----------|
+| `1` (padrão) | Chunks em diretório flat: `staging/<sessionID>/chunk-NNNN` |
+| `2` | Chunks em 2 níveis: `staging/<sessionID>/XX/YYYYYY` — reduz entradas por diretório |
+
+> **Quando usar `chunk_shard_levels: 2`:** Em backups com `parallels ≥ 4` e grande volume de dados que geram muitos chunks, a estrutura flat pode degradar a performance do filesystem. O nível 2 distribui os chunks por subdiretórios, mantendo a contagem de entradas gerenciável.
 
 Defaults por storage:
 - `assembler_mode`: `eager`
 - `assembler_pending_mem_limit`: `8mb` (8 * 1024 * 1024 bytes)
+- `chunk_shard_levels`: `1`
 
 Comportamento dos modos:
 - `eager`: monta incrementalmente durante a transferência. Chunks fora de ordem ficam em memória até `assembler_pending_mem_limit`; ao exceder, fazem spill para disco.

@@ -9,16 +9,31 @@ O n-backup inclui uma **SPA (Single Page Application) embarcada** no binário do
 A WebUI é habilitada via configuração do server:
 
 ```yaml
-webui:
+web_ui:
   enabled: true
-  listen_addr: ":8080"
-  allowed_cidrs:
+  listen: "127.0.0.1:9848"         # Bind default: loopback (segurança)
+  read_timeout: 5s
+  write_timeout: 15s
+  idle_timeout: 60s
+
+  # Persistência de dados entre reinicios do server
+  events_file: /var/lib/nbackup/events.jsonl
+  events_max_lines: 10000
+  session_history_file: /var/lib/nbackup/session-history.jsonl
+  session_history_max_lines: 5000
+  active_sessions_file: /var/lib/nbackup/active-sessions.jsonl
+  active_sessions_max_lines: 20000
+  active_snapshot_interval: 5m
+
+  allow_origins:                    # ACL obrigatória (IPs ou CIDRs)
+    - "127.0.0.1/32"
     - "10.0.0.0/8"
     - "192.168.0.0/16"
-    - "127.0.0.0/8"
 ```
 
-Acesse em `http://<server-ip>:8080` a partir de um IP autorizado nos `allowed_cidrs`.
+Acesse em `http://<server-ip>:9848` a partir de um IP autorizado nos `allow_origins`.
+
+> **Nota:** Para expor a WebUI em outra interface, altere `listen`. Use um reverse proxy (nginx/Caddy) com TLS para exposição externa.
 
 ---
 
@@ -40,7 +55,7 @@ A página principal exibe:
 Cada sessão ativa é exibida como um card contendo:
 
 - **Agent Name** e **Backup Name**
-- **Storage** e **Compression** (gz/zst)
+- **Storage** e **Compression** (gzip/zst)
 - **Protocol Version**
 - **Bytes transferidos** e **velocidade** (MB/s)
 - **Progresso** (barra de progresso, quando disponível)
@@ -62,7 +77,7 @@ Ao clicar em uma sessão, visualize:
 
 ### Session History
 
-As sessões completadas ficam acessíveis na aba de histórico, permitindo revisão de backups anteriores.
+As sessões completadas ficam acessíveis na aba de histórico, **persistidas em disco** via `session_history_file` — disponíveis mesmo após reinicios do server.
 
 ---
 
@@ -96,6 +111,22 @@ Gráficos de linha em tempo real mostrando:
 
 ---
 
+## Persistência de Dados
+
+Os dados da WebUI são **mantidos em memória** durante a execução e **opcionalmente persistidos em disco**:
+
+| Campo | Arquivo JSONL | Descrição |
+|-------|--------------|-----------|
+| `events_file` | `events.jsonl` | Timeline de eventos (início/fim de sessão, rotações, reconexões) |
+| `session_history_file` | `session-history.jsonl` | Histórico de backups completados |
+| `active_sessions_file` | `active-sessions.jsonl` | Snapshots periódicos de sessões ativas |
+
+O `active_snapshot_interval` (default: `5m`) controla frequência dos snapshots de sessões ativas — útil para diagnóstico após crash.
+
+> **Dica:** Crie os diretórios dos arquivos antes de iniciar o server: `mkdir -p /var/lib/nbackup`
+
+---
+
 ## API REST (Interna)
 
 A WebUI consome uma API REST interna. Os endpoints disponíveis:
@@ -115,7 +146,7 @@ A WebUI consome uma API REST interna. Os endpoints disponíveis:
 
 ## Requisitos
 
-- **Porta adicional**: A WebUI escuta em uma porta separada (default `:8080`), sem TLS por padrão
-- **Acesso restrito**: Use `allowed_cidrs` para limitar acesso por rede
+- **Porta adicional**: A WebUI escuta em uma porta separada (default `127.0.0.1:9848`), sem TLS por padrão
+- **ACL obrigatória**: `allow_origins` é obrigatório quando `enabled: true`. Aceita IPs puros (expandidos para `/32`) e CIDRs
 - **Zero dependências externas**: HTML, CSS e JS são embarcados no binário via `go:embed`
-- **Sem banco de dados**: Os dados são mantidos em memória enquanto o server está ativo
+- **Persistência opcional**: Configure os arquivos `*_file` para que eventos e histórico sobrevivam a reinicios

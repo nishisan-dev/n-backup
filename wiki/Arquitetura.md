@@ -134,9 +134,9 @@ O **n-backup** é um sistema de backup client-server de alta performance escrito
 | Componente | Arquivo | Responsabilidade |
 |-----------|---------|-----------------|
 | **Server** | `internal/server/server.go` | Listener TLS, aceita conexões, despacha para Handler |
-| **Handler** | `internal/server/handler.go` | Protocolo: handshake, resume, health check, data stream, trailer, final ACK |
-| **Storage** | `internal/server/storage.go` | Escrita atômica (`.tmp` → rename), rotação por `max_backups`, organização por agent |
-| **Assembler** | `internal/server/assembler.go` | Reassembla chunks de streams paralelos na ordem correta |
+| **Handler** | `internal/server/handler.go` | Protocolo: handshake, resume, health check, data stream, trailer, final ACK. Emite eventos (início/fim de sessão, rotações, reconexões) para a WebUI |
+| **Storage** | `internal/server/storage.go` | Escrita atômica (`.tmp` → rename), rotação por `max_backups`, organização por agent. Rotação emite log e evento com lista de backups removidos |
+| **Assembler** | `internal/server/assembler.go` | Reassembla chunks de streams paralelos na ordem correta. Staging de chunks suporta 1 ou 2 níveis de sharding (`chunk_shard_levels`) para reduzir entradas por diretório |
 
 ### 3.3. Módulos Compartilhados
 
@@ -284,7 +284,9 @@ Tentativa 3 → falha → aguarda 4s
 Tentativa N → falha → aguarda min(2^N × initial_delay, max_delay)
 ```
 
-**Streams paralelos (v1.2.3+):** cada stream tem retry independente (3 tentativas). O backup só falha quando todos os streams morrem (`ErrAllStreamsDead`). Conexões TCP usam **write deadline** para detectar half-open connections.
+**Streams paralelos (v1.2.3+):** cada stream tem retry independente (até `maxRetriesPerStream=5` tentativas). O backup só falha quando todos os streams morrem (`ErrAllStreamsDead`). Conexões TCP usam **write deadline** para detectar half-open connections.
+
+> **Fix (v2.6.0):** O contador de retries é **resetado para zero** após cada reconexão bem-sucedida — evitando a morte prematura de streams que enfrentam falhas intermitentes esporádicas.
 
 ### Resume de Sessão
 
@@ -340,6 +342,16 @@ daemon:
 
 ## 8. Observabilidade (WebUI — v2.0.0+)
 
+O server expõe uma **SPA embarcada** com observabilidade em tempo real. Dados são mantidos em memória e opcionalmente **persistidos em disco** via arquivos JSONL:
+
+| Dado | Campo de configuração |
+|------|-----------------------|
+| Eventos (sessões, rotações, reconexões) | `web_ui.events_file` |
+| Histórico de sessões completadas | `web_ui.session_history_file` |
+| Snapshots periódicos de sessões ativas | `web_ui.active_sessions_file` |
+
+> **ACL obrigatória:** `web_ui.allow_origins` deve ser configurado quando `enabled: true`.
+
 Veja a página dedicada: [[WebUI]]
 
 ---
@@ -357,19 +369,23 @@ n-backup/
 │   │   ├── backup.go                #   Orquestrador de backup
 │   │   ├── control_channel.go       #   Canal de controle persistente
 │   │   ├── daemon.go                #   Daemon loop com graceful shutdown
-│   │   ├── dispatcher.go            #   Round-robin de chunks
+│   │   ├── dispatcher.go            #   Round-robin de chunks + retry com reset
+│   │   ├── dscp.go                  #   DSCP marking em sockets TCP
+│   │   ├── monitor.go               #   Monitor de recursos (CPU, memória, disco)
 │   │   ├── progress.go              #   Progress bar (--once)
 │   │   ├── ringbuffer.go            #   Ring buffer para resume
 │   │   ├── scanner.go               #   fs.WalkDir com glob
 │   │   ├── scheduler.go             #   Cron scheduler wrapper
-│   │   └── streamer.go              #   Pipeline tar → pgzip → rede
+│   │   ├── stats_reporter.go        #   Reporter de stats para o server (control channel)
+│   │   ├── streamer.go              #   Pipeline tar → pgzip → rede
+│   │   └── throttle.go              #   ThrottledWriter (Token Bucket)
 │   ├── config/                       # Parsing YAML + validação
 │   ├── integration/                  # Testes de integração
 │   ├── logging/                      # Factory de slog.Logger
 │   ├── pki/                          # Configuração TLS client/server
 │   ├── protocol/                     # Frames binários, reader, writer
 │   └── server/                       # Receiver, handler, storage, assembler
-│       └── observability/           #   WebUI + APIs REST
+│       └── observability/           #   WebUI + APIs REST + persistência JSONL
 ├── configs/                          # Exemplos de configuração
 ├── docs/                             # Documentação + diagramas PlantUML
 ├── packaging/                        # Empacotamento .deb
@@ -396,6 +412,8 @@ n-backup/
 | 7 | **`slog` (stdlib)** | Zap, Zerolog, Logrus | Zero dependências externas. Performance adequada. JSON structured por padrão. |
 | 8 | **Named Storages** | Storage único | Permite políticas de rotação independentes por tipo de backup. |
 | 9 | **SPA embarcado** (`go:embed`) | Grafana, Prometheus UI | Zero dependências externas. Single binary deployment. |
+| 10 | **Chunk shard levels configurável** (1 ou 2) | Estrutura flat única | 1 nível é suficiente para a maioria. 2 níveis reduz contagem de entradas por diretório em sessões com muitos chunks paralelos, melhorando performance do filesystem. |
+| 11 | **Persistência JSONL da WebUI** | SQLite, banco em memória | JSONL é append-only, zero dependências, rotação por `max_lines`. Sobrevive a crashes sem corrupção. |
 
 ---
 

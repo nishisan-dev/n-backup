@@ -11,7 +11,7 @@ Sistema de backup **high-performance** client-server escrito em Go. Streaming di
 ## ✨ Features
 
 | Feature | Descrição |
-|---------|-----------|
+|---------|-------|
 | **Streaming Nativo** | Pipeline `Disk → Tar → Gzip → Network` via `io.Pipe`. Zero arquivos temporários na origem. |
 | **Zero-Footprint** | Otimizado para baixo consumo de CPU e RAM. Binário estático, sem dependências. |
 | **Segurança mTLS** | Autenticação mútua obrigatória via TLS 1.3. Sem SSH, sem shell remoto. |
@@ -22,12 +22,13 @@ Sistema de backup **high-performance** client-server escrito em Go. Streaming di
 | **Control Channel** | Conexão TLS persistente para keep-alive (PING/PONG), medição de RTT e orquestração server-side. |
 | **Graceful Flow Rotation** | Server solicita drenagem de streams via ControlRotate — zero data loss em reconexões. |
 | **RTT Metrics** | RTT EWMA contínuo via control channel, com status do server (carga, disco). |
-| **Rotação Automática** | Server mantém os N backups mais recentes por agent/storage. |
-| **Retry Exponential** | Reconexão automática com backoff exponencial configurável. |
+| **Rotação Automática** | Server mantém os N backups mais recentes por agent/storage. Rotações emitem evento e log. |
+| **Retry Exponencial** | Reconexão automática com backoff exponencial configurável. Contador resetado após reconexão bem-sucedida. |
 | **Named Storages** | Múltiplos storages no server com políticas de rotação independentes. |
 | **Bandwidth Throttling** | Limite de upload configurável por backup entry (Token Bucket). |
 | **AutoScaler** | Escala dinâmica de streams com modos `efficiency` e `adaptive`. |
-| **WebUI** | SPA embarcada de observabilidade com sessões, sparklines, events e gauges. |
+| **Chunk Sharding** | Staging de chunks em 1 ou 2 níveis de subdiretórios (`chunk_shard_levels`). Reduz pressão no filesystem em sessões paralelas intensas. |
+| **WebUI** | SPA embarcada de observabilidade com sessões, sparklines, events e gauges. Dados persistidos em JSONL (sobrevivem a reinicios). |
 | **Schedule por Backup** | Cada backup entry possui sua própria cron expression. |
 | **Hot Reload (SIGHUP)** | Recarrega configuração sem downtime via `systemctl reload`. |
 

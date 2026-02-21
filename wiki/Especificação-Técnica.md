@@ -346,9 +346,19 @@ backups:
     auto_scaler: adaptive # efficiency (padrão) ou adaptive
 ```
 
+**No server**, cada storage pode configurar o nível de sharding para staging de chunks:
+
+```yaml
+storages:
+  home-dirs:
+    assembler_mode: lazy
+    chunk_shard_levels: 2  # 1 (flat, padrão) ou 2 (2 níveis de subdiretórios)
+```
+
 - **parallels**: `0` desabilita (single stream), `1-8` define o máximo de streams.
 - **auto_scaler**: `efficiency` (threshold-based, padrão) ou `adaptive` (probe-and-measure).
 - **bandwidth_limit**: limite de upload em Bytes/segundo (ex: `50mb`, `1gb`). Mínimo: `64kb`. Vazio = sem limite.
+- **chunk_shard_levels**: `1` (padrão, flat) ou `2` (2 níveis de subdiretórios) — controla a organização dos chunks no staging do assembler.
 
 ### 3.6 Control Channel Protocol (v1.3.8+)
 
@@ -529,7 +539,9 @@ Tentativa 4 → falha → aguarda 8s (capped em max_delay)
 Tentativa 5 → falha → ABORT, log error
 ```
 
-**Streams paralelos individuais (v1.2.3+):** cada stream tem retry independente (3 tentativas, backoff 1s/2s/4s). Se um stream falha, os demais continuam operando. O backup só é abortado quando **todos os streams** estão mortos (`ErrAllStreamsDead`). Conexões TCP possuem **write deadline** para detecção de half-open connections.
+**Streams paralelos individuais (v1.2.3+):** cada stream tem retry independente (até `maxRetriesPerStream=5` tentativas, backoff 1s/2s/4s/.../30s cap). Se um stream falha, os demais continuam operando. O backup só é abortado quando **todos os streams** estão mortos (`ErrAllStreamsDead`). Conexões TCP possuem **write deadline** para detecção de half-open connections.
+
+> **Fix (v2.6.0):** O contador de retries é **resetado para zero** após cada reconexão bem-sucedida. Isso evita a morte prematura de streams em cenários de falhas intermitentes esporádicas: sem o reset, um stream que passa por 3 falhas intermitentes ao longo do tempo (mas sempre reconecta) seria marcado como morto mesmo estando operacional.
 
 **Timeout de job:** o scheduler configura `context.WithTimeout(24h)` para cada job de backup. Isso previne zombie jobs.
 
