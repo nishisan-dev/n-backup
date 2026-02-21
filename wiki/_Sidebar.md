@@ -6,6 +6,7 @@
 - [[Guia de Uso|Guia-de-Uso]]
 - [[Especificação Técnica|Especificação-Técnica]]
 - [[Configuração de Exemplo|Configuração-de-Exemplo]]
+- [[Cenários de Configuração|Cenários-de-Configuração]]
 - [[WebUI]]
 - [[FAQ]]
 
