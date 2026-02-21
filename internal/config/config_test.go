@@ -101,6 +101,9 @@ func TestLoadServerConfig_ExampleFile(t *testing.T) {
 	if scripts.AssemblerPendingMemRaw != 8*1024*1024 {
 		t.Errorf("expected scripts.assembler_pending_mem_limit 8mb, got %d", scripts.AssemblerPendingMemRaw)
 	}
+	if scripts.ChunkShardLevels != 1 {
+		t.Errorf("expected scripts.chunk_shard_levels 1, got %d", scripts.ChunkShardLevels)
+	}
 
 	home, ok := cfg.GetStorage("home-dirs")
 	if !ok {
@@ -357,6 +360,9 @@ storages:
 	if s.AssemblerPendingMemRaw != 8*1024*1024 {
 		t.Errorf("expected default assembler_pending_mem_limit 8mb, got %d", s.AssemblerPendingMemRaw)
 	}
+	if s.ChunkShardLevels != 1 {
+		t.Errorf("expected default chunk_shard_levels 1, got %d", s.ChunkShardLevels)
+	}
 }
 
 func TestLoadServerConfig_InvalidAssemblerMode(t *testing.T) {
@@ -398,6 +404,65 @@ storages:
 	_, err := LoadServerConfig(cfgPath)
 	if err == nil {
 		t.Fatal("expected error for invalid assembler_pending_mem_limit")
+	}
+}
+
+func TestLoadServerConfig_ChunkShardLevelsDefault(t *testing.T) {
+	content := validServerYAMLBase
+	cfgPath := writeTempConfig(t, content)
+	cfg, err := LoadServerConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s, _ := cfg.GetStorage("default")
+	if s.ChunkShardLevels != 1 {
+		t.Errorf("expected default chunk_shard_levels 1, got %d", s.ChunkShardLevels)
+	}
+}
+
+func TestLoadServerConfig_ChunkShardLevelsTwo(t *testing.T) {
+	content := `
+server:
+  listen: "0.0.0.0:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  server_cert: /tmp/server.pem
+  server_key: /tmp/server-key.pem
+storages:
+  default:
+    base_dir: /tmp/backups
+    max_backups: 3
+    chunk_shard_levels: 2
+`
+	cfgPath := writeTempConfig(t, content)
+	cfg, err := LoadServerConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s, _ := cfg.GetStorage("default")
+	if s.ChunkShardLevels != 2 {
+		t.Errorf("expected chunk_shard_levels 2, got %d", s.ChunkShardLevels)
+	}
+}
+
+func TestLoadServerConfig_InvalidChunkShardLevels(t *testing.T) {
+	content := `
+server:
+  listen: "0.0.0.0:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  server_cert: /tmp/server.pem
+  server_key: /tmp/server-key.pem
+storages:
+  default:
+    base_dir: /tmp/backups
+    max_backups: 3
+    chunk_shard_levels: 5
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadServerConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for invalid chunk_shard_levels")
 	}
 }
 

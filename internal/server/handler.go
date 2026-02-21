@@ -1951,6 +1951,7 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	assembler, err := NewChunkAssemblerWithOptions(sessionID, writer.AgentDir(), logger, ChunkAssemblerOptions{
 		Mode:            storageInfo.AssemblerMode,
 		PendingMemLimit: storageInfo.AssemblerPendingMemRaw,
+		ShardLevels:     storageInfo.ChunkShardLevels,
 	})
 	if err != nil {
 		logger.Error("creating chunk assembler", "error", err)

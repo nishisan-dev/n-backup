@@ -80,7 +80,8 @@ type StorageInfo struct {
 	AssemblerMode          string `yaml:"assembler_mode"`              // eager|lazy (default: eager)
 	AssemblerPendingMem    string `yaml:"assembler_pending_mem_limit"` // ex: "8mb" (default: 8mb)
 	AssemblerPendingMemRaw int64  `yaml:"-"`
-	CompressionMode        string `yaml:"compression_mode"` // gzip|zst (default: gzip)
+	CompressionMode        string `yaml:"compression_mode"`   // gzip|zst (default: gzip)
+	ChunkShardLevels       int    `yaml:"chunk_shard_levels"` // 1|2 (default: 1, número de níveis de sharding de chunks)
 }
 
 // CompressionModeByte converte o compression_mode string para a constante de protocolo.
@@ -179,6 +180,14 @@ func (c *ServerConfig) validate() error {
 		s.CompressionMode = strings.ToLower(strings.TrimSpace(s.CompressionMode))
 		if s.CompressionMode != "gzip" && s.CompressionMode != "zst" {
 			return fmt.Errorf("storages.%s.compression_mode must be gzip or zst, got %q", name, s.CompressionMode)
+		}
+
+		// Chunk shard levels: default 1
+		if s.ChunkShardLevels == 0 {
+			s.ChunkShardLevels = 1
+		}
+		if s.ChunkShardLevels < 1 || s.ChunkShardLevels > 2 {
+			return fmt.Errorf("storages.%s.chunk_shard_levels must be 1 or 2, got %d", name, s.ChunkShardLevels)
 		}
 
 		c.Storages[name] = s

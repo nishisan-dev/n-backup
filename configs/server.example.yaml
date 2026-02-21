@@ -16,6 +16,7 @@ storages:
     compression_mode: gzip            # gzip|zst (default: gzip)
     assembler_mode: eager             # eager|lazy (default: eager)
     assembler_pending_mem_limit: 8mb  # limite de pending em memória no modo eager
+    chunk_shard_levels: 1             # 1|2 — níveis de sharding de chunks no staging (default: 1)
 
   home-dirs:
     base_dir: /var/backups/home

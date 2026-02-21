@@ -28,7 +28,7 @@ const maxChunkLength = 32 * 1024 * 1024 // 32MB
 const defaultPendingMemLimit int64 = 8 * 1024 * 1024 // 8MB
 
 // chunkShardFanout define quantos subdiretórios por nível usamos para
-// distribuir arquivos de chunk no staging (2 níveis = fanout² shards).
+// distribuir arquivos de chunk no staging (fanout^levels shards possíveis).
 const chunkShardFanout uint32 = 256
 
 const (
@@ -42,6 +42,7 @@ const (
 type ChunkAssemblerOptions struct {
 	Mode            string
 	PendingMemLimit int64
+	ShardLevels     int // 1 ou 2 (default: 1)
 }
 
 // ChunkAssembler gerencia chunks de streams paralelos por sessão.
@@ -63,7 +64,9 @@ type ChunkAssembler struct {
 	pendingChunks   map[uint32]pendingChunk // chunks out-of-order aguardando (protegido por mu)
 	pendingMemLimit int64                   // limite de pendência em memória (imutável)
 	mode            string                  // assembler mode (imutável)
-	mu              sync.Mutex              // protege pendingChunks, outBuf, outFile, chunkDirExists
+	shardLevels     int                     // 1 ou 2 níveis de sharding (imutável)
+	createdShards   map[string]struct{}     // cache de diretórios de shard já criados
+	mu              sync.Mutex              // protege pendingChunks, outBuf, outFile, chunkDirExists, createdShards
 	logger          *slog.Logger
 
 	// Campos atômicos — lidos por Stats() sem lock.
@@ -180,6 +183,14 @@ func NewChunkAssemblerWithOptions(sessionID, agentDir string, logger *slog.Logge
 		return nil, fmt.Errorf("invalid assembler mode %q", mode)
 	}
 
+	shardLevels := opts.ShardLevels
+	if shardLevels == 0 {
+		shardLevels = 1
+	}
+	if shardLevels < 1 || shardLevels > 2 {
+		return nil, fmt.Errorf("invalid shard levels %d (must be 1 or 2)", shardLevels)
+	}
+
 	pendingMemLimit := opts.PendingMemLimit
 	if mode == AssemblerModeEager && pendingMemLimit <= 0 {
 		pendingMemLimit = defaultPendingMemLimit
@@ -206,6 +217,8 @@ func NewChunkAssemblerWithOptions(sessionID, agentDir string, logger *slog.Logge
 		pendingChunks:   make(map[uint32]pendingChunk),
 		pendingMemLimit: pendingMemLimit,
 		mode:            mode,
+		shardLevels:     shardLevels,
+		createdShards:   make(map[string]struct{}),
 		logger:          logger,
 	}
 	ca.nextExpectedSeq.Store(0)
@@ -394,16 +407,26 @@ func (ca *ChunkAssembler) saveOutOfOrder(globalSeq uint32, data []byte) error {
 }
 
 // chunkPath retorna o caminho de staging do chunk usando directory sharding
-// de 2 níveis (fanout² = 65536 shards possíveis).
+// de 1 ou 2 níveis, conforme configurado em shardLevels.
+// Usa cache interno para evitar syscalls os.MkdirAll repetidas.
 // Deve ser chamado com ca.mu held.
 func (ca *ChunkAssembler) chunkPath(globalSeq uint32) (string, error) {
 	level1 := fmt.Sprintf("%02x", globalSeq%chunkShardFanout)
-	level2 := fmt.Sprintf("%02x", (globalSeq/chunkShardFanout)%chunkShardFanout)
-	shardDir := filepath.Join(ca.chunkDir, level1, level2)
-	if err := os.MkdirAll(shardDir, 0755); err != nil {
-		return "", fmt.Errorf("creating chunk shard directory: %w", err)
+	var shardDir string
+	if ca.shardLevels == 2 {
+		level2 := fmt.Sprintf("%02x", (globalSeq/chunkShardFanout)%chunkShardFanout)
+		shardDir = filepath.Join(ca.chunkDir, level1, level2)
+	} else {
+		shardDir = filepath.Join(ca.chunkDir, level1)
 	}
-	ca.chunkDirExists = true
+
+	if _, exists := ca.createdShards[shardDir]; !exists {
+		if err := os.MkdirAll(shardDir, 0755); err != nil {
+			return "", fmt.Errorf("creating chunk shard directory: %w", err)
+		}
+		ca.createdShards[shardDir] = struct{}{}
+		ca.chunkDirExists = true
+	}
 
 	name := fmt.Sprintf("chunk_%010d.tmp", globalSeq)
 	return filepath.Join(shardDir, name), nil

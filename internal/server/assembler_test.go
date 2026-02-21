@@ -139,18 +139,20 @@ func TestChunkAssembler_OutOfOrder_UsesShardedChunkPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
+	// ShardLevels default (1) — apenas 1 nível de diretório
 	ca, err := NewChunkAssemblerWithMemLimit("test-shard", tmpDir, logger, 1)
 	if err != nil {
 		t.Fatalf("NewChunkAssemblerWithMemLimit: %v", err)
 	}
 	defer ca.Cleanup()
 
-	const seq uint32 = 513 // 0x0201 -> level1=01, level2=02
+	const seq uint32 = 513 // 513%256=1 -> "01"
 	if err := ca.WriteChunk(seq, bytes.NewReader([]byte("ZZ")), 2); err != nil {
 		t.Fatalf("WriteChunk(%d): %v", seq, err)
 	}
 
-	expectedPath := filepath.Join(ca.ChunkDir(), "01", "02", "chunk_0000000513.tmp")
+	// Com 1 nível: chunks_session/01/chunk_xxx.tmp
+	expectedPath := filepath.Join(ca.ChunkDir(), "01", "chunk_0000000513.tmp")
 	if _, err := os.Stat(expectedPath); err != nil {
 		t.Fatalf("expected sharded chunk file at %q: %v", expectedPath, err)
 	}
@@ -284,6 +286,7 @@ func TestChunkAssembler_EagerDiskSpill_Sharded_StillAssembles(t *testing.T) {
 	tmpDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
+	// ShardLevels default (1) — 1 nível
 	ca, err := NewChunkAssemblerWithMemLimit("test-eager-sharded-assemble", tmpDir, logger, 1)
 	if err != nil {
 		t.Fatalf("NewChunkAssemblerWithMemLimit: %v", err)
@@ -301,7 +304,8 @@ func TestChunkAssembler_EagerDiskSpill_Sharded_StillAssembles(t *testing.T) {
 		t.Fatalf("WriteChunk(1): %v", err)
 	}
 
-	expectedPath := filepath.Join(ca.ChunkDir(), "02", "00", "chunk_0000000002.tmp")
+	// Com 1 nível: chunks_session/02/chunk_xxx.tmp (já consumido)
+	expectedPath := filepath.Join(ca.ChunkDir(), "02", "chunk_0000000002.tmp")
 	if _, err := os.Stat(expectedPath); !os.IsNotExist(err) {
 		t.Fatalf("chunk file should have been consumed and removed after flush: %v", err)
 	}
@@ -365,9 +369,14 @@ func TestChunkAssembler_TwoLevelSharding_LargeSeq(t *testing.T) {
 	tmpDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	ca, err := NewChunkAssemblerWithMemLimit("test-two-level-large", tmpDir, logger, 1)
+	// Explicitamente 2 níveis
+	ca, err := NewChunkAssemblerWithOptions("test-two-level-large", tmpDir, logger, ChunkAssemblerOptions{
+		Mode:            AssemblerModeEager,
+		PendingMemLimit: 1,
+		ShardLevels:     2,
+	})
 	if err != nil {
-		t.Fatalf("NewChunkAssemblerWithMemLimit: %v", err)
+		t.Fatalf("NewChunkAssemblerWithOptions: %v", err)
 	}
 	defer ca.Cleanup()
 
@@ -380,5 +389,71 @@ func TestChunkAssembler_TwoLevelSharding_LargeSeq(t *testing.T) {
 	expectedPath := filepath.Join(ca.ChunkDir(), "03", "02", "chunk_0000066051.tmp")
 	if _, err := os.Stat(expectedPath); err != nil {
 		t.Fatalf("expected two-level sharded chunk file at %q: %v", expectedPath, err)
+	}
+}
+
+func TestChunkAssembler_SingleLevelSharding(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	ca, err := NewChunkAssemblerWithOptions("test-single-level", tmpDir, logger, ChunkAssemblerOptions{
+		Mode:            AssemblerModeEager,
+		PendingMemLimit: 1,
+		ShardLevels:     1,
+	})
+	if err != nil {
+		t.Fatalf("NewChunkAssemblerWithOptions: %v", err)
+	}
+	defer ca.Cleanup()
+
+	// seq=66051 -> 66051%256=3 -> "03" (apenas 1 nível)
+	const seq uint32 = 66051
+	if err := ca.WriteChunk(seq, bytes.NewReader([]byte("XX")), 2); err != nil {
+		t.Fatalf("WriteChunk(%d): %v", seq, err)
+	}
+
+	expectedPath := filepath.Join(ca.ChunkDir(), "03", "chunk_0000066051.tmp")
+	if _, err := os.Stat(expectedPath); err != nil {
+		t.Fatalf("expected single-level sharded chunk file at %q: %v", expectedPath, err)
+	}
+}
+
+func TestChunkAssembler_MkdirAllCache(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	ca, err := NewChunkAssemblerWithOptions("test-cache", tmpDir, logger, ChunkAssemblerOptions{
+		Mode:        AssemblerModeLazy,
+		ShardLevels: 1,
+	})
+	if err != nil {
+		t.Fatalf("NewChunkAssemblerWithOptions: %v", err)
+	}
+	defer ca.Cleanup()
+
+	// Dois chunks no mesmo shard (seq%256 == 0 para ambos)
+	if err := ca.WriteChunk(0, bytes.NewReader([]byte("AA")), 2); err != nil {
+		t.Fatalf("WriteChunk(0): %v", err)
+	}
+	if err := ca.WriteChunk(256, bytes.NewReader([]byte("BB")), 2); err != nil {
+		t.Fatalf("WriteChunk(256): %v", err)
+	}
+
+	// Ambos devem estar no shard "00"
+	p0 := filepath.Join(ca.ChunkDir(), "00", "chunk_0000000000.tmp")
+	p256 := filepath.Join(ca.ChunkDir(), "00", "chunk_0000000256.tmp")
+	if _, err := os.Stat(p0); err != nil {
+		t.Fatalf("expected chunk 0 at %q: %v", p0, err)
+	}
+	if _, err := os.Stat(p256); err != nil {
+		t.Fatalf("expected chunk 256 at %q: %v", p256, err)
+	}
+
+	// Cache deve ter exatamente 1 entrada (mesmo shard)
+	ca.mu.Lock()
+	cacheSize := len(ca.createdShards)
+	ca.mu.Unlock()
+	if cacheSize != 1 {
+		t.Errorf("expected createdShards cache to have 1 entry, got %d", cacheSize)
 	}
 }
