@@ -382,6 +382,7 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 				d.logger.Info("stream reconnected, resuming from offset",
 					"stream", streamIdx, "offset", resumeOffset,
 					"rbTail", stream.rb.Tail(), "rbHead", stream.rb.Head())
+				retries = 0 // reset após reconexão bem-sucedida — evita morte permanente por acúmulo
 				continue
 			}
 
