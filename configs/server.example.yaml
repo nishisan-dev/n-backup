@@ -45,6 +45,7 @@ web_ui:
   active_sessions_file: /var/lib/nbackup/active-sessions.jsonl
   active_sessions_max_lines: 20000
   active_snapshot_interval: 5m
+  storage_scan_interval: 1h               # Intervalo de refresh dos dados de storage (disco + contagem). Mínimo: 30s
   allow_origins:                   # ACL por IP/CIDR (obrigatória quando enabled)
     - "127.0.0.1/32"
     # - "10.0.0.0/8"              # Descomente para rede interna

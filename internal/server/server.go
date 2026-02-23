@@ -197,6 +197,10 @@ func startWebUI(ctx context.Context, cfg *config.ServerConfig, handler *Handler,
 
 	router := observability.NewRouter(handler, cfg, acl, store)
 
+	// Inicia scanner de storage com cache periódico
+	handler.StartStorageScanner(ctx, cfg.WebUI.StorageScanInterval)
+	logger.Info("storage scanner started", "interval", cfg.WebUI.StorageScanInterval)
+
 	webSrv := &http.Server{
 		Addr:              cfg.WebUI.Listen,
 		Handler:           router,

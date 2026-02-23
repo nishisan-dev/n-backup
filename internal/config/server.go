@@ -47,6 +47,9 @@ type WebUIConfig struct {
 	ActiveSessionsMaxLines int           `yaml:"active_sessions_max_lines"` // default: 20000
 	ActiveSnapshotInterval time.Duration `yaml:"active_snapshot_interval"`  // default: 5m
 
+	// Intervalo de refresh dos dados de storage (disco + contagem de backups)
+	StorageScanInterval time.Duration `yaml:"storage_scan_interval"` // default: 1h, mínimo: 30s
+
 	// Parsed é preenchido em validate(); não vem do YAML.
 	ParsedCIDRs []*net.IPNet `yaml:"-"`
 }
@@ -246,6 +249,12 @@ func (c *ServerConfig) validate() error {
 		}
 		if c.WebUI.ActiveSnapshotInterval <= 0 {
 			c.WebUI.ActiveSnapshotInterval = 5 * time.Minute
+		}
+		if c.WebUI.StorageScanInterval <= 0 {
+			c.WebUI.StorageScanInterval = 1 * time.Hour
+		}
+		if c.WebUI.StorageScanInterval < 30*time.Second {
+			c.WebUI.StorageScanInterval = 30 * time.Second
 		}
 		if len(c.WebUI.AllowOrigins) == 0 {
 			return fmt.Errorf("web_ui.allow_origins is required when web_ui is enabled (deny-by-default)")

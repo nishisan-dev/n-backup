@@ -84,6 +84,10 @@ type Handler struct {
 
 	// ActiveSessionHistory mantém snapshots periódicos de sessões ativas (nil quando WebUI desabilitada).
 	ActiveSessionHistory *observability.ActiveSessionStore
+
+	// storageCache mantém snapshot cacheado de StorageUsage, atualizado por StartStorageScanner.
+	// Evita syscall.Statfs + filepath.WalkDir a cada request HTTP.
+	storageCache atomic.Value // []observability.StorageUsage
 }
 
 // ControlConnInfo armazena metadata de um control channel conectado.
@@ -177,9 +181,44 @@ func (h *Handler) ConnectedAgents() []observability.AgentInfo {
 	return agents
 }
 
-// StorageUsageSnapshot retorna uso de disco real para cada storage configurado.
+// StorageUsageSnapshot retorna uso de disco para cada storage configurado.
+// Quando o scanner de storage está ativo (WebUI habilitada), retorna dados do cache.
+// Quando não há cache (ex: WebUI desabilitada), faz scan síncrono.
 // Implementa observability.HandlerMetrics.
 func (h *Handler) StorageUsageSnapshot() []observability.StorageUsage {
+	if cached := h.storageCache.Load(); cached != nil {
+		return cached.([]observability.StorageUsage)
+	}
+	// Fallback: scan síncrono (geralmente só quando WebUI está desabilitada)
+	return h.scanStorages()
+}
+
+// refreshStorageCache executa o scan de storages e armazena no cache atômico.
+func (h *Handler) refreshStorageCache() {
+	h.storageCache.Store(h.scanStorages())
+}
+
+// StartStorageScanner inicia goroutine que atualiza o cache de storage periodicamente.
+// Faz scan imediato no início e depois repete a cada interval.
+func (h *Handler) StartStorageScanner(ctx context.Context, interval time.Duration) {
+	h.refreshStorageCache() // scan inicial síncrono
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				h.refreshStorageCache()
+			}
+		}
+	}()
+}
+
+// scanStorages coleta uso de disco real (Statfs + WalkDir) para cada storage configurado.
+func (h *Handler) scanStorages() []observability.StorageUsage {
 	var result []observability.StorageUsage
 
 	// Ordena nomes para output determinístico
