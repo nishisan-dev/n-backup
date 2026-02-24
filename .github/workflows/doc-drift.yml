@@ -1,0 +1,26 @@
+name: Doc Drift Check
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'wiki/**'
+      - 'README.md'
+      - 'configs/*.yaml'
+      - 'internal/config/*.go'
+      - 'internal/protocol/*.go'
+      - 'internal/agent/dscp.go'
+
+jobs:
+  check-doc-drift:
+    name: Validate Documentation Consistency
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check doc drift
+        run: |
+          chmod +x scripts/check-doc-drift.sh
+          bash scripts/check-doc-drift.sh
