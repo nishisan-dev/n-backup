@@ -342,17 +342,45 @@ daemon:
 
 ## 8. Observabilidade (WebUI — v2.0.0+)
 
-O server expõe uma **SPA embarcada** com observabilidade em tempo real. Dados são mantidos em memória e opcionalmente **persistidos em disco** via arquivos JSONL:
+O nbackup-server embarca uma **SPA de observabilidade** acessível via HTTP, servida a partir de assets estáticos incorporados no binário (`go:embed`). Um listener HTTP dedicado, protegido por ACL baseada em IP/CIDR, expõe endpoints REST e a interface web.
 
-| Dado | Campo de configuração |
-|------|-----------------------|
-| Eventos (sessões, rotações, reconexões) | `web_ui.events_file` |
-| Histórico de sessões completadas | `web_ui.session_history_file` |
-| Snapshots periódicos de sessões ativas | `web_ui.active_sessions_file` |
+### APIs REST
 
-> **ACL obrigatória:** `web_ui.allow_origins` deve ser configurado quando `enabled: true`.
+| Endpoint | Descrição |
+|----------|-----------|
+| `GET /api/v1/health` | Status do server |
+| `GET /api/v1/metrics` | Bytes recebidos, sessões |
+| `GET /api/v1/sessions` | Sessões ativas |
+| `GET /api/v1/sessions/{id}` | Detalhe de sessão (streams, sparklines, assembler) |
+| `GET /api/v1/sessions/history` | Histórico de sessões finalizadas (ring buffer + JSONL) |
+| `GET /api/v1/sessions/active-history` | Snapshots periódicos de sessões ativas (JSONL) |
+| `GET /api/v1/agents` | Agentes conectados com stats (CPU, RAM, Disco) |
+| `GET /api/v1/storages` | Storages com uso de disco (usado/total/percentual) |
+| `GET /api/v1/events` | Eventos recentes (ring buffer + persistência JSONL) |
+| `GET /api/v1/config/effective` | Configuração efetiva do server |
 
-Veja a página dedicada: [[WebUI]]
+### WebUI (SPA)
+
+- **Vanilla JS** + CSS (sem framework), embarcado via `go:embed`
+- **Polling adaptativo**: atualiza dados a cada 2s (ativo) e views sob demanda
+- **Views**: Overview, Sessions, Events, Config
+- **Session Detail**: sparklines de throughput (Canvas), streams com uptime/reconnects, assembler progress
+- **Session History**: tabela com badges coloridos por resultado (ok/checksum/write_error/timeout)
+- **Connected Agents**: tabela com stats em gauges visuais (CPU/RAM/Disk)
+- **Storages**: gauges de uso de disco com thresholds visuais (verde/amarelo/vermelho)
+
+### Componentes
+
+| Componente | Arquivo | Responsabilidade |
+|-----------|---------|------------------|
+| **Observability HTTP** | `internal/server/observability/http.go` | Router, handlers REST, ACL |
+| **DTOs** | `internal/server/observability/dto.go` | Structs para serialização JSON |
+| **Event Store** | `internal/server/observability/event_store.go` | Persistência JSONL com rotação |
+| **Session History Store** | `internal/server/observability/session_history_store.go` | Ring + persistência JSONL de sessões finalizadas |
+| **Active Session Store** | `internal/server/observability/active_session_store.go` | Snapshots periódicos de sessões ativas (ring + JSONL) |
+| **WebUI Assets** | `internal/server/observability/web/` | SPA (HTML, CSS, JS) embarcados |
+
+> **ACL obrigatória:** `web_ui.allow_origins` deve ser configurado quando `enabled: true`. Veja [[Configuração de Exemplo|Configuração-de-Exemplo]].
 
 ---
 
