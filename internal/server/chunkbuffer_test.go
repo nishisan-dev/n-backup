@@ -464,3 +464,90 @@ func countSessionEntries(cb *ChunkBuffer) int {
 	})
 	return n
 }
+
+// --- SessionBytes ---
+
+func TestChunkBuffer_SessionBytes_Nil(t *testing.T) {
+	var cb *ChunkBuffer
+	if got := cb.SessionBytes(nil); got != 0 {
+		t.Errorf("nil ChunkBuffer.SessionBytes should return 0, got %d", got)
+	}
+}
+
+func TestChunkBuffer_SessionBytes_NoEntry(t *testing.T) {
+	cb := NewChunkBuffer(newBufConfig(32*1024*1024, 1.0), newBufTestLogger())
+	assembler := newBufAssembler(t, "sb-noentry")
+	// Nenhum push foi feito — SessionBytes deve retornar 0 sem criar entrada.
+	if got := cb.SessionBytes(assembler); got != 0 {
+		t.Errorf("expected SessionBytes=0 before any push, got %d", got)
+	}
+	if n := countSessionEntries(cb); n != 0 {
+		t.Errorf("SessionBytes should not create session entry, got %d entries", n)
+	}
+}
+
+func TestChunkBuffer_SessionBytes_AfterPush(t *testing.T) {
+	assembler := newBufAssembler(t, "sb-push")
+	cb := NewChunkBuffer(newBufConfig(32*1024*1024, 1.0), newBufTestLogger())
+	// Sem drainer — chunk fica em voo.
+	data := make([]byte, 4096)
+	if err := cb.Push(0, data, assembler); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	got := cb.SessionBytes(assembler)
+	if got != int64(len(data)) {
+		t.Errorf("expected SessionBytes=%d, got %d", len(data), got)
+	}
+}
+
+// --- DrainRateMBs ---
+
+func TestChunkBuffer_DrainRateMBs_Nil(t *testing.T) {
+	var cb *ChunkBuffer
+	s := cb.Stats()
+	if s.DrainRateMBs != 0 {
+		t.Errorf("nil ChunkBuffer DrainRateMBs should be 0, got %f", s.DrainRateMBs)
+	}
+}
+
+func TestChunkBuffer_DrainRateMBs_FirstCall(t *testing.T) {
+	cb := NewChunkBuffer(newBufConfig(64*1024*1024, 0.0), newBufTestLogger())
+	s := cb.Stats()
+	// Primeira chamada sempre retorna 0 (snapshot ainda não construído).
+	if s.DrainRateMBs != 0 {
+		t.Errorf("first Stats() DrainRateMBs should be 0.0 (no snapshot yet), got %f", s.DrainRateMBs)
+	}
+}
+
+func TestChunkBuffer_DrainRateMBs_AfterDrain(t *testing.T) {
+	assembler := newBufAssembler(t, "drainrate")
+	cb := NewChunkBuffer(newBufConfig(64*1024*1024, 0.0), newBufTestLogger())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cb.StartDrainer(ctx)
+
+	// Primeira chamada inicializa snapshot.
+	cb.Stats()
+
+	for i := 0; i < 5; i++ {
+		if err := cb.Push(uint32(i), make([]byte, 512*1024), assembler); err != nil {
+			t.Fatalf("Push(%d): %v", i, err)
+		}
+	}
+	if !bufWaitDrained(cb, 5, 3*time.Second) {
+		t.Fatalf("not drained")
+	}
+
+	// Aguarda 1s para que a janela do snapshot se abra.
+	time.Sleep(1100 * time.Millisecond)
+
+	s := cb.Stats()
+	// Não exigimos valor exato, apenas que a taxa seja >= 0 e tenha sido calculada.
+	if s.DrainRateMBs < 0 {
+		t.Errorf("DrainRateMBs should be >= 0, got %f", s.DrainRateMBs)
+	}
+	if s.TotalDrained != 5 {
+		t.Errorf("expected 5 drained, got %d", s.TotalDrained)
+	}
+}

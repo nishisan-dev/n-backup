@@ -17,11 +17,12 @@ import (
 
 // mockMetrics implementa HandlerMetrics para testes.
 type mockMetrics struct {
-	data     MetricsData
-	sessions []SessionSummary
-	details  map[string]*SessionDetail
-	agents   []AgentInfo
-	storages []StorageUsage
+	data        MetricsData
+	sessions    []SessionSummary
+	details     map[string]*SessionDetail
+	agents      []AgentInfo
+	storages    []StorageUsage
+	bufferStats *ChunkBufferDTO
 }
 
 func (m *mockMetrics) MetricsSnapshot() MetricsData       { return m.data }
@@ -39,6 +40,7 @@ func (m *mockMetrics) SessionHistorySnapshot() []SessionHistoryEntry { return ni
 func (m *mockMetrics) ActiveSessionHistorySnapshot(sessionID string, limit int) []ActiveSessionSnapshotEntry {
 	return nil
 }
+func (m *mockMetrics) ChunkBufferStats() *ChunkBufferDTO { return m.bufferStats }
 
 func newMockMetrics() *mockMetrics {
 	return &mockMetrics{
