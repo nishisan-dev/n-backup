@@ -236,6 +236,62 @@ resume:
 
 ---
 
+## Chunk Buffer (Server)
+
+O server suporta um **buffer de chunks em memória** para absorver oscilações de I/O em discos lentos (HDD, USB, NAS), evitando que a rede fique ociosa enquanto aguarda escrita em disco.
+
+```yaml
+# server.yaml
+chunk_buffer:
+  size: 128mb    # 0 = desligado (padrão); ex: "64mb", "128mb", "256mb"
+  drain_ratio: 0.5
+```
+
+> **Nota:** A memória é reservada no **startup do server**. Defina `size: 0` (ou omita) para desabilitar completamente.
+
+### Semântica do `drain_ratio`
+
+| Valor | Comportamento |
+|-------|---------------|
+| `0.0` | **Write-through** — chunks enviados ao assembler imediatamente |
+| `0.5` | **Padrão recomendado** — drena quando buffer atingir 50% |
+| `1.0` | **Drain tardio** — drena somente quando o buffer estiver cheio |
+
+> **Dica:** Para HDD ou NAS com alta latência, use `size: 128mb` e `drain_ratio: 0.5`. Para SSDs, o buffer geralmente não é necessário.
+
+> **Importante:** O buffer é **global por servidor**, compartilhado entre todas as sessões. Dimensione conforme o número de agentes simultâneos.
+
+---
+
+## DSCP Marking (Agent)
+
+O agent suporta marcação de DSCP (Differentiated Services Code Point) nos sockets de backup:
+
+```yaml
+backups:
+  - name: "critical-db"
+    storage: "database"
+    dscp: "AF41"           # Alta prioridade (classe AF4)
+    parallels: 4
+    sources:
+      - path: /var/lib/postgresql
+```
+
+### Valores Aceitos
+
+| Valor | Prioridade |
+|-------|-----------|
+| `EF` | Expedited Forwarding |
+| `AF41`-`AF43` | Assured Forwarding 4 (dados críticos) |
+| `AF31`-`AF33` | Assured Forwarding 3 |
+| `AF21`-`AF23` | Assured Forwarding 2 |
+| `AF11`-`AF13` | Assured Forwarding 1 |
+| `CS0`-`CS7` | Class Selector |
+
+> **Importante:** A marcação DSCP só tem efeito se a infraestrutura de rede suportar QoS. Valores inválidos causam erro na inicialização.
+
+---
+
 ## Parallel Streaming
 
 Para aumentar o throughput de backups grandes, o agent pode usar **múltiplos streams TLS paralelos**:
@@ -271,7 +327,7 @@ backups:
 | `resume.chunk_size` | `1mb` | Tamanho de cada chunk distribuído (64kb-16mb) |
 | Hysteresis window (fixo) | 3 | Janelas consecutivas para escalar |
 
-> **Dica:** Use `parallels: 2-4` para links com latência alta (WAN). Para LAN, `parallels: 0` costuma ser suficiente.
+> **Dica:** Use `parallels: 2` a `4` para links com latência alta (WAN). Para LAN, `parallels: 0` costuma ser suficiente.
 
 > **Nota:** O AutoScaler adiciona streams gradualmente com base na eficiência observada (razão producer/drain), evitando overhead desnecessário.
 

@@ -762,9 +762,98 @@ web_ui:
 
 ---
 
+## 11. HDD/NAS lento com Chunk Buffer
+
+**Cenário:** Server de backup com HDD ou NAS de alta latência de escrita. O `chunk_buffer` absorve os chunks recebidos em memória enquanto o disco "digere" os escritos em lote, mantendo a rede ativa sem esperar cada flush.
+
+### Quando usar
+
+- Discos rotativos (HDD 5400-7200 RPM)
+- NAS via rede (SMB/NFS com latência > 5ms por operação)
+- USB 3.0 externo com throughput variável
+- Qualquer armazenamento onde `iostat` mostre `%util` alto com baixo throughput
+
+### agent.yaml
+
+```yaml
+agent:
+  name: "app-server-hdd"
+
+server:
+  address: "backup.example.com:9847"
+
+tls:
+  ca_cert: /etc/nbackup/ca.pem
+  client_cert: /etc/nbackup/agent.pem
+  client_key: /etc/nbackup/agent-key.pem
+
+backups:
+  - name: app-data
+    storage: hdd-archive
+    schedule: "0 2 * * *"
+    parallels: 2               # Parallel moderado — HDD não ganha com muitos streams simultâneos
+    auto_scaler: efficiency
+    bandwidth_limit: "30mb"    # Alinha com throughput real do HDD
+    sources:
+      - path: /opt/app/data
+    exclude:
+      - "tmp/**"
+      - "cache/**"
+      - "*.log"
+
+retry:
+  max_attempts: 5
+  initial_delay: 1s
+  max_delay: 5m
+
+resume:
+  buffer_size: 256mb
+  chunk_size: 1mb
+
+logging:
+  level: info
+  format: json
+```
+
+### server.yaml
+
+```yaml
+server:
+  listen: "0.0.0.0:9847"
+
+tls:
+  ca_cert: /etc/nbackup/ca.pem
+  server_cert: /etc/nbackup/server.pem
+  server_key: /etc/nbackup/server-key.pem
+
+storages:
+  hdd-archive:
+    base_dir: /mnt/hdd/backups
+    max_backups: 14
+    compression_mode: gzip      # gzip: menos intensivo em CPU que zst para HDD lento
+    assembler_mode: lazy        # lazy: zero I/O aleatório durante a transferência
+    chunk_shard_levels: 1       # 1 nível: HDD não se beneficia de diretórios extras
+
+logging:
+  level: info
+  format: json
+
+# chunk_buffer absorve spikes de rede enquanto o HDD "digere" os escritos.
+# Dimensionado para cobrir ~4s de ingestão a 30 MB/s = 120 MB mínimo.
+chunk_buffer:
+  size: 128mb      # Reservado no startup — ajuste conforme RAM disponível
+  drain_ratio: 0.5 # Drena quando atingir 50% — mantém HDD ocupado sem backpressure
+```
+
+> **Por que `drain_ratio: 0.5`?** Com HDD, escrever cedo (low ratio) gera seek aleatório durante a ingestão. Escrever tarde (high ratio) atrasa demais. 50% é o equilíbrio: o buffer acumula rajadas de rede e drena em lote para o disco.
+
+> **Indicadores de que o buffer está ajudado:** Throughput de rede estável nos sparklines da WebUI sem quedas abruptas durante flush de disco.
+
+---
+
 ## Referências
 
 - [[Configuração de Exemplo|Configuração-de-Exemplo]] — Referência completa de todos os campos
-- [[Guia de Uso|Guia-de-Uso]] — Comandos, retry, resume, parallel streaming
+- [[Guia de Uso|Guia-de-Uso]] — Comandos, retry, resume, parallel streaming, chunk_buffer, dscp
 - [[Arquitetura]] — Detalhes internos do pipeline, assembler e control channel
 - [[Especificação Técnica|Especificação-Técnica]] — Protocolo binário e frames

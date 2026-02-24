@@ -236,6 +236,78 @@ resume:
 
 ---
 
+## Chunk Buffer (Server)
+
+O server suporta um **buffer de chunks em memória** para absorver oscilações de I/O em discos lentos (HDD, USB, NAS), evitando que a rede fique ociosa enquanto aguarda escrita em disco.
+
+```yaml
+# server.yaml
+chunk_buffer:
+  size: 128mb    # 0 = desligado (padrão); ex: "64mb", "128mb", "256mb"
+  drain_ratio: 0.5
+```
+
+> [!NOTE]
+> A memória é reservada no **startup do server**. Defina `size: 0` (ou omita) para desabilitar completamente.
+
+### Semântica do `drain_ratio`
+
+O `drain_ratio` controla quando o drainer começa a escrever os chunks no assembler:
+
+| Valor | Comportamento |
+|-------|---------------|
+| `0.0` | **Write-through** — chunks são enviados ao assembler imediatamente, sem bufferização real |
+| `0.5` | **Padrão recomendado** — drena quando o buffer atingir 50% de ocupação |
+| `1.0` | **Drain tardio** — drena somente quando o buffer estiver completamente cheio |
+
+### Parâmetros
+
+| Parâmetro | Default | Descrição |
+|----------|---------|-----------|
+| `chunk_buffer.size` | `0` (desligado) | Tamanho total do buffer compartilhado (ex: `"128mb"`) |
+| `chunk_buffer.drain_ratio` | `0.5` | Ocupação mínima para acionar drenagem (0.0 a 1.0) |
+
+> [!TIP]
+> Para discos HDD ou NAS com alta latência de escrita, use `size: 128mb` e `drain_ratio: 0.5`. Para SSDs rápidos, o buffer geralmente não é necessário.
+
+> [!IMPORTANT]
+> O buffer é **global por servidor**, compartilhado entre todas as sessões ativas. Dimensione conforme o número de agentes simultâneos esperados.
+
+---
+
+## DSCP Marking (Agent)
+
+O agent suporta marcação de DSCP (Differentiated Services Code Point) nos sockets de backup, permitindo priorização de tráfego em switches e roteadores gerenciados:
+
+```yaml
+backups:
+  - name: "critical-db"
+    storage: "database"
+    dscp: "AF41"           # Alta prioridade (classe AF4)
+    parallels: 4
+    sources:
+      - path: /var/lib/postgresql
+```
+
+### Valores Aceitos
+
+| Valor | Prioridade | Uso Típico |
+|-------|-----------|------------|
+| `EF` | Expedited Forwarding | VoIP, baixíssima latência |
+| `AF41` / `AF42` / `AF43` | Assured Forwarding 4 | Dados críticos de negócio |
+| `AF31` / `AF32` / `AF33` | Assured Forwarding 3 | Dados importantes |
+| `AF21` / `AF22` / `AF23` | Assured Forwarding 2 | Dados normais |
+| `AF11` / `AF12` / `AF13` | Assured Forwarding 1 | Dados de baixa prioridade |
+| `CS0`-`CS7` | Class Selector | Compatibilidade com precedência IP |
+
+> [!NOTE]
+> Se `dscp` for omitido ou vazio, nenhuma marcação é aplicada. O valor é validado na inicialização — valores inválidos causam erro de configuração.
+
+> [!IMPORTANT]
+> A marcação DSCP é aplicada no socket do agent. O efeito real depende de a rede respeitar o campo DSCP (QoS habilitado em switches/roteadores). Sem QoS configurado na infraestrutura, a marcação não tem efeito operacional.
+
+---
+
 ## Parallel Streaming
 
 Para aumentar o throughput de backups grandes, o agent pode usar **múltiplos streams TLS paralelos**:
@@ -244,7 +316,7 @@ Para aumentar o throughput de backups grandes, o agent pode usar **múltiplos st
 backups:
   - name: "data"
     storage: "main"
-    parallels: 4             # 0 = single stream, 1-8 = máximo de streams
+    parallels: 4             # 0 = single stream, 1-255 = máximo de streams
     auto_scaler: efficiency  # efficiency (padrão) ou adaptive
     bandwidth_limit: "100mb"  # Limite de upload: 100 MB/s (opcional, vazio=sem limite)
     sources:
@@ -271,7 +343,7 @@ backups:
 | Hysteresis window (fixo) | 3 | Janelas consecutivas para escalar |
 
 > [!TIP]
-> Use `parallels: 2-4` para links com latência alta (WAN). Para LAN, `parallels: 0` costuma ser suficiente.
+> Use `parallels: 2` a `4` para links com latência alta (WAN). Para LAN, `parallels: 0` costuma ser suficiente.
 
 > [!NOTE]
 > O AutoScaler adiciona streams gradualmente com base na eficiência observada (razão producer/drain), evitando overhead desnecessário.

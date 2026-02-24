@@ -500,6 +500,23 @@ Enviado periodicamente pelo agent junto com ControlPing. O server popula `TotalO
 
 Enviado periodicamente junto com ControlPing. O server armazena as métricas na `ParallelSession` e as expõe via API de sessões e WebUI.
 
+##### ControlIngestionDone / CIDN (Agent → Server) (v2.5+)
+
+```
+┌──────────┬─────────────────┬──────────────────┐
+│ "CIDN"   │ SessionIDLen    │ SessionID (UTF8) │
+│ 4 bytes  │ 1 byte          │ até 255 bytes    │
+└──────────┴─────────────────┴──────────────────┘
+```
+
+- **Magic**: `0x43 0x49 0x44 0x4E` ("CIDN")
+- **SessionIDLen**: comprimento em bytes do SessionID (1 byte, valor 0-255)
+- **SessionID**: UUID da sessão, mesmo valor recebido no ACK do Handshake
+
+Sinaliza **explicitamente** ao server que o agent terminou de enviar todos os chunks com sucesso na sessão paralela. Permite que o server acione commit e rotação sem aguardar EOF/timeout.
+
+Enviado pelo agent via canal de controle **imediatamente após o Trailer ser entregue** na sessão paralela.
+
 #### RTT EWMA
 
 O RTT é calculado via Exponentially Weighted Moving Average (α = 0.25):

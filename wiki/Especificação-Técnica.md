@@ -288,7 +288,7 @@ Enviado imediatamente após o ACK GO na conexão primária:
 └──────────┴───────────┘
 ```
 
-- **MaxStreams**: Número máximo de streams (1-8)
+- **MaxStreams**: Número máximo de streams (1-255)
 - **ChunkSize**: Tamanho de cada chunk em bytes (default: 1MB)
 
 #### ParallelJoin (Client → Server)
@@ -355,7 +355,7 @@ storages:
     chunk_shard_levels: 2  # 1 (flat, padrão) ou 2 (2 níveis de subdiretórios)
 ```
 
-- **parallels**: `0` desabilita (single stream), `1-8` define o máximo de streams.
+- **parallels**: `0` desabilita (single stream), `1-255` define o máximo de streams.
 - **auto_scaler**: `efficiency` (threshold-based, padrão) ou `adaptive` (probe-and-measure).
 - **bandwidth_limit**: limite de upload em Bytes/segundo (ex: `50mb`, `1gb`). Mínimo: `64kb`. Vazio = sem limite.
 - **chunk_shard_levels**: `1` (padrão, flat) ou `2` (2 níveis de subdiretórios) — controla a organização dos chunks no staging do assembler.
@@ -497,6 +497,23 @@ Enviado periodicamente pelo agent junto com ControlPing. O server popula os dado
 - **ActiveStreams / MaxStreams**: streams em uso e limite configurado
 - **State**: `0` = Stable, `1` = ScalingUp, `2` = ScaleDown, `3` = Probing
 - **ProbeActive**: `1` se há um probe de stream em andamento
+
+##### ControlIngestionDone / CIDN (Agent → Server) (v2.5+)
+
+```
+┌──────────┬─────────────────┬──────────────────┐
+│ "CIDN"   │ SessionIDLen    │ SessionID (UTF8) │
+│ 4 bytes  │ 1 byte          │ até 255 bytes    │
+└──────────┴─────────────────┴──────────────────┘
+```
+
+- **Magic**: `0x43 0x49 0x44 0x4E` ("CIDN")
+- **SessionIDLen**: comprimento em bytes do SessionID (1 byte, valor 0-255)
+- **SessionID**: UUID da sessão, mesmo valor recebido no ACK do Handshake
+
+Sinaliza **explicitamente** ao server que o agent terminou de enviar todos os chunks com sucesso na sessão paralela. Permite que o server acione commit e rotação sem aguardar EOF/timeout.
+
+Enviado pelo agent via canal de controle **imediatamente após o Trailer ser entregue** na sessão paralela.
 
 #### RTT EWMA
 

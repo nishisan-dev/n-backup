@@ -82,6 +82,7 @@ daemon:
 | `backups[].sources` | ✅ | Lista de diretórios a incluir no backup |
 | `backups[].exclude` | ❌ | Padrões glob de exclusão |
 | `backups[].parallels` | ❌ | `0` = single stream (padrão), `1-255` = streams paralelos |
+| `backups[].dscp` | ❌ | Marcação DSCP para QoS de rede (ex: `AF41`, `EF`, `CS4`). Vazio = sem marcação |
 | `backups[].auto_scaler` | ❌ | `efficiency` (padrão) ou `adaptive` |
 | `backups[].bandwidth_limit` | ❌ | Limite de upload em Bytes/s (ex: `50mb`, `1gb`, `256kb`). Mínimo: `64kb`. |
 | `retry.*` | ❌ | Configuração de retry (defaults sensatos se omitido) |
@@ -146,6 +147,12 @@ web_ui:
     - "127.0.0.1/32"
     - "10.0.0.0/8"
     - "192.168.0.0/16"
+
+# Buffer de chunks em memória — suaviza I/O em HDD/NAS lentos.
+# 0 (ou ausente) = desligado. Quando habilitado, a memória é reservada no startup.
+chunk_buffer:
+  size: 0              # ex: "128mb" para absorver spikes de I/O em HDD
+  drain_ratio: 0.5     # 0.0=write-through | 0.5=drena a 50% (padrão) | 1.0=drena quando cheio
 ```
 
 ### Campos Importantes
@@ -169,6 +176,8 @@ web_ui:
 | `web_ui.session_history_file` | ❌ | Caminho do arquivo JSONL de histórico de sessões. |
 | `web_ui.active_sessions_file` | ❌ | Caminho do arquivo JSONL de sessões ativas (snapshot periódico). |
 | `web_ui.active_snapshot_interval` | ❌ | Intervalo entre snapshots de sessões ativas (default: `5m`). |
+| `chunk_buffer.size` | ❌ | Tamanho do buffer global em memória (ex: `128mb`). `0` ou ausente = desligado. |
+| `chunk_buffer.drain_ratio` | ❌ | Nível de ocupação que aciona drenagem: `0.0` = write-through, `0.5` = 50% (padrão), `1.0` = cheio. |
 
 ---
 
