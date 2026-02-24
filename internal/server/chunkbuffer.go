@@ -127,6 +127,23 @@ func (cb *ChunkBuffer) getSessionCounter(a *ChunkAssembler) *atomic.Int64 {
 	return v.(*atomic.Int64)
 }
 
+// loadSessionCounter retorna o contador de bytes em voo da sessão sem criar
+// entrada nova no mapa.
+func (cb *ChunkBuffer) loadSessionCounter(a *ChunkAssembler) (*atomic.Int64, bool) {
+	if a == nil {
+		return nil, false
+	}
+	v, ok := cb.sessionBytes.Load(a)
+	if !ok {
+		return nil, false
+	}
+	counter, ok := v.(*atomic.Int64)
+	if !ok {
+		return nil, false
+	}
+	return counter, true
+}
+
 // Push tenta inserir um chunk no buffer em memória.
 //
 // FIX #2 — Race condition: a reserva de bytes usa um loop CAS para garantir
@@ -278,8 +295,14 @@ func (cb *ChunkBuffer) Flush(assembler *ChunkAssembler) error {
 		return nil
 	}
 
-	counter := cb.getSessionCounter(assembler)
+	counter, ok := cb.loadSessionCounter(assembler)
+	if !ok {
+		// Nenhum chunk desta sessão passou pelo buffer (ou já foi limpo).
+		return nil
+	}
 	if counter.Load() == 0 {
+		// Evita reter entrada vazia da sessão no mapa.
+		cb.sessionBytes.Delete(assembler)
 		return nil
 	}
 

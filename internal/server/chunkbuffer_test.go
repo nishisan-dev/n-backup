@@ -272,6 +272,42 @@ func TestChunkBuffer_Flush_WaitsForDrain(t *testing.T) {
 	}
 }
 
+func TestChunkBuffer_Flush_NoPending_DoesNotCreateSessionEntry(t *testing.T) {
+	assembler := newBufAssembler(t, "buf-flush-empty")
+	cb := NewChunkBuffer(newBufConfig(32*1024*1024, 1.0), newBufTestLogger())
+
+	if got := countSessionEntries(cb); got != 0 {
+		t.Fatalf("expected 0 session entries before Flush, got %d", got)
+	}
+
+	if err := cb.Flush(assembler); err != nil {
+		t.Fatalf("Flush on empty session should be no-op, got: %v", err)
+	}
+
+	if got := countSessionEntries(cb); got != 0 {
+		t.Fatalf("expected 0 session entries after empty Flush, got %d", got)
+	}
+}
+
+func TestChunkBuffer_Flush_ZeroCounter_CleansSessionEntry(t *testing.T) {
+	assembler := newBufAssembler(t, "buf-flush-zero")
+	cb := NewChunkBuffer(newBufConfig(32*1024*1024, 1.0), newBufTestLogger())
+
+	// Simula uma entrada residual zerada no mapa (cenário de vazamento).
+	cb.getSessionCounter(assembler)
+	if got := countSessionEntries(cb); got != 1 {
+		t.Fatalf("expected 1 session entry before Flush, got %d", got)
+	}
+
+	if err := cb.Flush(assembler); err != nil {
+		t.Fatalf("Flush should clean zero counter entry, got: %v", err)
+	}
+
+	if got := countSessionEntries(cb); got != 0 {
+		t.Fatalf("expected 0 session entries after Flush cleanup, got %d", got)
+	}
+}
+
 // TestChunkBuffer_Flush_NotBlockedByOtherSession verifica FIX #1:
 // Flush da sessão A não deve bloquear enquanto a sessão B ainda está enviando chunks.
 func TestChunkBuffer_Flush_NotBlockedByOtherSession(t *testing.T) {
@@ -418,4 +454,13 @@ func bufWaitDrained(cb *ChunkBuffer, n int, timeout time.Duration) bool {
 		time.Sleep(10 * time.Millisecond)
 	}
 	return false
+}
+
+func countSessionEntries(cb *ChunkBuffer) int {
+	var n int
+	cb.sessionBytes.Range(func(_, _ any) bool {
+		n++
+		return true
+	})
+	return n
 }
