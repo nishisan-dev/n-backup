@@ -23,6 +23,25 @@ type ServerConfig struct {
 	Logging      LoggingInfo            `yaml:"logging"`
 	FlowRotation FlowRotationConfig     `yaml:"flow_rotation"`
 	WebUI        WebUIConfig            `yaml:"web_ui"`
+	ChunkBuffer  ChunkBufferConfig      `yaml:"chunk_buffer"`
+}
+
+// ChunkBufferConfig define o buffer de chunks em memória compartilhado globalmente
+// entre todas as sessões de backup paralelo.
+// Quando Size for "0" ou vazio, o buffer é desabilitado e o comportamento atual
+// é preservado sem qualquer alteração de caminho crítico.
+type ChunkBufferConfig struct {
+	// Size define a memória máxima alocada para o buffer.
+	// "0" ou vazio desabilita o buffer. Aceita sufixos: kb, mb, gb.
+	Size string `yaml:"size"` // ex: "64mb", "256mb"
+
+	// DrainMode define como o buffer é drenado para o assembler.
+	// "lazy" (default): usa o WriteChunk normal do assembler (reordenação preservada).
+	// "eager": idem, mas sinaliza ao assembler para dar prioridade ao flush imediato.
+	DrainMode string `yaml:"drain_mode"` // lazy | eager
+
+	// SizeRaw é o valor em bytes após parse. Preenchido por validate(); não vem do YAML.
+	SizeRaw int64 `yaml:"-"`
 }
 
 // WebUIConfig configura o listener HTTP da SPA de observabilidade.
@@ -194,6 +213,26 @@ func (c *ServerConfig) validate() error {
 		}
 
 		c.Storages[name] = s
+	}
+
+	// Chunk Buffer global
+	if c.ChunkBuffer.Size == "" || c.ChunkBuffer.Size == "0" {
+		c.ChunkBuffer.SizeRaw = 0 // desabilitado
+	} else {
+		parsed, err := ParseByteSize(c.ChunkBuffer.Size)
+		if err != nil {
+			return fmt.Errorf("chunk_buffer.size: %w", err)
+		}
+		if parsed <= 0 {
+			return fmt.Errorf("chunk_buffer.size must be > 0 or \"0\" to disable, got %s", c.ChunkBuffer.Size)
+		}
+		c.ChunkBuffer.SizeRaw = parsed
+		if c.ChunkBuffer.DrainMode == "" {
+			c.ChunkBuffer.DrainMode = "lazy"
+		}
+		if c.ChunkBuffer.DrainMode != "lazy" && c.ChunkBuffer.DrainMode != "eager" {
+			return fmt.Errorf("chunk_buffer.drain_mode must be lazy or eager, got %q", c.ChunkBuffer.DrainMode)
+		}
 	}
 	if c.Logging.Level == "" {
 		c.Logging.Level = "info"

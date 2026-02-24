@@ -65,6 +65,9 @@ type Handler struct {
 	locks    *sync.Map // Mapa de locks por "agent:storage"
 	sessions *sync.Map // Mapa de sessões parciais por sessionID
 
+	// chunkBuffer é o buffer de chunks em memória global (nil quando desabilitado).
+	chunkBuffer *ChunkBuffer
+
 	// Control channel registry: agentName → *ControlConnInfo
 	// Registrado em handleControlChannel, usado por evaluateFlowRotation
 	// para enviar ControlRotate graceful, e por ConnectedAgents para observabilidade.
@@ -103,10 +106,20 @@ type ControlConnInfo struct {
 // NewHandler cria um novo Handler.
 func NewHandler(cfg *config.ServerConfig, logger *slog.Logger, locks *sync.Map, sessions *sync.Map) *Handler {
 	return &Handler{
-		cfg:      cfg,
-		logger:   logger,
-		locks:    locks,
-		sessions: sessions,
+		cfg:         cfg,
+		logger:      logger,
+		locks:       locks,
+		sessions:    sessions,
+		chunkBuffer: NewChunkBuffer(cfg.ChunkBuffer, logger),
+	}
+}
+
+// StartChunkBuffer inicia a goroutine de drenagem do buffer de chunks.
+// Deve ser chamado uma vez após NewHandler, antes de aceitar conexões.
+// É no-op quando o buffer está desabilitado.
+func (h *Handler) StartChunkBuffer(ctx context.Context) {
+	if h.chunkBuffer != nil {
+		h.chunkBuffer.StartDrainer(ctx)
 	}
 }
 
@@ -2143,9 +2156,26 @@ func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, read
 			return bytesReceived, fmt.Errorf("reading chunk header from stream %d: %w", streamIndex, err)
 		}
 
-		// Escreve incrementalmente no assembler
-		if err := session.Assembler.WriteChunk(hdr.GlobalSeq, io.LimitReader(reader, int64(hdr.Length)), int64(hdr.Length)); err != nil {
-			return bytesReceived, fmt.Errorf("writing chunk seq %d to assembler: %w", hdr.GlobalSeq, err)
+		// Entrega o chunk ao assembler — diretamente ou via buffer de memória.
+		// Quando o buffer está habilitado, Push materializa os dados do reader TCP
+		// em memória e retorna imediatamente; o drainer fará a escrita de forma
+		// assíncrona, desacoplando a goroutine de rede do I/O de disco.
+		if h.chunkBuffer != nil {
+			// Lê os bytes do reader TCP antes do push (o buffer precisa de ownership).
+			chunkData := make([]byte, hdr.Length)
+			if _, err := io.ReadFull(reader, chunkData); err != nil {
+				return bytesReceived, fmt.Errorf("reading chunk seq %d for buffer: %w", hdr.GlobalSeq, err)
+			}
+			if err := h.chunkBuffer.Push(hdr.GlobalSeq, chunkData, session.Assembler); err != nil {
+				// Backpressure: buffer cheio após timeout — falha a stream para forçar
+				// reconexão do agent e aliviar pressão.
+				return bytesReceived, fmt.Errorf("chunk buffer backpressure on seq %d: %w", hdr.GlobalSeq, err)
+			}
+		} else {
+			// Caminho direto (buffer desabilitado) — escreve via LimitReader TCP.
+			if err := session.Assembler.WriteChunk(hdr.GlobalSeq, io.LimitReader(reader, int64(hdr.Length)), int64(hdr.Length)); err != nil {
+				return bytesReceived, fmt.Errorf("writing chunk seq %d to assembler: %w", hdr.GlobalSeq, err)
+			}
 		}
 
 		nowNano := time.Now().UnixNano()

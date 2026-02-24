@@ -72,6 +72,9 @@ func Run(ctx context.Context, cfg *config.ServerConfig, logger *slog.Logger) err
 	// Stats reporter — imprime métricas a cada 15s
 	go handler.StartStatsReporter(ctx)
 
+	// Chunk buffer drainer — desabilitado quando chunk_buffer.size é 0
+	handler.StartChunkBuffer(ctx)
+
 	// Goroutine para fechar o listener quando o context for cancelado
 	go func() {
 		<-ctx.Done()
@@ -134,6 +137,9 @@ func RunWithListener(ctx context.Context, ln net.Listener, cfg *config.ServerCon
 
 	// Stats reporter
 	go handler.StartStatsReporter(ctx)
+
+	// Chunk buffer drainer — desabilitado quando chunk_buffer.size é 0
+	handler.StartChunkBuffer(ctx)
 
 	go func() {
 		<-ctx.Done()

@@ -49,3 +49,16 @@ web_ui:
   allow_origins:                   # ACL por IP/CIDR (obrigatória quando enabled)
     - "127.0.0.1/32"
     # - "10.0.0.0/8"              # Descomente para rede interna
+
+# Buffer de chunks em memória — suaviza oscilações de I/O em HDs lentos.
+# Quando habilitado, o servidor reserva a memória no startup e absorve chunks
+# recebidos da rede no buffer antes de escrevê-los no disco.
+# 0 (ou ausente) desabilita o buffer completamente (comportamento padrão).
+#
+# drain_mode:
+#   lazy  — o drainer envia os chunks para o assembler normal (preserva reordenação e checksums)
+#   eager — idem ao lazy, mas prioriza flush imediato (adequado para streams bem ordenados)
+#
+chunk_buffer:
+  size: 0              # ex: "64mb", "128mb", "256mb"  (0 = desligado)
+  drain_mode: lazy     # lazy (default) | eager
