@@ -101,7 +101,10 @@ func NewChunkBuffer(cfg config.ChunkBufferConfig, logger *slog.Logger) *ChunkBuf
 		return nil
 	}
 
-	capacity := int(cfg.SizeRaw / avgSlotSize)
+	capacity := cfg.ChannelSlots
+	if capacity <= 0 {
+		capacity = int(cfg.SizeRaw / avgSlotSize)
+	}
 	if capacity < 2 {
 		capacity = 2
 	}

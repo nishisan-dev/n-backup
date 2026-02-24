@@ -43,6 +43,12 @@ type ChunkBufferConfig struct {
 	// O comportamento de escrita em disco segue o assembler_mode do storage.
 	DrainRatio *float64 `yaml:"drain_ratio"` // ptr: nil=default 0.5 | &0.0=write-through
 
+	// ChannelSlots define o número de slots do canal interno do buffer.
+	// 0 (ou campo ausente) → auto: sizeRaw / 1MB (compatibilidade retroativa).
+	// Útil para ajustar quando chunk_size no agent for menor que 1MB:
+	// ex: chunk_size=256KB com size=64MB → channel_slots: 256 (vs. 64 auto).
+	ChannelSlots int `yaml:"channel_slots"` // 0 = auto
+
 	// SizeRaw e DrainRatioRaw são preenchidos por validate(); não vêm do YAML.
 	SizeRaw       int64   `yaml:"-"`
 	DrainRatioRaw float64 `yaml:"-"`
