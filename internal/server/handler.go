@@ -136,6 +136,29 @@ func (h *Handler) MetricsSnapshot() observability.MetricsData {
 		DiskWrite:   h.DiskWrite.Load(),
 		ActiveConns: h.ActiveConns.Load(),
 		Sessions:    sessionCount,
+		ChunkBuffer: h.ChunkBufferStats(),
+	}
+}
+
+// ChunkBufferStats retorna as métricas do buffer de chunks em formato DTO.
+// Retorna nil quando o buffer está desabilitado.
+// Implementa observability.HandlerMetrics.
+func (h *Handler) ChunkBufferStats() *observability.ChunkBufferDTO {
+	if h.chunkBuffer == nil {
+		return nil
+	}
+	s := h.chunkBuffer.Stats()
+	return &observability.ChunkBufferDTO{
+		Enabled:            s.Enabled,
+		CapacityBytes:      s.CapacityBytes,
+		InFlightBytes:      s.InFlightBytes,
+		FillRatio:          s.FillRatio,
+		TotalPushed:        s.TotalPushed,
+		TotalDrained:       s.TotalDrained,
+		TotalFallbacks:     s.TotalFallbacks,
+		BackpressureEvents: s.BackpressureEvents,
+		DrainRatio:         s.DrainRatio,
+		DrainRateMBs:       s.DrainRateMBs,
 	}
 }
 
@@ -414,7 +437,7 @@ func (h *Handler) SessionsSnapshot() []observability.SessionSummary {
 				status = "finalizing"
 			}
 
-			sessions = append(sessions, observability.SessionSummary{
+			summary := observability.SessionSummary{
 				SessionID:      sessionID,
 				Agent:          s.AgentName,
 				Storage:        s.StorageName,
@@ -443,7 +466,16 @@ func (h *Handler) SessionsSnapshot() []observability.SessionSummary {
 					AssembledChunks: asmStats.AssembledChunks,
 					Phase:           asmStats.Phase,
 				},
-			})
+			}
+			// Dados de buffer por sessão (zero quando buffer desabilitado).
+			if h.chunkBuffer != nil {
+				bufBytes := h.chunkBuffer.SessionBytes(s.Assembler)
+				summary.BufferInFlightBytes = bufBytes
+				if h.chunkBuffer.Stats().CapacityBytes > 0 {
+					summary.BufferFillPercent = float64(bufBytes) / float64(h.chunkBuffer.Stats().CapacityBytes) * 100
+				}
+			}
+			sessions = append(sessions, summary)
 
 			// Auto-scale info (presente apenas se o agent enviou stats)
 			if raw := s.AutoScaleInfo.Load(); raw != nil {
@@ -642,6 +674,15 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 		// Auto-scale info
 		if raw := s.AutoScaleInfo.Load(); raw != nil {
 			detail.AutoScale = raw.(*observability.AutoScaleInfo)
+		}
+
+		// Dados de buffer por sessão (zero quando buffer desabilitado).
+		if h.chunkBuffer != nil {
+			bufBytes := h.chunkBuffer.SessionBytes(s.Assembler)
+			detail.BufferInFlightBytes = bufBytes
+			if cap := h.chunkBuffer.Stats().CapacityBytes; cap > 0 {
+				detail.BufferFillPercent = float64(bufBytes) / float64(cap) * 100
+			}
 		}
 
 		return detail, true

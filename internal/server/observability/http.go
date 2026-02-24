@@ -30,6 +30,7 @@ type HandlerMetrics interface {
 	StorageUsageSnapshot() []StorageUsage
 	SessionHistorySnapshot() []SessionHistoryEntry
 	ActiveSessionHistorySnapshot(sessionID string, limit int) []ActiveSessionSnapshotEntry
+	ChunkBufferStats() *ChunkBufferDTO
 }
 
 // MetricsData contém os dados de métricas coletados do Handler.
@@ -38,6 +39,7 @@ type MetricsData struct {
 	DiskWrite   int64
 	ActiveConns int32
 	Sessions    int
+	ChunkBuffer *ChunkBufferDTO
 }
 
 // NewRouter cria o http.Handler para a API de observabilidade e SPA.
@@ -110,6 +112,7 @@ func makeMetricsHandler(metrics HandlerMetrics) http.HandlerFunc {
 			DiskWriteBytes: data.DiskWrite,
 			ActiveConns:    data.ActiveConns,
 			Sessions:       data.Sessions,
+			ChunkBuffer:    data.ChunkBuffer,
 		}
 		writeJSON(w, http.StatusOK, resp)
 	}

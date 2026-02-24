@@ -15,12 +15,13 @@ type HealthResponse struct {
 
 // MetricsResponse é retornado por GET /api/v1/metrics.
 type MetricsResponse struct {
-	TrafficInBytes int64   `json:"traffic_in_bytes"`
-	DiskWriteBytes int64   `json:"disk_write_bytes"`
-	ActiveConns    int32   `json:"active_conns"`
-	Sessions       int     `json:"sessions"`
-	TrafficInMBps  float64 `json:"traffic_in_mbps,omitempty"` // preenchido se intervalo disponível
-	DiskWriteMBps  float64 `json:"disk_write_mbps,omitempty"`
+	TrafficInBytes int64           `json:"traffic_in_bytes"`
+	DiskWriteBytes int64           `json:"disk_write_bytes"`
+	ActiveConns    int32           `json:"active_conns"`
+	Sessions       int             `json:"sessions"`
+	TrafficInMBps  float64         `json:"traffic_in_mbps,omitempty"` // preenchido se intervalo disponível
+	DiskWriteMBps  float64         `json:"disk_write_mbps,omitempty"`
+	ChunkBuffer    *ChunkBufferDTO `json:"chunk_buffer,omitempty"`
 }
 
 // SessionSummary é usado na lista de GET /api/v1/sessions.
@@ -49,6 +50,10 @@ type SessionSummary struct {
 	AssemblyETA  string          `json:"assembly_eta,omitempty"`
 	Assembler    *AssemblerStats `json:"assembler,omitempty"`
 	AutoScale    *AutoScaleInfo  `json:"auto_scale,omitempty"`
+
+	// Campos de chunk buffer por sessão (zero quando buffer desabilitado).
+	BufferInFlightBytes int64   `json:"buffer_in_flight_bytes,omitempty"`
+	BufferFillPercent   float64 `json:"buffer_fill_percent,omitempty"`
 }
 
 // AssemblerStats representa o estado do montador de chunks.
@@ -185,4 +190,19 @@ type SessionHistoryEntry struct {
 	Duration    string `json:"duration"`
 	BytesTotal  int64  `json:"bytes_total"`
 	Result      string `json:"result"` // ok | checksum_mismatch | write_error | timeout | error
+}
+
+// ChunkBufferDTO representa o estado global do buffer de chunks em memória.
+// Retornado dentro de MetricsResponse quando o buffer está habilitado.
+type ChunkBufferDTO struct {
+	Enabled            bool    `json:"enabled"`
+	CapacityBytes      int64   `json:"capacity_bytes"`
+	InFlightBytes      int64   `json:"in_flight_bytes"`
+	FillRatio          float64 `json:"fill_ratio"`
+	TotalPushed        int64   `json:"total_pushed"`
+	TotalDrained       int64   `json:"total_drained"`
+	TotalFallbacks     int64   `json:"total_fallbacks"`
+	BackpressureEvents int64   `json:"backpressure_events"`
+	DrainRatio         float64 `json:"drain_ratio"`
+	DrainRateMBs       float64 `json:"drain_rate_mbs"` // MB/s taxa atual de drenagem (janela ~5s)
 }
