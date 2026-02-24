@@ -10,7 +10,46 @@
 
 ---
 
-## 1. Build dos Binários
+## 1. Instalação via pacote `.deb` (Recomendado)
+
+Baixe o pacote `.deb` da [página de Releases](https://github.com/nishisan-dev/n-backup/releases):
+
+```bash
+# amd64
+wget https://github.com/nishisan-dev/n-backup/releases/latest/download/nbackup-agent_amd64.deb
+wget https://github.com/nishisan-dev/n-backup/releases/latest/download/nbackup-server_amd64.deb
+
+# arm64
+wget https://github.com/nishisan-dev/n-backup/releases/latest/download/nbackup-agent_arm64.deb
+wget https://github.com/nishisan-dev/n-backup/releases/latest/download/nbackup-server_arm64.deb
+
+# Instalar
+sudo dpkg -i nbackup-agent_amd64.deb
+sudo dpkg -i nbackup-server_amd64.deb
+```
+
+O pacote `.deb` inclui:
+- Binário em `/usr/bin/`
+- Config exemplo em `/etc/nbackup/`
+- Systemd unit com hardening de segurança
+- Man page (`man nbackup-agent`, `man nbackup-server`)
+
+---
+
+## 2. Instalação via binário estático
+
+```bash
+wget https://github.com/nishisan-dev/n-backup/releases/latest/download/nbackup-agent-linux-amd64
+wget https://github.com/nishisan-dev/n-backup/releases/latest/download/nbackup-server-linux-amd64
+
+chmod +x nbackup-agent-linux-amd64 nbackup-server-linux-amd64
+sudo mv nbackup-agent-linux-amd64 /usr/local/bin/nbackup-agent
+sudo mv nbackup-server-linux-amd64 /usr/local/bin/nbackup-server
+```
+
+---
+
+## 3. Build from Source
 
 ```bash
 git clone https://github.com/nishisan-dev/n-backup.git
@@ -30,11 +69,11 @@ GOOS=linux GOARCH=amd64 go build -o bin/nbackup-server ./cmd/nbackup-server
 
 ---
 
-## 2. Geração de Certificados (mTLS)
+## 4. Geração de Certificados (mTLS)
 
 O n-backup exige **mutual TLS** — tanto o server quanto o agent precisam de certificados assinados pela mesma CA.
 
-### 2.1. Criar a CA (Certificate Authority)
+### 4.1. Criar a CA (Certificate Authority)
 
 ```bash
 # Gera chave privada da CA
@@ -46,7 +85,7 @@ openssl req -new -x509 -sha256 -key ca-key.pem \
   -subj "/CN=NBackup CA"
 ```
 
-### 2.2. Criar Certificado do Server
+### 4.2. Criar Certificado do Server
 
 ```bash
 # Gera chave privada
@@ -70,7 +109,7 @@ openssl x509 -req -sha256 -in server.csr \
   -extfile server-ext.cnf
 ```
 
-### 2.3. Criar Certificado do Agent
+### 4.3. Criar Certificado do Agent
 
 Repita para **cada agent** com um CN único:
 
@@ -99,7 +138,7 @@ openssl x509 -req -sha256 -in ${AGENT_NAME}.csr \
 >
 > Exemplo: se `agent.name: "web-server-01"`, o certificado deve ter sido gerado com `-subj "/CN=web-server-01"`.
 
-### 2.4. Distribuir os Certificados
+### 4.4. Distribuir os Certificados
 
 **No Server:**
 
@@ -124,9 +163,9 @@ openssl x509 -req -sha256 -in ${AGENT_NAME}.csr \
 
 ---
 
-## 3. Configuração
+## 5. Configuração
 
-### 3.1. Server
+### 5.1. Server
 
 ```bash
 sudo mkdir -p /etc/nbackup /var/backups/scripts /var/backups/home
@@ -166,7 +205,7 @@ Defaults dos novos campos por storage:
 - `assembler_mode: eager`
 - `assembler_pending_mem_limit: 8mb` (8 * 1024 * 1024 bytes)
 
-### 3.2. Agent
+### 5.2. Agent
 
 ```bash
 sudo mkdir -p /etc/nbackup
@@ -219,7 +258,7 @@ logging:
 
 ---
 
-## 4. Deploy dos Binários
+## 6. Deploy dos Binários
 
 ```bash
 sudo cp bin/nbackup-server /usr/local/bin/
@@ -228,9 +267,9 @@ sudo cp bin/nbackup-agent /usr/local/bin/
 
 ---
 
-## 5. Systemd (Produção)
+## 7. Systemd (Produção)
 
-### 5.1. Server
+### 7.1. Server
 
 ```bash
 sudo tee /etc/systemd/system/nbackup-server.service << 'EOF'
@@ -258,7 +297,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now nbackup-server
 ```
 
-### 5.2. Agent
+### 7.2. Agent
 
 ```bash
 sudo tee /etc/systemd/system/nbackup-agent.service << 'EOF'
@@ -283,7 +322,7 @@ sudo systemctl enable --now nbackup-agent
 
 ---
 
-## 6. Verificação
+## 8. Verificação
 
 ```bash
 # Verifica status do server
@@ -301,7 +340,7 @@ nbackup-agent --config /etc/nbackup/agent.yaml --once
 
 ---
 
-## 7. Estrutura de Storage (Server)
+## 9. Estrutura de Storage (Server)
 
 Cada storage nomeado tem seu próprio diretório base. Dentro dele, os backups são organizados por agent:
 

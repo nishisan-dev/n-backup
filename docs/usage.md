@@ -27,11 +27,14 @@ O agent roda como processo permanente e dispara backups conforme a cron expressi
 nbackup-agent --config /etc/nbackup/agent.yaml
 ```
 
-O scheduler utiliza o mesmo formato cron do Unix:
+O scheduler utiliza o mesmo formato cron do Unix. Cada backup entry tem sua própria cron expression:
 
 ```yaml
-daemon:
-  schedule: "0 2 * * *"    # Diário às 02h
+backups:
+  - name: app
+    schedule: "0 2 * * *"    # Diário às 02h
+  - name: home
+    schedule: "0 */6 * * *"  # A cada 6 horas
 ```
 
 Exemplos de expressões:
@@ -99,10 +102,10 @@ Output no terminal:
 Verifica se o server está acessível e operante:
 
 ```bash
-nbackup-agent health backup.nishisan.dev:9847
+nbackup-agent health backup.example.com:9847
 
 # Com config customizado (necessário para TLS)
-nbackup-agent health backup.nishisan.dev:9847 --config /etc/nbackup/agent.yaml
+nbackup-agent health backup.example.com:9847 --config /etc/nbackup/agent.yaml
 ```
 
 Respostas possíveis:

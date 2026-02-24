@@ -354,6 +354,22 @@ backups:
   - Para single-stream: aplicado sobre o buffer de escrita antes do hash inline.
   - Para parallel-stream: aplicado sobre o fluxo agregado antes da distribuição pelo Dispatcher.
   - Implementado via Token Bucket (`golang.org/x/time/rate`).
+- **chunk_shard_levels** (server-side): controla a organização dos chunks no staging do assembler.
+
+  ```yaml
+  storages:
+    home-dirs:
+      assembler_mode: lazy
+      chunk_shard_levels: 2  # 1 (flat, padrão) ou 2 (2 níveis de subdiretórios)
+  ```
+
+  | Valor | Estrutura no staging |
+  |-------|----------------------|
+  | `1` (padrão) | `staging/<sessionID>/chunk-NNNN` — flat |
+  | `2` | `staging/<sessionID>/XX/YYYYYY` — 2 níveis, reduz entradas por diretório |
+
+  Recomendado `2` quando `parallels ≥ 4` com grande volume de chunks.
+
 - O agent usa um **Dispatcher** (round-robin) e um **AutoScaler** (histerese ou probe) para distribuir chunks entre streams.
 
 ### 3.6 Control Channel Protocol (v1.3.8+)

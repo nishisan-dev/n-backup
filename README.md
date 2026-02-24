@@ -28,7 +28,12 @@ Sistema de backup **high-performance** client-server escrito em Go. Streaming di
 | **Integridade SHA-256** | Hash calculado inline durante streaming. Validação dupla (agent + server). |
 | **Resume Mid-Stream** | Ring buffer em memória (configurável, padrão 256MB) permite retomar backups interrompidos. |
 | **Parallel Streaming** | Até 255 streams TLS paralelos com chunk-based dispatch para maximizar throughput. |
+| **AutoScaler Adaptativo** | Dois modos: `efficiency` (threshold-based) e `adaptive` (probe-and-measure). Escala streams dinamicamente sem intervenção manual. |
+| **Bandwidth Throttling** | Limite de upload por backup entry (`bandwidth_limit`). Aplica-se ao fluxo agregado em parallel streaming. Mínimo: 64kb. |
 | **Compressão Paralela** | `pgzip` (klauspost) com goroutines paralelas — até 3x mais rápido que gzip stdlib. |
+| **Chunk Buffer (Server)** | Buffer de chunks em memória no server para absorver I/O em HDD/NAS lentos, sem bloquear a rede. |
+| **DSCP Marking** | Marcação de QoS (EF, AF11-AF43, CS0-CS7) nos sockets de backup para priorização em redes gerenciadas. |
+| **WebUI de Observabilidade** | SPA embarcada no server com sessões ativas, sparklines de throughput, histórico e eventos em tempo real. |
 | **Control Channel** | Conexão TLS persistente para keep-alive (PING/PONG), medição de RTT e orquestração server-side. |
 | **Graceful Flow Rotation** | Server solicita drenagem de streams via ControlRotate — zero data loss em reconexões. |
 | **RTT Metrics** | RTT EWMA contínuo via control channel, com status do server (carga, disco). |
@@ -38,7 +43,7 @@ Sistema de backup **high-performance** client-server escrito em Go. Streaming di
 | **Progress Bar** | Visualização de progresso em backups manuais (MB/s, ETA, retries). |
 | **Schedule por Backup** | Cada backup entry possui sua própria cron expression. |
 | **Hot Reload (SIGHUP)** | Recarrega configuração sem downtime via `systemctl reload`. |
-| **Stats Reporter** | Server imprime métricas a cada 15s: conexões, throughput, sessões ativas. |
+| **Stats Reporter** | Agent e server emitem métricas periódicas de conexões, throughput e sessões ativas. |
 
 ---
 
