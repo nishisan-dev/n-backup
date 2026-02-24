@@ -48,6 +48,7 @@ type ChunkBufferStats struct {
 	TotalFallbacks     int64
 	BackpressureEvents int64
 	DrainRatio         float64
+	DrainRateMBs       float64 // taxa de drenagem em MB/s (janela deslizante ~5s)
 }
 
 // ChunkBuffer é um buffer de chunks em memória global e compartilhado entre
@@ -84,6 +85,13 @@ type ChunkBuffer struct {
 	totalDrained       atomic.Int64
 	totalFallbacks     atomic.Int64
 	backpressureEvents atomic.Int64
+
+	// Snapshot para cálculo lazy de drain rate (janela deslizante ~5s).
+	// drainSnapMu protege drainSnapTs e drainSnapVal.
+	drainSnapMu  sync.Mutex
+	drainSnapTs  time.Time
+	drainSnapVal int64   // valor de totalDrained no momento do snapshot
+	drainRateVal float64 // último drain rate calculado (MB/s)
 }
 
 // NewChunkBuffer cria um ChunkBuffer com base na configuração.
@@ -282,6 +290,56 @@ func (cb *ChunkBuffer) drainSlot(slot chunkSlot) {
 	cb.totalDrained.Add(1)
 }
 
+// SessionBytes retorna quantos bytes desta sessão estão atualmente no buffer.
+// Retorna 0 se a sessão não tiver entradas no mapa (nunca usou o buffer ou já foi limpa).
+func (cb *ChunkBuffer) SessionBytes(a *ChunkAssembler) int64 {
+	if cb == nil || a == nil {
+		return 0
+	}
+	counter, ok := cb.loadSessionCounter(a)
+	if !ok {
+		return 0
+	}
+	return counter.Load()
+}
+
+// drainRateMBs calcula a taxa de drenagem em MB/s com janela deslizante de ~5s.
+// O cálculo é lazy: feito na chamada de Stats(), sem goroutine extra.
+// Usa um snapshot protegido por Mutex — baixa contenção pois chamado a cada 2s.
+func (cb *ChunkBuffer) drainRateMBs() float64 {
+	cb.drainSnapMu.Lock()
+	defer cb.drainSnapMu.Unlock()
+
+	now := time.Now()
+	currentDrained := cb.totalDrained.Load()
+
+	// Inicializa o snapshot na primeira chamada.
+	if cb.drainSnapTs.IsZero() {
+		cb.drainSnapTs = now
+		cb.drainSnapVal = currentDrained
+		cb.drainRateVal = 0
+		return 0
+	}
+
+	// Só recalcula se a janela de ~5s passou (pelo menos 1s para evitar divisão instável).
+	dt := now.Sub(cb.drainSnapTs).Seconds()
+	if dt < 1.0 {
+		return cb.drainRateVal
+	}
+
+	// Cada slot drenado representa avgSlotSize bytes em média — usamos bytes reais
+	// acumulados via totalDrained × avgSlotSize como estimativa simples.
+	// Nota: totalDrained conta slots (chunks), não bytes. A estimativa por slot
+	// é conservadora mas suficiente para indicação visual na UI.
+	deltaSlots := currentDrained - cb.drainSnapVal
+	rateMBs := float64(deltaSlots) * float64(avgSlotSize) / dt / (1024 * 1024)
+
+	cb.drainSnapTs = now
+	cb.drainSnapVal = currentDrained
+	cb.drainRateVal = rateMBs
+	return rateMBs
+}
+
 // Flush aguarda que todos os chunks da sessão identificada por assembler sejam
 // drenados completamente para o assembler.
 //
@@ -344,5 +402,6 @@ func (cb *ChunkBuffer) Stats() ChunkBufferStats {
 		TotalFallbacks:     cb.totalFallbacks.Load(),
 		BackpressureEvents: cb.backpressureEvents.Load(),
 		DrainRatio:         cb.drainRatio,
+		DrainRateMBs:       cb.drainRateMBs(),
 	}
 }
