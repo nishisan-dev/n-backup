@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -20,10 +21,9 @@ import (
 const avgSlotSize = 1 * 1024 * 1024 // 1MB
 
 // drainPollInterval é o intervalo de polling do drainer quando drain_ratio > 0.
-// O drainer acorda a cada intervalo para verificar se o limiar foi atingido.
 const drainPollInterval = 5 * time.Millisecond
 
-// chunkBufferFlushTimeout é o tempo máximo que Flush aguarda o buffer esvaziar.
+// chunkBufferFlushTimeout é o tempo máximo que Flush aguarda o buffer da sessão esvaziar.
 const chunkBufferFlushTimeout = 30 * time.Second
 
 // chunkBufferPushTimeout é o tempo máximo que Push aguarda por espaço livre no
@@ -54,25 +54,30 @@ type ChunkBufferStats struct {
 // sessões paralelas. Funciona como um filesystem virtual em memória:
 // cada chunk é escrito por inteiro antes de ser considerado "aceito".
 //
-// Comportamento por drain_ratio:
+// Comportamento por drain_ratio (configurado via DrainRatioRaw):
 //   - 0.0: write-through — assim que o chunk é fechado no buffer, inicia o drain
 //   - 0.0–1.0: drena quando inFlightBytes/sizeRaw >= drain_ratio
-//   - No fallback (chunk maior que capacidade disponível): chama WriteChunk
-//     diretamente no assembler, que decide conforme seu assembler_mode
-//     (lazy → staging em disco; eager → append no arquivo final).
 //
-// O drain_mode foi removido: é o assembler_mode do storage (lazy|eager) que
-// determina como os chunks são escritos em disco, não o buffer.
+// Fallback: se o chunk for maior que o espaço disponível, é entregue diretamente
+// ao assembler (que persiste conforme seu assembler_mode: lazy=staging, eager=append).
+//
+// Flush() é scoped por sessão (por *ChunkAssembler): aguarda apenas os chunks
+// daquela sessão serem drenados, sem bloquear sessões concorrentes.
 type ChunkBuffer struct {
 	sizeRaw    int64   // capacidade total em bytes (imutável)
 	drainRatio float64 // limiar de fill para acionar drain (0.0 a 1.0)
 	logger     *slog.Logger
 
 	slots       chan chunkSlot // canal com slots de chunks pendentes
-	drainSignal chan struct{}  // sinal para drain imediato (ratio=0 ou threshold atingido)
+	drainSignal chan struct{}  // sinal para drain imediato
 
-	// Rastreamento de bytes em voo (para ratio e fallback)
+	// inFlightBytes rastreia bytes reservados (global, para Stats e fallback check).
+	// FIX #2: modificado via CAS para evitar race na reserva de capacidade.
 	inFlightBytes atomic.Int64
+
+	// sessionBytes rastreia bytes em voo por sessão (*ChunkAssembler → *atomic.Int64).
+	// FIX #1: permite Flush() aguardar apenas os bytes da sessão solicitante.
+	sessionBytes sync.Map
 
 	// Métricas atômicas
 	totalPushed        atomic.Int64
@@ -88,15 +93,12 @@ func NewChunkBuffer(cfg config.ChunkBufferConfig, logger *slog.Logger) *ChunkBuf
 		return nil
 	}
 
-	// Capacidade em número de slots: sizeRaw / avgSlotSize, mínimo 2.
-	// Apenas limita quantos chunks simultâneos podem estar no canal;
-	// o controle real de memória é feito em bytes via inFlightBytes.
 	capacity := int(cfg.SizeRaw / avgSlotSize)
 	if capacity < 2 {
 		capacity = 2
 	}
 
-	drainRatio := cfg.DrainRatio
+	drainRatio := cfg.DrainRatioRaw
 
 	logger.Info("chunk buffer initialized",
 		"capacity_bytes_mb", cfg.SizeRaw/(1024*1024),
@@ -118,39 +120,51 @@ func (cb *ChunkBuffer) Enabled() bool {
 	return cb != nil
 }
 
+// getSessionCounter retorna (criando se necessário) o contador atômico de bytes
+// em voo para uma sessão específica, identificada pelo ponteiro do assembler.
+func (cb *ChunkBuffer) getSessionCounter(a *ChunkAssembler) *atomic.Int64 {
+	v, _ := cb.sessionBytes.LoadOrStore(a, &atomic.Int64{})
+	return v.(*atomic.Int64)
+}
+
 // Push tenta inserir um chunk no buffer em memória.
 //
-// Se o chunk não couber no espaço disponível (inFlightBytes + len(data) > sizeRaw),
-// o caminho de fallback é usado: o chunk é entregue diretamente ao assembler,
-// que persiste conforme seu assembler_mode (lazy = staging, eager = append final).
+// FIX #2 — Race condition: a reserva de bytes usa um loop CAS para garantir
+// atomicidade entre a verificação de capacidade e o incremento de inFlightBytes.
 //
+// Se o chunk não couber, usa fallback direto ao assembler.
 // Se drain_ratio == 0, sinaliza drenagem imediata após inserção.
-// Se drain_ratio > 0, verifica o limiar e sinaliza se atingido.
 func (cb *ChunkBuffer) Push(globalSeq uint32, data []byte, assembler *ChunkAssembler) error {
 	dataLen := int64(len(data))
 
-	// Verifica se o chunk cabe no espaço disponível do buffer.
-	current := cb.inFlightBytes.Load()
-	available := cb.sizeRaw - current
-	if dataLen > available {
-		// Fallback: o chunk excede a capacidade disponível.
-		// Entrega diretamente ao assembler (respeita seu assembler_mode).
-		cb.logger.Debug("chunk buffer fallback: chunk exceeds available capacity",
-			"globalSeq", globalSeq,
-			"chunkBytes", dataLen,
-			"availableBytes", available,
-			"inFlightBytes", current,
-		)
-		cb.totalFallbacks.Add(1)
-		return assembler.WriteChunk(globalSeq, bytes.NewReader(data), dataLen)
+	// FIX #2: reserva de bytes via CAS — evita race entre goroutines concorrentes.
+	// Loop até conseguir reservar atomicamente ou determinar que não há espaço.
+	for {
+		current := cb.inFlightBytes.Load()
+		available := cb.sizeRaw - current
+		if dataLen > available {
+			// Fallback: chunk não cabe — entrega diretamente ao assembler.
+			cb.logger.Debug("chunk buffer fallback: chunk exceeds available capacity",
+				"globalSeq", globalSeq,
+				"chunkBytes", dataLen,
+				"availableBytes", available,
+			)
+			cb.totalFallbacks.Add(1)
+			return assembler.WriteChunk(globalSeq, bytes.NewReader(data), dataLen)
+		}
+		if cb.inFlightBytes.CompareAndSwap(current, current+dataLen) {
+			// Reserva atômica bem-sucedida.
+			break
+		}
+		// CAS falhou: outro goroutine modificou inFlightBytes — tenta novamente.
 	}
 
-	// Reserva espaço em bytes antes de tentar enviar ao canal.
-	cb.inFlightBytes.Add(dataLen)
+	// Incrementa contador da sessão (para Flush scoped — FIX #1).
+	cb.getSessionCounter(assembler).Add(dataLen)
 
 	slot := chunkSlot{
 		globalSeq: globalSeq,
-		data:      data, // ownership transferido — o caller não reutiliza o slice
+		data:      data,
 		assembler: assembler,
 	}
 
@@ -159,8 +173,9 @@ func (cb *ChunkBuffer) Push(globalSeq uint32, data []byte, assembler *ChunkAssem
 	case cb.slots <- slot:
 		cb.totalPushed.Add(1)
 	case <-time.After(chunkBufferPushTimeout):
-		// Backpressure: canal cheio — desfaz reserva e retorna erro.
+		// Backpressure: desfaz reserva e retorna erro.
 		cb.inFlightBytes.Add(-dataLen)
+		cb.getSessionCounter(assembler).Add(-dataLen)
 		cb.backpressureEvents.Add(1)
 		return fmt.Errorf("chunk buffer full after %s (backpressure): seq %d",
 			chunkBufferPushTimeout, globalSeq)
@@ -168,10 +183,8 @@ func (cb *ChunkBuffer) Push(globalSeq uint32, data []byte, assembler *ChunkAssem
 
 	// Aciona o drainer conforme o drain_ratio.
 	if cb.drainRatio == 0 {
-		// Write-through: drain imediato após cada chunk aceito.
 		cb.signalDrain()
 	} else {
-		// Drain baseado em limiar de fill.
 		fillRatio := float64(cb.inFlightBytes.Load()) / float64(cb.sizeRaw)
 		if fillRatio >= cb.drainRatio {
 			cb.signalDrain()
@@ -181,24 +194,20 @@ func (cb *ChunkBuffer) Push(globalSeq uint32, data []byte, assembler *ChunkAssem
 	return nil
 }
 
-// signalDrain envia um sinal não-bloqueante ao drainer para acionar drenagem.
+// signalDrain envia um sinal não-bloqueante ao drainer.
 func (cb *ChunkBuffer) signalDrain() {
 	select {
 	case cb.drainSignal <- struct{}{}:
 	default:
-		// Já há um sinal pendente — drainer será acionado em breve.
 	}
 }
 
 // StartDrainer inicia a goroutine de drenagem. Deve ser chamada uma única vez.
-// Para quando ctx é cancelado, após drenar os slots restantes (graceful).
 func (cb *ChunkBuffer) StartDrainer(ctx context.Context) {
 	go cb.drainLoop(ctx)
 }
 
 // drainLoop gerencia o ciclo de vida do drainer.
-// Para drain_ratio=0: reage ao drainSignal para cada chunk aceito.
-// Para drain_ratio>0: reage ao drainSignal (threshold) e a um ticker de poll.
 func (cb *ChunkBuffer) drainLoop(ctx context.Context) {
 	cb.logger.Info("chunk buffer drainer started", "drain_ratio", cb.drainRatio)
 
@@ -238,31 +247,39 @@ func (cb *ChunkBuffer) drainAll() {
 	}
 }
 
-// drainSlot entrega um único slot ao assembler de destino e contabiliza os bytes.
+// drainSlot entrega um único slot ao assembler de destino e libera os bytes reservados.
 func (cb *ChunkBuffer) drainSlot(slot chunkSlot) {
 	dataLen := int64(len(slot.data))
 
-	r := bytes.NewReader(slot.data)
-	if err := slot.assembler.WriteChunk(slot.globalSeq, r, dataLen); err != nil {
+	if err := slot.assembler.WriteChunk(slot.globalSeq, bytes.NewReader(slot.data), dataLen); err != nil {
 		cb.logger.Error("chunk buffer drain error",
 			"globalSeq", slot.globalSeq,
 			"error", err,
 		)
-		// O assembler já loga internamente; aqui apenas decrementamos.
 	}
 
-	// Libera bytes reservados — deve ocorrer após WriteChunk para que o
-	// Flush() só retorne após a escrita estar concluída.
+	// Libera bytes globais e por sessão — após WriteChunk para que
+	// Flush() só retorne com a escrita concluída.
 	cb.inFlightBytes.Add(-dataLen)
+	cb.getSessionCounter(slot.assembler).Add(-dataLen)
 	cb.totalDrained.Add(1)
 }
 
-// Flush aguarda o buffer esvaziar completamente (inFlightBytes == 0).
-// Deve ser chamado antes de assembler.Finalize() para garantir que todos os
-// chunks do buffer tenham sido entregues ao assembler.
-// Sinaliza o drainer para forçar drain imediato e aguarda até timeout.
-func (cb *ChunkBuffer) Flush() error {
-	if cb == nil || cb.inFlightBytes.Load() == 0 {
+// Flush aguarda que todos os chunks da sessão identificada por assembler sejam
+// drenados completamente para o assembler.
+//
+// FIX #1 — Flush scoped por sessão: não aguarda bytes de outras sessões,
+// eliminando o risco de bloquear sessões concorrentes (ex: sessão A não espera
+// pela sessão B que ainda está recebendo chunks).
+//
+// Deve ser chamado antes de assembler.Finalize() para garantir integridade.
+func (cb *ChunkBuffer) Flush(assembler *ChunkAssembler) error {
+	if cb == nil {
+		return nil
+	}
+
+	counter := cb.getSessionCounter(assembler)
+	if counter.Load() == 0 {
 		return nil
 	}
 
@@ -271,20 +288,20 @@ func (cb *ChunkBuffer) Flush() error {
 
 	deadline := time.Now().Add(chunkBufferFlushTimeout)
 	for time.Now().Before(deadline) {
-		if cb.inFlightBytes.Load() == 0 {
+		if counter.Load() == 0 {
+			cb.sessionBytes.Delete(assembler)
 			return nil
 		}
-		// Continua sinalizando para o drainer não perder o sinal
 		cb.signalDrain()
 		time.Sleep(drainPollInterval)
 	}
 
-	remaining := cb.inFlightBytes.Load()
-	return fmt.Errorf("chunk buffer flush timeout after %s: %d bytes still in flight",
+	remaining := counter.Load()
+	return fmt.Errorf("chunk buffer flush timeout after %s: %d bytes still in flight for session",
 		chunkBufferFlushTimeout, remaining)
 }
 
-// Stats retorna um snapshot das métricas do buffer.
+// Stats retorna um snapshot das métricas globais do buffer.
 func (cb *ChunkBuffer) Stats() ChunkBufferStats {
 	if cb == nil {
 		return ChunkBufferStats{Enabled: false}

@@ -37,13 +37,15 @@ type ChunkBufferConfig struct {
 
 	// DrainRatio define o limiar de ocupação (0.0 a 1.0) a partir do qual
 	// o buffer aciona a drenagem para o assembler.
-	// 0.0 = write-through (drena imediatamente após cada chunk aceito).
-	// 0.5 = drena quando 50% da capacidade de bytes está em uso (default).
+	// nil (campo ausente no YAML) → default 0.5.
+	// 0.0 → write-through explícito (drena após cada chunk).
+	// 1.0 → drena apenas quando o buffer está completamente cheio.
 	// O comportamento de escrita em disco segue o assembler_mode do storage.
-	DrainRatio float64 `yaml:"drain_ratio"` // 0.0 a 1.0 (default: 0.5)
+	DrainRatio *float64 `yaml:"drain_ratio"` // ptr: nil=default 0.5 | &0.0=write-through
 
-	// SizeRaw é o valor em bytes após parse. Preenchido por validate(); não vem do YAML.
-	SizeRaw int64 `yaml:"-"`
+	// SizeRaw e DrainRatioRaw são preenchidos por validate(); não vêm do YAML.
+	SizeRaw       int64   `yaml:"-"`
+	DrainRatioRaw float64 `yaml:"-"`
 }
 
 // WebUIConfig configura o listener HTTP da SPA de observabilidade.
@@ -229,17 +231,16 @@ func (c *ServerConfig) validate() error {
 			return fmt.Errorf("chunk_buffer.size must be > 0 or \"0\" to disable, got %s", c.ChunkBuffer.Size)
 		}
 		c.ChunkBuffer.SizeRaw = parsed
-		// drain_ratio: default 0.5 se não especificado; aceita 0.0 (write-through) a 1.0
-		if c.ChunkBuffer.DrainRatio == 0 && c.ChunkBuffer.Size != "0" {
-			// 0 pode ser intencional (write-through) ou omissão — usa default 0.5
-			// O usuário deve especificar explicitamente 0 para write-through.
-			// Para distinguir: se o campo é zero e não foi explicitado, yaml.v3
-			// retorna 0 para float64 não especificado — usamos default 0.5.
-			c.ChunkBuffer.DrainRatio = 0.5
+		// DrainRatio: nil significia campo ausente no YAML → default 0.5.
+		// &0.0 é write-through explícito; &1.0 = só drena quando cheio.
+		if c.ChunkBuffer.DrainRatio == nil {
+			v := 0.5
+			c.ChunkBuffer.DrainRatio = &v
 		}
-		if c.ChunkBuffer.DrainRatio < 0 || c.ChunkBuffer.DrainRatio > 1 {
-			return fmt.Errorf("chunk_buffer.drain_ratio must be between 0.0 and 1.0, got %.2f", c.ChunkBuffer.DrainRatio)
+		if *c.ChunkBuffer.DrainRatio < 0 || *c.ChunkBuffer.DrainRatio > 1 {
+			return fmt.Errorf("chunk_buffer.drain_ratio must be between 0.0 and 1.0, got %.2f", *c.ChunkBuffer.DrainRatio)
 		}
+		c.ChunkBuffer.DrainRatioRaw = *c.ChunkBuffer.DrainRatio
 	}
 	if c.Logging.Level == "" {
 		c.Logging.Level = "info"

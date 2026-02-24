@@ -2082,11 +2082,11 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		h.Events.PushEvent("info", "ingestion_complete", agentName, fmt.Sprintf("%s/%s ingestion finished, assembling file", storageName, backupName), 0)
 	}
 
-	// Finaliza o assembler (flush + close)
 	// Primeiro flush do buffer de memória: garante que nenhum chunk ainda em
 	// trânsito no ChunkBuffer seja perdido antes do Finalize.
+	// FIX: Flush é scoped por sessão — não bloqueia sessões concorrentes.
 	if h.chunkBuffer != nil {
-		if err := h.chunkBuffer.Flush(); err != nil {
+		if err := h.chunkBuffer.Flush(assembler); err != nil {
 			logger.Error("flushing chunk buffer before finalize", "error", err)
 			protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
 			return
