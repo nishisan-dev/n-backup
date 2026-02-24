@@ -117,6 +117,7 @@
 
             Components.renderServerInfo(health);
             Components.renderOverviewMetrics(metrics);
+            Components.renderChunkBufferCard(metrics.chunk_buffer || null);
             Components.renderOverviewAgents(agents);
             Components.renderOverviewStorages(storages);
             Components.renderOverviewSessions(sessions);

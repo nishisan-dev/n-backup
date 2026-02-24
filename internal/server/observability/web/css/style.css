@@ -863,6 +863,95 @@ body {
     white-space: nowrap;
 }
 
+/* ============ Chunk Buffer Card ============ */
+
+.chunk-buffer-card {
+    border-left: 3px solid var(--accent-cyan);
+}
+
+.chunk-buffer-card.disabled {
+    border-left-color: var(--text-muted);
+    opacity: 0.6;
+}
+
+.chunk-buffer-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+}
+
+.chunk-buffer-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+}
+
+.chunk-buffer-metrics {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px 20px;
+    margin-top: 10px;
+}
+
+.chunk-buffer-metric {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.chunk-buffer-metric-label {
+    font-size: 0.65rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.chunk-buffer-metric-value {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--text-primary);
+}
+
+/* Fill gauge no chunk buffer card (reutiliza stat-track com altura maior) */
+.chunk-buffer-fill-wrap {
+    margin: 8px 0 4px;
+}
+
+.chunk-buffer-fill-wrap .stat-track {
+    height: 6px;
+    border-radius: 3px;
+}
+
+/* Linha de buffer inline nas sessões ativas */
+.buffer-inline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.buffer-inline .stat-track {
+    width: 60px;
+    height: 4px;
+}
+
+/* Badge pulsante para backpressure > 0 */
+.badge-backpressure {
+    background: rgba(244, 63, 94, 0.2);
+    color: var(--accent-rose);
+    animation: backpressure-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes backpressure-pulse {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.4); }
+    50% { opacity: 0.85; box-shadow: 0 0 0 4px rgba(244, 63, 94, 0); }
+}
+
 /* ============ Storage Cards ============ */
 
 .storages-grid {

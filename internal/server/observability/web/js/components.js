@@ -315,6 +315,7 @@ const Components = {
                         ${s.eta ? `<span>ETA: ${s.eta}</span>` : ''}
                         ${s.assembly_eta ? `<span>Assembly ETA: ${s.assembly_eta}</span>` : ''}
                     </div>
+                    ${s.buffer_in_flight_bytes > 0 ? this.renderBufferSessionInline(s) : ''}
                 </div>
                 <div class="session-card-stats">
                     <span class="session-bytes">${this.formatBytes(s.bytes_received)}</span>
@@ -363,6 +364,7 @@ const Components = {
             ${detail.started_at ? `<div class="info-item"><span class="info-label">Duração</span><span class="info-value">${this.formatElapsed(detail.started_at)}</span></div>` : ''}
             ${detail.assembler ? this.renderAssemblerProgress(detail.assembler, detail.assembly_eta) : ''}
             ${detail.auto_scale ? this.renderAutoScaleInfo(detail.auto_scale) : ''}
+            ${detail.buffer_in_flight_bytes > 0 ? this.renderBufferMemoryBlock(detail) : ''}
             ${progressHtml}
         `;
 
@@ -676,5 +678,117 @@ const Components = {
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
+    },
+
+    // Renderiza o card global "Chunk Buffer" no overview.
+    // Exibido apenas quando buf != null. Se buf.enabled=false, exibe estado desabilitado.
+    renderChunkBufferCard(buf) {
+        const el = document.getElementById('chunk-buffer-card');
+        if (!el) return;
+
+        if (!buf) {
+            el.style.display = 'none';
+            return;
+        }
+
+        el.style.display = '';
+
+        if (!buf.enabled) {
+            el.innerHTML = `
+                <div class="chunk-buffer-header">
+                    <span class="chunk-buffer-title">Chunk Buffer</span>
+                    <span class="badge badge-neutral">DESABILITADO</span>
+                </div>
+                <p style="font-size:0.8rem;color:var(--text-muted);">Buffer desabilitado (<code>size: 0</code>).</p>`;
+            el.classList.add('disabled');
+            return;
+        }
+
+        el.classList.remove('disabled');
+
+        const fillPct = (buf.fill_ratio || 0) * 100;
+        let fillColor = 'low';
+        if (fillPct >= 80) fillColor = 'high';
+        else if (fillPct >= 50) fillColor = 'med';
+
+        const pending = Math.max(0, (buf.total_pushed || 0) - (buf.total_drained || 0));
+        const bpBadge = (buf.backpressure_events || 0) > 0
+            ? `<span class="badge badge-backpressure" title="Total desde o início do servidor">⚡ ${buf.backpressure_events} backpressure</span>`
+            : '';
+
+        el.innerHTML = `
+            <div class="chunk-buffer-header">
+                <span class="chunk-buffer-title">Chunk Buffer</span>
+                <span class="badge badge-running">● ATIVO</span>
+            </div>
+            <div class="chunk-buffer-fill-wrap">
+                <div style="display:flex;justify-content:space-between;font-size:0.7rem;color:var(--text-muted);margin-bottom:4px;">
+                    <span>Em uso: ${this.formatBytes(buf.in_flight_bytes)} / ${this.formatBytes(buf.capacity_bytes)}</span>
+                    <span>${fillPct.toFixed(1)}%</span>
+                </div>
+                <div class="stat-track">
+                    <div class="stat-fill ${fillColor}" style="width:${Math.min(fillPct, 100)}%"></div>
+                </div>
+            </div>
+            <div class="chunk-buffer-metrics">
+                <div class="chunk-buffer-metric">
+                    <span class="chunk-buffer-metric-label">Drain ratio</span>
+                    <span class="chunk-buffer-metric-value">${buf.drain_ratio === 0 ? 'write-through' : buf.drain_ratio}</span>
+                </div>
+                <div class="chunk-buffer-metric">
+                    <span class="chunk-buffer-metric-label">Drenagem</span>
+                    <span class="chunk-buffer-metric-value">${(buf.drain_rate_mbs || 0).toFixed(1)} MB/s</span>
+                </div>
+                <div class="chunk-buffer-metric">
+                    <span class="chunk-buffer-metric-label">Fallbacks</span>
+                    <span class="chunk-buffer-metric-value">${buf.total_fallbacks || 0}</span>
+                </div>
+                <div class="chunk-buffer-metric">
+                    <span class="chunk-buffer-metric-label">Pendentes</span>
+                    <span class="chunk-buffer-metric-value">${pending}</span>
+                </div>
+            </div>
+            ${bpBadge ? `<div style="margin-top:8px;">${bpBadge}</div>` : ''}
+        `;
+    },
+
+    // Renderiza linha compacta de buffer inline nas sessões ativas (na lista).
+    // Chamado apenas quando session.buffer_in_flight_bytes > 0.
+    renderBufferSessionInline(session) {
+        const pct = Math.min(session.buffer_fill_percent || 0, 100);
+        let fillColor = 'low';
+        if (pct >= 80) fillColor = 'high';
+        else if (pct >= 50) fillColor = 'med';
+
+        return `
+            <div class="buffer-inline">
+                <span style="font-size:0.65rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-muted);">Buffer</span>
+                <div class="stat-track">
+                    <div class="stat-fill ${fillColor}" style="width:${pct}%"></div>
+                </div>
+                <span>${this.formatBytes(session.buffer_in_flight_bytes)} (${pct.toFixed(1)}%)</span>
+            </div>`;
+    },
+
+    // Renderiza bloco "Buffer de Memória" no detalhe da sessão.
+    // Chamado apenas quando detail.buffer_in_flight_bytes > 0.
+    renderBufferMemoryBlock(detail) {
+        const pct = (detail.buffer_fill_percent || 0).toFixed(1);
+        return `
+            <div class="info-item" style="grid-column:1/-1;border-top:1px solid var(--border-color);margin-top:0.5rem;padding-top:0.5rem;">
+                <span class="info-label">Buffer de Memória</span>
+                <div class="info-value" style="display:flex;flex-direction:column;gap:0.25rem;">
+                    <table style="font-size:0.8rem;border-collapse:collapse;">
+                        <tr>
+                            <td style="color:var(--text-muted);padding-right:16px;">Bytes no buffer</td>
+                            <td style="font-family:var(--font-mono);">${this.formatBytes(detail.buffer_in_flight_bytes)}</td>
+                        </tr>
+                        <tr>
+                            <td style="color:var(--text-muted);padding-right:16px;">% do buffer total</td>
+                            <td style="font-family:var(--font-mono);">${pct}%</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>`;
     },
 };
