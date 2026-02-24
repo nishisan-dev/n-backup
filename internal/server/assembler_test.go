@@ -734,3 +734,87 @@ func TestChunkAssembler_ChunkFsync_Disabled(t *testing.T) {
 		t.Fatalf("expected syncFile to not be called when fsync disabled, got %d", got)
 	}
 }
+
+// TestChunkAssembler_LazyMode_WriteFailure_LazyMaxSeqNotCorrupted é o teste de
+// regressão para o bug encontrado em produção após 16h de backup paralelo:
+//
+//	"missing chunk seq 434628 in lazy assembly"
+//
+// O bug: writeChunkLazy atualizava lazyMaxSeq ANTES de writeChunkFile. Se a
+// escrita falhasse (disco cheio, inode esgotado, I/O error transitório), o seq
+// ficava contabilizado como "máximo recebido" sem entrada no mapa pendingChunks.
+// O finalizeLazy() então iterava de 0..lazyMaxSeq e falhava ao não encontrar o seq.
+//
+// Fix: lazyMaxSeq.Store() foi movido para APÓS a confirmação de escrita e inserção
+// no mapa, garantindo invariante: ∀ seq ≤ lazyMaxSeq → pendingChunks[seq] existe.
+func TestChunkAssembler_LazyMode_WriteFailure_LazyMaxSeqNotCorrupted(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	ca, err := NewChunkAssemblerWithOptions("test-lazy-write-fail", tmpDir, logger, ChunkAssemblerOptions{
+		Mode: AssemblerModeLazy,
+	})
+	if err != nil {
+		t.Fatalf("NewChunkAssemblerWithOptions: %v", err)
+	}
+	defer ca.Cleanup()
+
+	// Escreve chunks 0 e 1 com sucesso.
+	if err := ca.WriteChunk(0, bytes.NewReader([]byte("AA")), 2); err != nil {
+		t.Fatalf("WriteChunk(0): %v", err)
+	}
+	if err := ca.WriteChunk(1, bytes.NewReader([]byte("BB")), 2); err != nil {
+		t.Fatalf("WriteChunk(1): %v", err)
+	}
+
+	// Simula falha de I/O para o chunk 2 (seq mais alto) — análogo a disco cheio
+	// ou inode esgotado em produção durante um backup de 16h com 12 streams.
+	// O writeChunkFile interno vai devolver erro porque o diretório não existe.
+	//
+	// Para forçar a falha: removemos o diretório de shard que seria criado para seq 2.
+	// seq=2 → shard "02" (2%256 = 2 → "02")
+	shardDir := filepath.Join(ca.ChunkDir(), "02")
+	if err := os.MkdirAll(shardDir, 0755); err != nil {
+		t.Fatalf("pre-creating shard dir: %v", err)
+	}
+	// Torna o diretório de shard não-gravável para forçar falha em os.Create.
+	if err := os.Chmod(shardDir, 0555); err != nil {
+		t.Fatalf("chmod shard dir: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(shardDir, 0755) })
+
+	// WriteChunk(2) deve falhar por não conseguir criar o arquivo de chunk.
+	writeErr := ca.WriteChunk(2, bytes.NewReader([]byte("CC")), 2)
+	if writeErr == nil {
+		// Pode acontecer se o teste rodar como root — neste caso pulamos a verificação
+		// de lazyMaxSeq pois a escrita "funcionou" sem falha.
+		t.Skip("WriteChunk(2) não falhou (possivelmente rodando como root) — teste impossível")
+	}
+
+	// INVARIANTE CRÍTICO: lazyMaxSeq NÃO deve ter sido atualizado para seq=2,
+	// pois a escrita falhou antes do registro no mapa.
+	// Antes do fix, lazyMaxSeq seria 2, causando "missing chunk seq 2" no Finalize.
+	gotMax := ca.lazyMaxSeq.Load()
+	if gotMax >= 2 {
+		t.Errorf("BUG DETECTADO: lazyMaxSeq=%d após falha de escrita do seq 2 — "+
+			"isso causaria 'missing chunk seq 2 in lazy assembly' no Finalize()", gotMax)
+	}
+
+	// Chunks 0 e 1 ainda estão registrados — Finalize deve funcionar normalmente.
+	resultPath, totalBytes, err := ca.Finalize()
+	if err != nil {
+		t.Fatalf("Finalize após falha de escrita: %v", err)
+	}
+	defer os.Remove(resultPath)
+
+	if totalBytes != 4 {
+		t.Errorf("expected totalBytes=4, got %d", totalBytes)
+	}
+	content, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("reading assembled file: %v", err)
+	}
+	if string(content) != "AABB" {
+		t.Errorf("expected %q, got %q", "AABB", content)
+	}
+}

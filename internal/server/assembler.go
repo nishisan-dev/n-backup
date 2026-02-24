@@ -299,13 +299,16 @@ func (ca *ChunkAssembler) WriteChunk(globalSeq uint32, data io.Reader, length in
 
 // writeChunkLazy grava cada chunk em staging e posterga montagem para Finalize.
 // Deve ser chamado com ca.mu held.
+//
+// IMPORTANTE: lazyMaxSeq é atualizado SOMENTE após o chunk ter sido gravado em
+// disco e registrado em pendingChunks com sucesso. Atualizar antes exporia uma
+// janela onde finalizeLazy() iteraria até um seq que não existe no mapa,
+// retornando "missing chunk seq N in lazy assembly" mesmo sem perda de dados —
+// apenas por uma falha de I/O transitória ou inode esgotado durante writeChunkFile.
 func (ca *ChunkAssembler) writeChunkLazy(globalSeq uint32, buf []byte) error {
 	if _, exists := ca.pendingChunks[globalSeq]; exists {
 		ca.logger.Warn("ignoring duplicate chunk in lazy mode", "globalSeq", globalSeq)
 		return nil
-	}
-	if len(ca.pendingChunks) == 0 || globalSeq > ca.lazyMaxSeq.Load() {
-		ca.lazyMaxSeq.Store(globalSeq)
 	}
 
 	path, err := ca.chunkPath(globalSeq)
@@ -316,7 +319,12 @@ func (ca *ChunkAssembler) writeChunkLazy(globalSeq uint32, buf []byte) error {
 		return fmt.Errorf("writing lazy chunk seq %d: %w", globalSeq, err)
 	}
 
+	// Registra no mapa antes de atualizar lazyMaxSeq: garante que todo seq
+	// contabilizado como "máximo recebido" possui entrada correspondente no mapa.
 	ca.pendingChunks[globalSeq] = pendingChunk{filePath: path, length: int64(len(buf))}
+	if len(ca.pendingChunks) == 1 || globalSeq > ca.lazyMaxSeq.Load() {
+		ca.lazyMaxSeq.Store(globalSeq)
+	}
 	ca.pendingCount.Add(1)
 	ca.totalBytes.Add(int64(len(buf)))
 	return nil
