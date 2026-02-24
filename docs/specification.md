@@ -629,10 +629,12 @@ storages:
     max_backups: 5
     assembler_mode: eager
     assembler_pending_mem_limit: 8mb
+    chunk_fsync: false
   home-dirs:
     base_dir: /var/backups/home
     max_backups: 10
     assembler_mode: lazy
+    chunk_fsync: false
 
 logging:
   level: info

@@ -353,12 +353,14 @@ storages:
   home-dirs:
     assembler_mode: lazy
     chunk_shard_levels: 2  # 1 (flat, padrão) ou 2 (2 níveis de subdiretórios)
+    chunk_fsync: false     # true = fsync a cada write de chunk em staging
 ```
 
 - **parallels**: `0` desabilita (single stream), `1-255` define o máximo de streams.
 - **auto_scaler**: `efficiency` (threshold-based, padrão) ou `adaptive` (probe-and-measure).
 - **bandwidth_limit**: limite de upload em Bytes/segundo (ex: `50mb`, `1gb`). Mínimo: `64kb`. Vazio = sem limite.
 - **chunk_shard_levels**: `1` (padrão, flat) ou `2` (2 níveis de subdiretórios) — controla a organização dos chunks no staging do assembler.
+- **chunk_fsync**: `false` (padrão). Quando `true`, executa `fsync` a cada write de chunk em staging (lazy e spill), com maior durabilidade e menor throughput.
 
 ### 3.6 Control Channel Protocol (v1.3.8+)
 

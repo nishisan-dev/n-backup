@@ -114,6 +114,7 @@ storages:
     assembler_mode: eager          # eager (padrão) ou lazy
     assembler_pending_mem_limit: 8mb  # Limite de memória para chunks OOO (usado em eager)
     chunk_shard_levels: 1          # 1 (padrão) ou 2 — níveis de sharding de chunks no staging
+    chunk_fsync: false             # true = fsync a cada write de chunk em staging (mais seguro, mais lento)
 
   home-dirs:
     base_dir: /var/backups/home
@@ -122,6 +123,7 @@ storages:
     assembler_mode: lazy           # staging completo antes de montar
     assembler_pending_mem_limit: 8mb  # ignorado em modo lazy
     chunk_shard_levels: 2          # 2 níveis — reduz contagem de entradas por diretório em backups grandes
+    chunk_fsync: false
 
 logging:
   level: info                      # debug | info | warn | error
@@ -167,6 +169,7 @@ chunk_buffer:
 | `storages.<nome>.assembler_mode` | ❌ | `eager` (padrão) ou `lazy` |
 | `storages.<nome>.assembler_pending_mem_limit` | ❌ | Default: `8mb`. Limite de memória para chunks out-of-order (ignorado em lazy). |
 | `storages.<nome>.chunk_shard_levels` | ❌ | `1` (padrão) ou `2` — níveis de sharding de chunks no staging. Use `2` para backups com muitos chunks paralelos. |
+| `storages.<nome>.chunk_fsync` | ❌ | `false` (padrão). `true` executa `fsync` a cada write de chunk em staging (lazy e spill), com maior durabilidade e menor throughput. |
 | `logging.file` | ❌ | Caminho do arquivo de log (padrão: stderr) |
 | `logging.stream_stats` | ❌ | `false` (padrão) — loga per-stream stats em sessões paralelas |
 | `web_ui.enabled` | ❌ | `true` ativa a WebUI (default: `false`) |

@@ -447,20 +447,27 @@ storages:
     max_backups: 5
     assembler_mode: eager
     assembler_pending_mem_limit: 8mb
+    chunk_fsync: false
   home-dirs:
     base_dir: /var/backups/home
     max_backups: 10
     assembler_mode: lazy
     assembler_pending_mem_limit: 8mb
+    chunk_fsync: false
 ```
 
 Defaults por storage:
 - `assembler_mode`: `eager`
 - `assembler_pending_mem_limit`: `8mb` (8 * 1024 * 1024 bytes)
+- `chunk_fsync`: `false`
 
 Comportamento dos modos:
 - `eager`: monta incrementalmente durante a transferência. Chunks fora de ordem ficam em memória até `assembler_pending_mem_limit`; ao exceder, fazem spill para disco.
 - `lazy`: grava os chunks em staging e monta somente no final da sessão. Nesse modo, `assembler_pending_mem_limit` não é usado.
+
+`chunk_fsync`:
+- `false` (padrão): maior throughput, confia no flush normal do kernel.
+- `true`: executa `fsync` a cada write de chunk em staging (lazy e spill), reduzindo janela de perda em quedas abruptas ao custo de desempenho.
 
 Exemplo com `max_backups: 3` no storage `scripts`:
 
