@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -642,5 +643,94 @@ func TestChunkAssembler_SpillConcurrent_Race(t *testing.T) {
 	expected := "AABBCCDDEEFFGGHH"
 	if string(content) != expected {
 		t.Errorf("expected %q, got %q", expected, content)
+	}
+}
+
+func TestChunkAssembler_ChunkFsync_LazyEnabled(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	ca, err := NewChunkAssemblerWithOptions("test-fsync-lazy-enabled", tmpDir, logger, ChunkAssemblerOptions{
+		Mode:             AssemblerModeLazy,
+		FsyncChunkWrites: true,
+	})
+	if err != nil {
+		t.Fatalf("NewChunkAssemblerWithOptions: %v", err)
+	}
+	defer ca.Cleanup()
+
+	var syncCalls atomic.Int32
+	orig := syncFile
+	syncFile = func(f *os.File) error {
+		syncCalls.Add(1)
+		return nil
+	}
+	defer func() { syncFile = orig }()
+
+	if err := ca.WriteChunk(0, bytes.NewReader([]byte("AA")), 2); err != nil {
+		t.Fatalf("WriteChunk(0): %v", err)
+	}
+	if got := syncCalls.Load(); got < 1 {
+		t.Fatalf("expected syncFile to be called at least once, got %d", got)
+	}
+}
+
+func TestChunkAssembler_ChunkFsync_EagerSpillEnabled(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	ca, err := NewChunkAssemblerWithOptions("test-fsync-spill-enabled", tmpDir, logger, ChunkAssemblerOptions{
+		Mode:             AssemblerModeEager,
+		PendingMemLimit:  1, // força spill para disco em out-of-order
+		FsyncChunkWrites: true,
+	})
+	if err != nil {
+		t.Fatalf("NewChunkAssemblerWithOptions: %v", err)
+	}
+	defer ca.Cleanup()
+
+	var syncCalls atomic.Int32
+	orig := syncFile
+	syncFile = func(f *os.File) error {
+		syncCalls.Add(1)
+		return nil
+	}
+	defer func() { syncFile = orig }()
+
+	// out-of-order sem preencher gap: persiste em staging via spill.
+	if err := ca.WriteChunk(1, bytes.NewReader([]byte("BB")), 2); err != nil {
+		t.Fatalf("WriteChunk(1): %v", err)
+	}
+	if got := syncCalls.Load(); got < 1 {
+		t.Fatalf("expected syncFile to be called at least once on spill write, got %d", got)
+	}
+}
+
+func TestChunkAssembler_ChunkFsync_Disabled(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	ca, err := NewChunkAssemblerWithOptions("test-fsync-disabled", tmpDir, logger, ChunkAssemblerOptions{
+		Mode:             AssemblerModeLazy,
+		FsyncChunkWrites: false,
+	})
+	if err != nil {
+		t.Fatalf("NewChunkAssemblerWithOptions: %v", err)
+	}
+	defer ca.Cleanup()
+
+	var syncCalls atomic.Int32
+	orig := syncFile
+	syncFile = func(f *os.File) error {
+		syncCalls.Add(1)
+		return nil
+	}
+	defer func() { syncFile = orig }()
+
+	if err := ca.WriteChunk(0, bytes.NewReader([]byte("AA")), 2); err != nil {
+		t.Fatalf("WriteChunk(0): %v", err)
+	}
+	if got := syncCalls.Load(); got != 0 {
+		t.Fatalf("expected syncFile to not be called when fsync disabled, got %d", got)
 	}
 }

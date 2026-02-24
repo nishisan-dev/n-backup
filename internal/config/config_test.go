@@ -104,6 +104,9 @@ func TestLoadServerConfig_ExampleFile(t *testing.T) {
 	if scripts.ChunkShardLevels != 1 {
 		t.Errorf("expected scripts.chunk_shard_levels 1, got %d", scripts.ChunkShardLevels)
 	}
+	if scripts.ChunkFsync {
+		t.Errorf("expected scripts.chunk_fsync false, got true")
+	}
 
 	home, ok := cfg.GetStorage("home-dirs")
 	if !ok {
@@ -117,6 +120,9 @@ func TestLoadServerConfig_ExampleFile(t *testing.T) {
 	}
 	if home.AssemblerMode != "lazy" {
 		t.Errorf("expected home-dirs.assembler_mode lazy, got %q", home.AssemblerMode)
+	}
+	if home.ChunkFsync {
+		t.Errorf("expected home-dirs.chunk_fsync false, got true")
 	}
 
 	if cfg.WebUI.EventsFile != "/var/lib/nbackup/events.jsonl" {
@@ -363,6 +369,9 @@ storages:
 	if s.ChunkShardLevels != 1 {
 		t.Errorf("expected default chunk_shard_levels 1, got %d", s.ChunkShardLevels)
 	}
+	if s.ChunkFsync {
+		t.Errorf("expected default chunk_fsync false, got true")
+	}
 }
 
 func TestLoadServerConfig_InvalidAssemblerMode(t *testing.T) {
@@ -442,6 +451,31 @@ storages:
 	s, _ := cfg.GetStorage("default")
 	if s.ChunkShardLevels != 2 {
 		t.Errorf("expected chunk_shard_levels 2, got %d", s.ChunkShardLevels)
+	}
+}
+
+func TestLoadServerConfig_ChunkFsyncEnabled(t *testing.T) {
+	content := `
+server:
+  listen: "0.0.0.0:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  server_cert: /tmp/server.pem
+  server_key: /tmp/server-key.pem
+storages:
+  default:
+    base_dir: /tmp/backups
+    max_backups: 3
+    chunk_fsync: true
+`
+	cfgPath := writeTempConfig(t, content)
+	cfg, err := LoadServerConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s, _ := cfg.GetStorage("default")
+	if !s.ChunkFsync {
+		t.Errorf("expected chunk_fsync true, got false")
 	}
 }
 

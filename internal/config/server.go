@@ -114,6 +114,7 @@ type StorageInfo struct {
 	AssemblerPendingMemRaw int64  `yaml:"-"`
 	CompressionMode        string `yaml:"compression_mode"`   // gzip|zst (default: gzip)
 	ChunkShardLevels       int    `yaml:"chunk_shard_levels"` // 1|2 (default: 1, número de níveis de sharding de chunks)
+	ChunkFsync             bool   `yaml:"chunk_fsync"`        // fsync nos writes de chunk staging (default: false)
 }
 
 // CompressionModeByte converte o compression_mode string para a constante de protocolo.

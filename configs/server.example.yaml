@@ -17,6 +17,7 @@ storages:
     assembler_mode: eager             # eager|lazy (default: eager)
     assembler_pending_mem_limit: 8mb  # limite de pending em memória no modo eager
     chunk_shard_levels: 1             # 1|2 — níveis de sharding de chunks no staging (default: 1)
+    chunk_fsync: false                # true = fsync a cada write de chunk no staging (mais seguro, mais lento)
 
   home-dirs:
     base_dir: /var/backups/home
@@ -24,6 +25,7 @@ storages:
     compression_mode: zst             # usa Zstandard para compressão mais rápida
     assembler_mode: lazy
     assembler_pending_mem_limit: 8mb
+    chunk_fsync: false
 
 logging:
   level: info                      # debug, info, warn, error
@@ -63,4 +65,3 @@ web_ui:
 chunk_buffer:
   size: 0              # ex: "64mb", "128mb", "256mb"  (0 = desligado)
   drain_ratio: 0.5     # 0.0 = write-through | 0.5 = drena a 50% (default) | 1.0 = drena quando cheio
-

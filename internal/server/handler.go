@@ -2044,9 +2044,10 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 
 	// Cria assembler para staging de chunks (configurável por storage)
 	assembler, err := NewChunkAssemblerWithOptions(sessionID, writer.AgentDir(), logger, ChunkAssemblerOptions{
-		Mode:            storageInfo.AssemblerMode,
-		PendingMemLimit: storageInfo.AssemblerPendingMemRaw,
-		ShardLevels:     storageInfo.ChunkShardLevels,
+		Mode:             storageInfo.AssemblerMode,
+		PendingMemLimit:  storageInfo.AssemblerPendingMemRaw,
+		ShardLevels:      storageInfo.ChunkShardLevels,
+		FsyncChunkWrites: storageInfo.ChunkFsync,
 	})
 	if err != nil {
 		logger.Error("creating chunk assembler", "error", err)

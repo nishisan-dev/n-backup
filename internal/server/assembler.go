@@ -38,11 +38,17 @@ const (
 	AssemblerModeLazy = "lazy"
 )
 
+// syncFile permite override em testes para validar paths com fsync.
+var syncFile = func(f *os.File) error {
+	return f.Sync()
+}
+
 // ChunkAssemblerOptions configura o comportamento do assembler.
 type ChunkAssemblerOptions struct {
-	Mode            string
-	PendingMemLimit int64
-	ShardLevels     int // 1 ou 2 (default: 1)
+	Mode             string
+	PendingMemLimit  int64
+	ShardLevels      int  // 1 ou 2 (default: 1)
+	FsyncChunkWrites bool // true = fsync a cada write de chunk em staging
 }
 
 // ChunkAssembler gerencia chunks de streams paralelos por sessão.
@@ -52,22 +58,23 @@ type ChunkAssemblerOptions struct {
 // Resultado: para o caso normal (single-stream ou round-robin sequencial),
 // zero arquivos temporários são criados.
 type ChunkAssembler struct {
-	sessionID       string
-	baseDir         string // diretório do agent
-	outPath         string // caminho do arquivo de saída
-	outFile         *os.File
-	outBuf          *bufio.Writer
-	hasher          hash.Hash
-	checksum        [32]byte
-	chunkDir        string                  // subdir para chunks out-of-order
-	chunkDirExists  bool                    // lazy creation — só cria se necessário
-	pendingChunks   map[uint32]pendingChunk // chunks out-of-order aguardando (protegido por mu)
-	pendingMemLimit int64                   // limite de pendência em memória (imutável)
-	mode            string                  // assembler mode (imutável)
-	shardLevels     int                     // 1 ou 2 níveis de sharding (imutável)
-	createdShards   map[string]struct{}     // cache de diretórios de shard já criados
-	mu              sync.Mutex              // protege pendingChunks, outBuf, outFile, chunkDirExists, createdShards
-	logger          *slog.Logger
+	sessionID        string
+	baseDir          string // diretório do agent
+	outPath          string // caminho do arquivo de saída
+	outFile          *os.File
+	outBuf           *bufio.Writer
+	hasher           hash.Hash
+	checksum         [32]byte
+	chunkDir         string                  // subdir para chunks out-of-order
+	chunkDirExists   bool                    // lazy creation — só cria se necessário
+	pendingChunks    map[uint32]pendingChunk // chunks out-of-order aguardando (protegido por mu)
+	pendingMemLimit  int64                   // limite de pendência em memória (imutável)
+	mode             string                  // assembler mode (imutável)
+	shardLevels      int                     // 1 ou 2 níveis de sharding (imutável)
+	fsyncChunkWrites bool                    // fsync em writes de chunk staging (imutável)
+	createdShards    map[string]struct{}     // cache de diretórios de shard já criados
+	mu               sync.Mutex              // protege pendingChunks, outBuf, outFile, chunkDirExists, createdShards
+	logger           *slog.Logger
 
 	// Campos atômicos — lidos por Stats() sem lock.
 	// Escritos sob ca.mu pelos métodos de mutação.
@@ -206,20 +213,21 @@ func NewChunkAssemblerWithOptions(sessionID, agentDir string, logger *slog.Logge
 	hasher := sha256.New()
 
 	ca := &ChunkAssembler{
-		sessionID:       sessionID,
-		baseDir:         agentDir,
-		outPath:         outPath,
-		outFile:         outFile,
-		outBuf:          bufio.NewWriterSize(io.MultiWriter(outFile, hasher), 1024*1024),
-		hasher:          hasher,
-		chunkDir:        chunkDir,
-		chunkDirExists:  false,
-		pendingChunks:   make(map[uint32]pendingChunk),
-		pendingMemLimit: pendingMemLimit,
-		mode:            mode,
-		shardLevels:     shardLevels,
-		createdShards:   make(map[string]struct{}),
-		logger:          logger,
+		sessionID:        sessionID,
+		baseDir:          agentDir,
+		outPath:          outPath,
+		outFile:          outFile,
+		outBuf:           bufio.NewWriterSize(io.MultiWriter(outFile, hasher), 1024*1024),
+		hasher:           hasher,
+		chunkDir:         chunkDir,
+		chunkDirExists:   false,
+		pendingChunks:    make(map[uint32]pendingChunk),
+		pendingMemLimit:  pendingMemLimit,
+		mode:             mode,
+		shardLevels:      shardLevels,
+		fsyncChunkWrites: opts.FsyncChunkWrites,
+		createdShards:    make(map[string]struct{}),
+		logger:           logger,
 	}
 	ca.nextExpectedSeq.Store(0)
 	return ca, nil
@@ -304,7 +312,7 @@ func (ca *ChunkAssembler) writeChunkLazy(globalSeq uint32, buf []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, buf, 0644); err != nil {
+	if err := writeChunkFile(path, buf, ca.fsyncChunkWrites); err != nil {
 		return fmt.Errorf("writing lazy chunk seq %d: %w", globalSeq, err)
 	}
 
@@ -404,7 +412,7 @@ func (ca *ChunkAssembler) saveOutOfOrder(globalSeq uint32, data []byte) error {
 	// Passo 2: escreve arquivo temporário FORA do lock.
 	// shardDir existe (garantido pelo passo 1), portanto CreateTemp não falha por dir ausente.
 	ca.mu.Unlock()
-	tmpPath, writeErr := writeChunkToTemp(shardDir, data)
+	tmpPath, writeErr := writeChunkToTemp(shardDir, data, ca.fsyncChunkWrites)
 	ca.mu.Lock() // readquire antes de qualquer acesso ao estado
 
 	if writeErr != nil {
@@ -462,9 +470,41 @@ func (ca *ChunkAssembler) saveOutOfOrder(globalSeq uint32, data []byte) error {
 	return nil
 }
 
+// writeChunkFile cria/trunca um arquivo no path, escreve data e fecha.
+// Quando fsyncEnabled=true, força Sync() antes do close para persistir chunk staging.
+func writeChunkFile(path string, data []byte, fsyncEnabled bool) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("creating chunk file: %w", err)
+	}
+	n, err := f.Write(data)
+	if err != nil {
+		f.Close()
+		os.Remove(path)
+		return fmt.Errorf("writing chunk file: %w", err)
+	}
+	if n != len(data) {
+		f.Close()
+		os.Remove(path)
+		return fmt.Errorf("short write on chunk file: wrote %d of %d bytes", n, len(data))
+	}
+	if fsyncEnabled {
+		if err := syncFile(f); err != nil {
+			f.Close()
+			os.Remove(path)
+			return fmt.Errorf("syncing chunk file: %w", err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return fmt.Errorf("closing chunk file: %w", err)
+	}
+	return nil
+}
+
 // writeChunkToTemp cria um arquivo temporário em dir, escreve data e fecha.
 // Chamado sem ca.mu held. Retorna o path do arquivo temporário criado.
-func writeChunkToTemp(dir string, data []byte) (string, error) {
+func writeChunkToTemp(dir string, data []byte, fsyncEnabled bool) (string, error) {
 	f, err := os.CreateTemp(dir, "spill-*.tmp")
 	if err != nil {
 		return "", fmt.Errorf("creating spill temp file: %w", err)
@@ -474,6 +514,13 @@ func writeChunkToTemp(dir string, data []byte) (string, error) {
 		f.Close()
 		os.Remove(name)
 		return "", fmt.Errorf("writing spill temp file: %w", err)
+	}
+	if fsyncEnabled {
+		if err := syncFile(f); err != nil {
+			f.Close()
+			os.Remove(name)
+			return "", fmt.Errorf("syncing spill temp file: %w", err)
+		}
 	}
 	if err := f.Close(); err != nil {
 		os.Remove(name)
