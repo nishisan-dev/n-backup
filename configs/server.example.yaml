@@ -55,9 +55,10 @@ web_ui:
 # recebidos da rede no buffer antes de escrevê-los no disco.
 # 0 (ou ausente) desabilita o buffer completamente (comportamento padrão).
 #
-# drain_mode:
-#   lazy  — o drainer envia os chunks para o assembler normal (preserva reordenação e checksums)
-#   eager — idem ao lazy, mas prioriza flush imediato (adequado para streams bem ordenados)
+# drain_ratio controla quando o drainer começa a escrever no assembler:
+#   0.0 = write-through (drena imediatamente, sem bufferização)
+#   0.5 = drena quando o buffer atingir 50% de ocupação (default recomendado)
+#   1.0 = drena apenas quando o buffer estiver completamente cheio
 #
 chunk_buffer:
   size: 0              # ex: "64mb", "128mb", "256mb"  (0 = desligado)

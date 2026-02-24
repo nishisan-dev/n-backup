@@ -288,7 +288,7 @@ Enviado imediatamente após o ACK GO na conexão primária:
 └──────────┴───────────┘
 ```
 
-- **MaxStreams**: Número máximo de streams (1-8)
+- **MaxStreams**: Número máximo de streams (1-255)
 - **ChunkSize**: Tamanho de cada chunk em bytes (default: 1MB)
 
 #### ParallelJoin (Client → Server)
@@ -348,7 +348,7 @@ backups:
     auto_scaler: adaptive # efficiency (padrão) ou adaptive
 ```
 
-- **parallels**: `0` desabilita (single stream), `1-8` define o máximo de streams.
+- **parallels**: `0` desabilita (single stream), `1-255` define o máximo de streams.
 - **auto_scaler**: `efficiency` (threshold-based, padrão) ou `adaptive` (probe-and-measure).
 - **bandwidth_limit**: limite de upload em Bytes/segundo (ex: `50mb`, `1gb`). Mínimo: `64kb`. Vazio = sem limite.
   - Para single-stream: aplicado sobre o buffer de escrita antes do hash inline.
@@ -590,13 +590,24 @@ tls:
   server_cert: /etc/nbackup/server.pem
   server_key: /etc/nbackup/server-key.pem
 
-storage:
-  base_dir: /var/backups/nbackup
-  max_backups: 5               # Rotação por índice: manter N mais recentes
+storages:
+  scripts:
+    base_dir: /var/backups/scripts
+    max_backups: 5
+    assembler_mode: eager
+    assembler_pending_mem_limit: 8mb
+  home-dirs:
+    base_dir: /var/backups/home
+    max_backups: 10
+    assembler_mode: lazy
 
 logging:
   level: info
   format: json
+
+chunk_buffer:
+  size: 0              # 0 = desligado; ex: "128mb" para absorver spikes de I/O
+  drain_ratio: 0.5     # 0.0 = write-through | 0.5 = drena a 50% | 1.0 = drena quando cheio
 ```
 
 ### 4.3 Rotação por Índice (Server)
