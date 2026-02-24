@@ -230,6 +230,9 @@ func NewChunkAssemblerWithOptions(sessionID, agentDir string, logger *slog.Logge
 // bloqueie o assembler inteiro. Apenas a escrita local (memória/disco) é protegida.
 // - Se globalSeq == nextExpectedSeq → escreve direto no arquivo de saída + flush pendentes.
 // - Se globalSeq > nextExpectedSeq → bufferiza em arquivo temporário (out-of-order).
+//
+// Nota sobre o lock: usa unlocks explícitos (não defer) para permitir que
+// saveOutOfOrder libere/readquira ca.mu durante I/O de disco sem reentrada.
 func (ca *ChunkAssembler) WriteChunk(globalSeq uint32, data io.Reader, length int64) error {
 	// Proteção contra OOM: rejeita chunks com tamanho absurdo (header malformado).
 	if length <= 0 || length > maxChunkLength {
@@ -245,10 +248,11 @@ func (ca *ChunkAssembler) WriteChunk(globalSeq uint32, data io.Reader, length in
 	}
 
 	ca.mu.Lock()
-	defer ca.mu.Unlock()
 
 	if ca.mode == AssemblerModeLazy {
-		return ca.writeChunkLazy(globalSeq, buf)
+		err := ca.writeChunkLazy(globalSeq, buf)
+		ca.mu.Unlock()
+		return err
 	}
 
 	nextSeq := ca.nextExpectedSeq.Load()
@@ -256,6 +260,7 @@ func (ca *ChunkAssembler) WriteChunk(globalSeq uint32, data io.Reader, length in
 		// In-order: escreve direto no arquivo de saída (operação local, rápida)
 		n, err := ca.outBuf.Write(buf)
 		if err != nil {
+			ca.mu.Unlock()
 			return fmt.Errorf("writing chunk seq %d to output: %w", globalSeq, err)
 		}
 		ca.totalBytes.Add(int64(n))
@@ -264,17 +269,24 @@ func (ca *ChunkAssembler) WriteChunk(globalSeq uint32, data io.Reader, length in
 		ca.logger.Debug("chunk written in-order", "globalSeq", globalSeq, "bytes", n)
 
 		// Flush pendentes contíguos
-		return ca.flushPending()
+		err = ca.flushPending()
+		ca.mu.Unlock()
+		return err
 	}
 
 	if globalSeq < nextSeq {
 		// Chunk duplicado ou atrasado — ignora (dados já foram lidos acima, sem leak)
 		ca.logger.Warn("ignoring duplicate/late chunk", "globalSeq", globalSeq, "expected", nextSeq)
+		ca.mu.Unlock()
 		return nil
 	}
 
-	// Out-of-order: salva em arquivo temporário
-	return ca.saveOutOfOrder(globalSeq, buf)
+	// Out-of-order: salva em arquivo temporário.
+	// saveOutOfOrder é chamado com ca.mu held e retorna com ca.mu held.
+	// No path de spill em disco, pode liberar/readquirir ca.mu internamente.
+	err := ca.saveOutOfOrder(globalSeq, buf)
+	ca.mu.Unlock()
+	return err
 }
 
 // writeChunkLazy grava cada chunk em staging e posterga montagem para Finalize.
@@ -352,12 +364,19 @@ func (ca *ChunkAssembler) flushPending() error {
 	return nil
 }
 
-// saveOutOfOrder salva um chunk out-of-order em arquivo temporário.
+// saveOutOfOrder salva um chunk out-of-order com o padrão write-temp + commit atômico.
 // Recebe os dados já materializados em memória (lidos fora do mutex).
-// Deve ser chamado com ca.mu held.
+// Deve ser chamado com ca.mu held e retorna com ca.mu held.
+//
+// Para chunks que precisam de spill em disco:
+//  1. Calcula path final (sob lock) — garante que o shard dir existe via createdShards.
+//  2. Escreve em arquivo temporário FORA do lock (I/O de disco livre de contenção).
+//  3. Re-adquire o lock e revalida o estado do globalSeq (três casos possíveis).
+//  4. Rename atômico do temp para o path final (sob lock).
 func (ca *ChunkAssembler) saveOutOfOrder(globalSeq uint32, data []byte) error {
 	currentMem := ca.pendingMemBytes.Load()
-	// Prioriza memória para evitar write/read extra em discos lentos (ex: USB).
+
+	// Caminho rápido: cabe em memória — sem I/O, permanece sob lock.
 	if currentMem+int64(len(data)) <= ca.pendingMemLimit {
 		copyBuf := append([]byte(nil), data...)
 		ca.pendingChunks[globalSeq] = pendingChunk{data: copyBuf, length: int64(len(copyBuf))}
@@ -372,38 +391,95 @@ func (ca *ChunkAssembler) saveOutOfOrder(globalSeq uint32, data []byte) error {
 		return nil
 	}
 
-	// Excedeu limite de memória: faz spill para disco.
-	path, err := ca.chunkPath(globalSeq)
+	// Caminho de spill em disco.
+
+	// Passo 1 (sob lock): calcula o path final e garante que o shard dir existe.
+	// chunkPath usa cache createdShards para evitar os.MkdirAll repetido.
+	finalPath, err := ca.chunkPath(globalSeq)
 	if err != nil {
 		return err
 	}
+	shardDir := filepath.Dir(finalPath) // shard dir já criado pelo passo acima
 
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("creating out-of-order chunk file seq %d: %w", globalSeq, err)
+	// Passo 2: escreve arquivo temporário FORA do lock.
+	// shardDir existe (garantido pelo passo 1), portanto CreateTemp não falha por dir ausente.
+	ca.mu.Unlock()
+	tmpPath, writeErr := writeChunkToTemp(shardDir, data)
+	ca.mu.Lock() // readquire antes de qualquer acesso ao estado
+
+	if writeErr != nil {
+		return writeErr
 	}
 
-	n, err := f.Write(data)
-	f.Close()
-	if err != nil {
-		os.Remove(path)
-		return fmt.Errorf("writing out-of-order chunk seq %d: %w", globalSeq, err)
-	}
-	if n != len(data) {
-		os.Remove(path)
-		return fmt.Errorf("short write on out-of-order chunk seq %d: wrote %d of %d bytes", globalSeq, n, len(data))
+	// Passo 3: revalidação após re-lock.
+	// Enquanto o lock estava liberado, outra goroutine pode ter modificado o estado.
+	// Três casos possíveis para globalSeq:
+
+	// (a) Já registrado em pendingChunks — duplicata concorrente: descarta o temp.
+	if _, exists := ca.pendingChunks[globalSeq]; exists {
+		os.Remove(tmpPath)
+		ca.logger.Warn("spill chunk registered concurrently, discarding temp", "globalSeq", globalSeq)
+		return nil
 	}
 
-	ca.pendingChunks[globalSeq] = pendingChunk{filePath: path, length: int64(n)}
+	currentNext := ca.nextExpectedSeq.Load()
+
+	// (b) Chunk virou late/duplicata durante o I/O externo: descarta o temp.
+	if globalSeq < currentNext {
+		os.Remove(tmpPath)
+		ca.logger.Warn("spill chunk became late during disk I/O, discarding",
+			"globalSeq", globalSeq, "nextExpected", currentNext)
+		return nil
+	}
+
+	// (c) Chunk virou in-order enquanto esperava o I/O: promove direto ao outBuf.
+	// Os dados ainda estão em memória (parâmetro data), evitando uma leitura extra em disco.
+	if globalSeq == currentNext {
+		os.Remove(tmpPath)
+		n, err := ca.outBuf.Write(data)
+		if err != nil {
+			return fmt.Errorf("writing promoted spill chunk seq %d: %w", globalSeq, err)
+		}
+		ca.totalBytes.Add(int64(n))
+		ca.nextExpectedSeq.Store(currentNext + 1)
+		ca.logger.Debug("spill chunk promoted to in-order after re-lock", "globalSeq", globalSeq, "bytes", n)
+		return ca.flushPending()
+	}
+
+	// Passo 4: globalSeq ainda é out-of-order — commit atômico sob lock.
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("committing spill chunk seq %d: %w", globalSeq, err)
+	}
+	ca.pendingChunks[globalSeq] = pendingChunk{filePath: finalPath, length: int64(len(data))}
 	ca.pendingCount.Add(1)
 	ca.logger.Debug("chunk saved out-of-order on disk",
 		"globalSeq", globalSeq,
-		"bytes", n,
+		"bytes", len(data),
 		"pending", ca.pendingCount.Load(),
 		"pendingMemBytes", ca.pendingMemBytes.Load(),
 		"pendingMemLimit", ca.pendingMemLimit)
-
 	return nil
+}
+
+// writeChunkToTemp cria um arquivo temporário em dir, escreve data e fecha.
+// Chamado sem ca.mu held. Retorna o path do arquivo temporário criado.
+func writeChunkToTemp(dir string, data []byte) (string, error) {
+	f, err := os.CreateTemp(dir, "spill-*.tmp")
+	if err != nil {
+		return "", fmt.Errorf("creating spill temp file: %w", err)
+	}
+	name := f.Name()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(name)
+		return "", fmt.Errorf("writing spill temp file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(name)
+		return "", fmt.Errorf("closing spill temp file: %w", err)
+	}
+	return name, nil
 }
 
 // chunkPath retorna o caminho de staging do chunk usando directory sharding

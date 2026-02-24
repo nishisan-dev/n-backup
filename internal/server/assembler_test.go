@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"testing"
 )
 
@@ -455,5 +457,190 @@ func TestChunkAssembler_MkdirAllCache(t *testing.T) {
 	ca.mu.Unlock()
 	if cacheSize != 1 {
 		t.Errorf("expected createdShards cache to have 1 entry, got %d", cacheSize)
+	}
+}
+
+// --- Fix C: revalidação pós-lock no saveOutOfOrder ---
+
+// TestChunkAssembler_SpillRaceWindow_ConcurrentInOrder verifica o race window
+// do saveOutOfOrder: chunk out-of-order começa spill, outro goroutine preenche
+// o gap. Deve resultar em assembly correto (race detector ativo).
+func TestChunkAssembler_SpillRaceWindow_ConcurrentInOrder(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// pendingMemLimit=1 força spill em disco para qualquer chunk out-of-order.
+	ca, err := NewChunkAssemblerWithOptions("test-spill-race", tmpDir, logger, ChunkAssemblerOptions{
+		Mode:            AssemblerModeEager,
+		PendingMemLimit: 1,
+	})
+	if err != nil {
+		t.Fatalf("NewChunkAssemblerWithOptions: %v", err)
+	}
+	defer ca.Cleanup()
+
+	// Goroutine A: WriteChunk(1) — out-of-order, fará spill para disco.
+	// Goroutine B (main): WriteChunk(0) — preenche o gap enquanto A está no I/O externo.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := ca.WriteChunk(1, bytes.NewReader([]byte("BB")), 2); err != nil {
+			t.Errorf("WriteChunk(1): %v", err)
+		}
+	}()
+
+	// Cede o scheduler para que a goroutine A inicie o spill antes de B escrever.
+	runtime.Gosched()
+
+	if err := ca.WriteChunk(0, bytes.NewReader([]byte("AA")), 2); err != nil {
+		t.Fatalf("WriteChunk(0): %v", err)
+	}
+	wg.Wait()
+
+	// Chunk 2: in-order após flusharmos o pendente.
+	if err := ca.WriteChunk(2, bytes.NewReader([]byte("CC")), 2); err != nil {
+		t.Fatalf("WriteChunk(2): %v", err)
+	}
+
+	resultPath, totalBytes, err := ca.Finalize()
+	if err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	defer os.Remove(resultPath)
+
+	if totalBytes != 6 {
+		t.Errorf("expected totalBytes=6, got %d", totalBytes)
+	}
+	content, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("reading assembled file: %v", err)
+	}
+	if string(content) != "AABBCC" {
+		t.Errorf("expected %q, got %q", "AABBCC", content)
+	}
+}
+
+// TestChunkAssembler_SpillPromotedToInOrder verifica o caso (c) do passo 3:
+// globalSeq == nextExpected após re-lock → chunk promovido direto ao outBuf.
+// Verifica também que nenhum arquivo spill-*.tmp fica esquecido no shardDir.
+func TestChunkAssembler_SpillPromotedToInOrder(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// pendingMemLimit=1 força spill. shardLevels=1 para path previsível.
+	ca, err := NewChunkAssemblerWithOptions("test-promoted", tmpDir, logger, ChunkAssemblerOptions{
+		Mode:            AssemblerModeEager,
+		PendingMemLimit: 1,
+		ShardLevels:     1,
+	})
+	if err != nil {
+		t.Fatalf("NewChunkAssemblerWithOptions: %v", err)
+	}
+	defer ca.Cleanup()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := ca.WriteChunk(1, bytes.NewReader([]byte("BB")), 2); err != nil {
+			t.Errorf("WriteChunk(1): %v", err)
+		}
+	}()
+
+	runtime.Gosched()
+	if err := ca.WriteChunk(0, bytes.NewReader([]byte("AA")), 2); err != nil {
+		t.Fatalf("WriteChunk(0): %v", err)
+	}
+	wg.Wait()
+
+	resultPath, totalBytes, err := ca.Finalize()
+	if err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	defer os.Remove(resultPath)
+
+	if totalBytes != 4 {
+		t.Errorf("expected totalBytes=4, got %d", totalBytes)
+	}
+	content, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("reading assembled file: %v", err)
+	}
+	if string(content) != "AABB" {
+		t.Errorf("expected %q, got %q", "AABB", content)
+	}
+
+	// Após finalizar, nenhum arquivo spill-*.tmp deve existir no shard dir.
+	shardDir := filepath.Join(ca.ChunkDir(), "01")
+	if _, err := os.Stat(shardDir); os.IsNotExist(err) {
+		return // shard dir nunca criado (promoção antes do rename) — OK
+	}
+	entries, err := os.ReadDir(shardDir)
+	if err != nil {
+		t.Fatalf("reading shard dir: %v", err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			t.Errorf("unexpected leftover file in shard dir: %s", e.Name())
+		}
+	}
+}
+
+// TestChunkAssembler_SpillConcurrent_Race valida correctness e ausência de race
+// com múltiplas goroutines escrevendo chunks simultâneos (mix in-order e out-of-order).
+// Deve ser executado com: go test -race
+func TestChunkAssembler_SpillConcurrent_Race(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// pendingMemLimit=1 garante spill em disco para todos os out-of-order.
+	ca, err := NewChunkAssemblerWithOptions("test-spill-concurrent", tmpDir, logger, ChunkAssemblerOptions{
+		Mode:            AssemblerModeEager,
+		PendingMemLimit: 1,
+	})
+	if err != nil {
+		t.Fatalf("NewChunkAssemblerWithOptions: %v", err)
+	}
+	defer ca.Cleanup()
+
+	const n = 8
+	data := make([][]byte, n)
+	totalExpected := 0
+	for i := 0; i < n; i++ {
+		data[i] = []byte{byte('A' + i), byte('A' + i)}
+		totalExpected += len(data[i])
+	}
+
+	// Escreve todos os chunks em paralelo — ordem de chegada não determinística.
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(seq int) {
+			defer wg.Done()
+			if err := ca.WriteChunk(uint32(seq), bytes.NewReader(data[seq]), int64(len(data[seq]))); err != nil {
+				t.Errorf("WriteChunk(%d): %v", seq, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	resultPath, totalBytes, err := ca.Finalize()
+	if err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	defer os.Remove(resultPath)
+
+	if int(totalBytes) != totalExpected {
+		t.Errorf("expected totalBytes=%d, got %d", totalExpected, totalBytes)
+	}
+	content, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("reading assembled file: %v", err)
+	}
+	// Conteúdo deve estar ordenado por globalSeq: AA BB CC DD EE FF GG HH
+	expected := "AABBCCDDEEFFGGHH"
+	if string(content) != expected {
+		t.Errorf("expected %q, got %q", expected, content)
 	}
 }
