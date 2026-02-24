@@ -61,4 +61,5 @@ web_ui:
 #
 chunk_buffer:
   size: 0              # ex: "64mb", "128mb", "256mb"  (0 = desligado)
-  drain_mode: lazy     # lazy (default) | eager
+  drain_ratio: 0.5     # 0.0 = write-through | 0.5 = drena a 50% (default) | 1.0 = drena quando cheio
+

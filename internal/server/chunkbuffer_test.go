@@ -5,6 +5,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -20,20 +21,29 @@ func newBufTestLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// --- ChunkBuffer desabilitado ---
+// newBufAssembler cria um assembler eager para testes do buffer.
+func newBufAssembler(t *testing.T, sessionID string) *ChunkAssembler {
+	t.Helper()
+	a, err := NewChunkAssembler(sessionID, t.TempDir(), newBufTestLogger())
+	if err != nil {
+		t.Fatalf("NewChunkAssembler(%s): %v", sessionID, err)
+	}
+	t.Cleanup(func() { a.Cleanup() })
+	return a
+}
+
+// --- Desabilitado ---
 
 func TestChunkBuffer_Disabled(t *testing.T) {
 	cfg := config.ChunkBufferConfig{Size: "0", SizeRaw: 0}
-	cb := NewChunkBuffer(cfg, newBufTestLogger())
-	if cb != nil {
+	if NewChunkBuffer(cfg, newBufTestLogger()) != nil {
 		t.Fatal("expected nil ChunkBuffer when size=0")
 	}
 }
 
 func TestChunkBuffer_Disabled_EmptySize(t *testing.T) {
 	cfg := config.ChunkBufferConfig{Size: "", SizeRaw: 0}
-	cb := NewChunkBuffer(cfg, newBufTestLogger())
-	if cb != nil {
+	if NewChunkBuffer(cfg, newBufTestLogger()) != nil {
 		t.Fatal("expected nil ChunkBuffer when size is empty")
 	}
 }
@@ -47,149 +57,146 @@ func TestChunkBuffer_NilEnabled(t *testing.T) {
 
 func TestChunkBuffer_NilStats(t *testing.T) {
 	var cb *ChunkBuffer
-	stats := cb.Stats()
-	if stats.Enabled {
+	if cb.Stats().Enabled {
 		t.Fatal("nil ChunkBuffer stats should have Enabled=false")
 	}
 }
 
-// --- ChunkBuffer habilitado ---
-
-func TestChunkBuffer_Enabled(t *testing.T) {
-	cfg := config.ChunkBufferConfig{Size: "64mb", SizeRaw: 64 * 1024 * 1024, DrainMode: "lazy"}
-	cb := NewChunkBuffer(cfg, newBufTestLogger())
-	if cb == nil {
-		t.Fatal("expected non-nil ChunkBuffer when SizeRaw=64MB")
-	}
-	if !cb.Enabled() {
-		t.Fatal("ChunkBuffer should be Enabled()")
-	}
-	if cb.drainMode != "lazy" {
-		t.Fatalf("expected drainMode=lazy, got %q", cb.drainMode)
+func TestChunkBuffer_NilFlush(t *testing.T) {
+	var cb *ChunkBuffer
+	if err := cb.Flush(); err != nil {
+		t.Fatalf("nil ChunkBuffer Flush should be no-op, got: %v", err)
 	}
 }
 
-func TestChunkBuffer_Capacity(t *testing.T) {
-	const size = 10 * 1024 * 1024 // 10 MB → 10 slots (avgSlotSize=1MB)
-	cfg := config.ChunkBufferConfig{SizeRaw: size, DrainMode: "lazy"}
+// --- Habilitado ---
+
+func TestChunkBuffer_Enabled(t *testing.T) {
+	cfg := config.ChunkBufferConfig{SizeRaw: 64 * 1024 * 1024, DrainRatio: 0.5}
 	cb := NewChunkBuffer(cfg, newBufTestLogger())
 	if cb == nil {
 		t.Fatal("expected non-nil ChunkBuffer")
 	}
-	if cap(cb.slots) != 10 {
-		t.Errorf("expected capacity=10, got %d", cap(cb.slots))
+	if !cb.Enabled() {
+		t.Fatal("ChunkBuffer should be Enabled()")
+	}
+	if cb.drainRatio != 0.5 {
+		t.Fatalf("expected drainRatio=0.5, got %v", cb.drainRatio)
 	}
 }
 
-func TestChunkBuffer_MinCapacity(t *testing.T) {
-	// Tamanho menor que 1 slot → mínimo de 2 slots
-	cfg := config.ChunkBufferConfig{SizeRaw: 512 * 1024, DrainMode: "lazy"} // 512KB
+func TestChunkBuffer_CapacityBytes(t *testing.T) {
+	cfg := config.ChunkBufferConfig{SizeRaw: 64 * 1024 * 1024, DrainRatio: 0.5}
 	cb := NewChunkBuffer(cfg, newBufTestLogger())
-	if cap(cb.slots) < 2 {
-		t.Errorf("expected capacity >= 2, got %d", cap(cb.slots))
+	stats := cb.Stats()
+	if stats.CapacityBytes != 64*1024*1024 {
+		t.Errorf("expected CapacityBytes=64MB, got %d", stats.CapacityBytes)
+	}
+	if !stats.Enabled {
+		t.Error("expected Enabled=true")
 	}
 }
 
-// --- Push e Drain (lazy) ---
+// --- Push e Drain (ratio=0 write-through) ---
 
-func TestChunkBuffer_Push_And_Drain_Lazy(t *testing.T) {
-	tmpDir := t.TempDir()
-	logger := newBufTestLogger()
-
-	assembler, err := NewChunkAssembler("buf-drain-lazy", tmpDir, logger)
-	if err != nil {
-		t.Fatalf("NewChunkAssembler: %v", err)
-	}
-	defer assembler.Cleanup()
-
-	cfg := config.ChunkBufferConfig{SizeRaw: 64 * 1024 * 1024, DrainMode: "lazy"}
-	cb := NewChunkBuffer(cfg, logger)
+func TestChunkBuffer_Push_And_Drain_WriteThrough(t *testing.T) {
+	assembler := newBufAssembler(t, "buf-wt")
+	cfg := config.ChunkBufferConfig{SizeRaw: 64 * 1024 * 1024, DrainRatio: 0.0}
+	cb := NewChunkBuffer(cfg, newBufTestLogger())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cb.StartDrainer(ctx)
 
-	chunks := []struct {
-		seq  uint32
-		data string
-	}{{0, "HELLO"}, {1, "WORLD"}, {2, "!!!!"}}
-	for _, c := range chunks {
-		if err := cb.Push(c.seq, []byte(c.data), assembler); err != nil {
-			t.Fatalf("Push(%d): %v", c.seq, err)
-		}
-	}
-
-	if !bufWaitDrained(cb, 3, 2*time.Second) {
-		t.Fatalf("chunks not drained in time: pushed=%d drained=%d",
-			cb.totalPushed.Load(), cb.totalDrained.Load())
-	}
-
-	_, totalBytes, err := assembler.Finalize()
-	if err != nil {
-		t.Fatalf("Finalize: %v", err)
-	}
-	expected := int64(len("HELLOWORLD!!!!"))
-	if totalBytes != expected {
-		t.Errorf("expected totalBytes=%d, got %d", expected, totalBytes)
-	}
-}
-
-// --- Push e Drain (eager) ---
-
-func TestChunkBuffer_Push_And_Drain_Eager(t *testing.T) {
-	tmpDir := t.TempDir()
-	logger := newBufTestLogger()
-
-	assembler, err := NewChunkAssemblerWithOptions("buf-drain-eager", tmpDir, logger, ChunkAssemblerOptions{
-		Mode:            AssemblerModeEager,
-		PendingMemLimit: defaultPendingMemLimit,
-	})
-	if err != nil {
-		t.Fatalf("NewChunkAssemblerWithOptions: %v", err)
-	}
-	defer assembler.Cleanup()
-
-	cfg := config.ChunkBufferConfig{SizeRaw: 64 * 1024 * 1024, DrainMode: "eager"}
-	cb := NewChunkBuffer(cfg, logger)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	cb.StartDrainer(ctx)
-
-	for i, s := range []string{"AA", "BB", "CC"} {
-		if err := cb.Push(uint32(i), []byte(s), assembler); err != nil {
+	for i, s := range []string{"HELLO", "WORLD", "!!!!"} {
+		data := []byte(s)
+		if err := cb.Push(uint32(i), data, assembler); err != nil {
 			t.Fatalf("Push(%d): %v", i, err)
 		}
 	}
 
 	if !bufWaitDrained(cb, 3, 2*time.Second) {
-		t.Fatalf("chunks not drained: pushed=%d drained=%d",
-			cb.totalPushed.Load(), cb.totalDrained.Load())
+		t.Fatalf("not drained: pushed=%d drained=%d", cb.totalPushed.Load(), cb.totalDrained.Load())
 	}
 
 	_, totalBytes, err := assembler.Finalize()
 	if err != nil {
 		t.Fatalf("Finalize: %v", err)
 	}
-	if totalBytes != 6 {
-		t.Errorf("expected totalBytes=6, got %d", totalBytes)
+	if totalBytes != int64(len("HELLOWORLD!!!!")) {
+		t.Errorf("expected %d bytes, got %d", len("HELLOWORLD!!!!"), totalBytes)
+	}
+}
+
+// --- Push e Drain (ratio=0.5) ---
+
+func TestChunkBuffer_Push_And_Drain_Ratio(t *testing.T) {
+	const sizeRaw = 10 * 1024 * 1024 // 10MB
+	assembler := newBufAssembler(t, "buf-ratio")
+	cfg := config.ChunkBufferConfig{SizeRaw: sizeRaw, DrainRatio: 0.5}
+	cb := NewChunkBuffer(cfg, newBufTestLogger())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cb.StartDrainer(ctx)
+
+	for i := 0; i < 5; i++ {
+		if err := cb.Push(uint32(i), []byte("AB"), assembler); err != nil {
+			t.Fatalf("Push(%d): %v", i, err)
+		}
+	}
+
+	// Chunks de 2 bytes num buffer de 10MB nunca atingem o threshold de 0.5.
+	// Flush() força o drain — exatamente o que ocorre em produção antes do Finalize().
+	if err := cb.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if cb.totalDrained.Load() != 5 {
+		t.Errorf("expected 5 drained after Flush, got %d", cb.totalDrained.Load())
+	}
+}
+
+// --- Fallback: chunk maior que capacidade disponível ---
+
+func TestChunkBuffer_Fallback_ChunkExceedsCapacity(t *testing.T) {
+	const sizeRaw = 4 * 1024 // buffer minúsculo (4KB)
+	assembler := newBufAssembler(t, "buf-fallback")
+	cfg := config.ChunkBufferConfig{SizeRaw: sizeRaw, DrainRatio: 0.5}
+	cb := NewChunkBuffer(cfg, newBufTestLogger())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cb.StartDrainer(ctx)
+
+	// Chunk de 8KB > 4KB de capacidade → deve acionar fallback direto no assembler
+	bigChunk := bytes.Repeat([]byte("X"), 8*1024)
+	if err := cb.Push(0, bigChunk, assembler); err != nil {
+		t.Fatalf("Push com fallback não deve retornar erro: %v", err)
+	}
+
+	if cb.totalFallbacks.Load() != 1 {
+		t.Errorf("expected 1 fallback, got %d", cb.totalFallbacks.Load())
+	}
+	// Push via fallback não incrementa totalPushed (foi direto ao assembler)
+	if cb.totalPushed.Load() != 0 {
+		t.Errorf("fallback não deveria incrementar totalPushed, got %d", cb.totalPushed.Load())
+	}
+
+	_, totalBytes, err := assembler.Finalize()
+	if err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	if totalBytes != int64(len(bigChunk)) {
+		t.Errorf("expected %d bytes after fallback, got %d", len(bigChunk), totalBytes)
 	}
 }
 
 // --- Stats ---
 
 func TestChunkBuffer_Stats(t *testing.T) {
-	tmpDir := t.TempDir()
-	logger := newBufTestLogger()
-
-	assembler, err := NewChunkAssembler("buf-stats", tmpDir, logger)
-	if err != nil {
-		t.Fatalf("NewChunkAssembler: %v", err)
-	}
-	defer assembler.Cleanup()
-
-	cfg := config.ChunkBufferConfig{SizeRaw: 32 * 1024 * 1024, DrainMode: "lazy"}
-	cb := NewChunkBuffer(cfg, logger)
+	assembler := newBufAssembler(t, "buf-stats")
+	cfg := config.ChunkBufferConfig{SizeRaw: 32 * 1024 * 1024, DrainRatio: 0.5}
+	cb := NewChunkBuffer(cfg, newBufTestLogger())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -201,64 +208,110 @@ func TestChunkBuffer_Stats(t *testing.T) {
 		}
 	}
 
-	if !bufWaitDrained(cb, 2, 2*time.Second) {
-		t.Fatalf("not drained in time")
+	// Flush() força o drain (chunks pequenos não atingem threshold de 0.5 em 32MB)
+	if err := cb.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
 	}
 
-	stats := cb.Stats()
-	if !stats.Enabled {
+	s := cb.Stats()
+	if !s.Enabled {
 		t.Error("expected Enabled=true")
 	}
-	if stats.TotalPushed != 2 {
-		t.Errorf("expected TotalPushed=2, got %d", stats.TotalPushed)
+	if s.TotalPushed != 2 {
+		t.Errorf("expected TotalPushed=2, got %d", s.TotalPushed)
 	}
-	if stats.TotalDrained != 2 {
-		t.Errorf("expected TotalDrained=2, got %d", stats.TotalDrained)
+	if s.TotalDrained != 2 {
+		t.Errorf("expected TotalDrained=2, got %d", s.TotalDrained)
 	}
-	if stats.BackpressureEvents != 0 {
-		t.Errorf("expected BackpressureEvents=0, got %d", stats.BackpressureEvents)
+	if s.BackpressureEvents != 0 {
+		t.Errorf("expected BackpressureEvents=0, got %d", s.BackpressureEvents)
 	}
-	if stats.DrainMode != "lazy" {
-		t.Errorf("expected DrainMode=lazy, got %q", stats.DrainMode)
+	if s.DrainRatio != 0.5 {
+		t.Errorf("expected DrainRatio=0.5, got %v", s.DrainRatio)
 	}
-	if stats.Capacity != cap(cb.slots) {
-		t.Errorf("expected Capacity=%d, got %d", cap(cb.slots), stats.Capacity)
+	if s.CapacityBytes != 32*1024*1024 {
+		t.Errorf("expected CapacityBytes=32MB, got %d", s.CapacityBytes)
+	}
+	if s.InFlightBytes != 0 {
+		t.Errorf("expected InFlightBytes=0 after drain, got %d", s.InFlightBytes)
+	}
+}
+
+// --- FillRatio ---
+
+func TestChunkBuffer_FillRatio(t *testing.T) {
+	const sizeRaw = 4 * 1024 * 1024                                    // 4MB
+	cfg := config.ChunkBufferConfig{SizeRaw: sizeRaw, DrainRatio: 1.0} // só drena quando cheio
+	cb := NewChunkBuffer(cfg, newBufTestLogger())
+	// não inicia drainer — testa apenas o tracking de bytes
+
+	assembler := newBufAssembler(t, "buf-fillratio")
+
+	// Push de 1MB → fill ratio = 0.25
+	data := make([]byte, 1*1024*1024)
+	if err := cb.Push(0, data, assembler); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	s := cb.Stats()
+	if s.InFlightBytes != int64(len(data)) {
+		t.Errorf("expected InFlightBytes=%d, got %d", len(data), s.InFlightBytes)
+	}
+	expectedRatio := float64(len(data)) / float64(sizeRaw)
+	if s.FillRatio < expectedRatio-0.01 || s.FillRatio > expectedRatio+0.01 {
+		t.Errorf("expected FillRatio~%.2f, got %.2f", expectedRatio, s.FillRatio)
+	}
+}
+
+// --- Flush ---
+
+func TestChunkBuffer_Flush_WaitsForDrain(t *testing.T) {
+	assembler := newBufAssembler(t, "buf-flush")
+	cfg := config.ChunkBufferConfig{SizeRaw: 32 * 1024 * 1024, DrainRatio: 1.0} // drain manual via Flush
+	cb := NewChunkBuffer(cfg, newBufTestLogger())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cb.StartDrainer(ctx)
+
+	for i := 0; i < 3; i++ {
+		if err := cb.Push(uint32(i), []byte("FLUSH_TEST"), assembler); err != nil {
+			t.Fatalf("Push(%d): %v", i, err)
+		}
+	}
+
+	// Flush deve aguardar e forçar drenagem total
+	if err := cb.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	if cb.inFlightBytes.Load() != 0 {
+		t.Errorf("Flush returned but inFlightBytes=%d", cb.inFlightBytes.Load())
 	}
 }
 
 // --- Backpressure ---
 
 func TestChunkBuffer_Backpressure(t *testing.T) {
-	logger := newBufTestLogger()
-	tmpDir := t.TempDir()
+	cfg := config.ChunkBufferConfig{SizeRaw: 1 * 1024 * 1024, DrainRatio: 0.5}
+	cb := NewChunkBuffer(cfg, newBufTestLogger())
+	assembler := newBufAssembler(t, "buf-bp")
 
-	// O buffer tem no mínimo 2 slots (guarda da capacidade mínima).
-	// Usamos SizeRaw = 1MB → 1 slot calculado → ajustado para 2 slots mínimos.
-	// Sem drainer, preenchemos os 2 slots e o 3º Push deve bloquear e retornar erro de backpressure.
-	cfg := config.ChunkBufferConfig{SizeRaw: 1 * 1024 * 1024, DrainMode: "lazy"}
-	cb := NewChunkBuffer(cfg, logger)
-
-	// Garante que a capacidade mínima aplicada foi 2
+	// Garante que temos pelo menos 2 slots (mínimo aplicado)
 	if cap(cb.slots) < 2 {
 		t.Skipf("unexpected capacity %d, skipping", cap(cb.slots))
 	}
-
-	assembler, err := NewChunkAssembler("buf-bp", tmpDir, logger)
-	if err != nil {
-		t.Fatalf("NewChunkAssembler: %v", err)
-	}
-	defer assembler.Cleanup()
 
 	data := make([]byte, 64)
 
 	// Preenche todos os slots sem drainer
 	for i := 0; i < cap(cb.slots); i++ {
 		if err := cb.Push(uint32(i), data, assembler); err != nil {
-			t.Fatalf("Push(%d) should succeed on empty slot: %v", i, err)
+			t.Fatalf("Push(%d) deveria funcionar: %v", i, err)
 		}
 	}
 
-	// Push extra deve falhar por timeout de backpressure (canal cheio, sem drainer)
+	// Push extra deve falhar por timeout de backpressure
 	done := make(chan error, 1)
 	go func() { done <- cb.Push(uint32(cap(cb.slots)), data, assembler) }()
 
@@ -278,17 +331,9 @@ func TestChunkBuffer_Backpressure(t *testing.T) {
 // --- Concorrência ---
 
 func TestChunkBuffer_ConcurrentPush(t *testing.T) {
-	tmpDir := t.TempDir()
-	logger := newBufTestLogger()
-
-	assembler, err := NewChunkAssembler("buf-concurrent", tmpDir, logger)
-	if err != nil {
-		t.Fatalf("NewChunkAssembler: %v", err)
-	}
-	defer assembler.Cleanup()
-
-	cfg := config.ChunkBufferConfig{SizeRaw: 64 * 1024 * 1024, DrainMode: "lazy"}
-	cb := NewChunkBuffer(cfg, logger)
+	assembler := newBufAssembler(t, "buf-concurrent")
+	cfg := config.ChunkBufferConfig{SizeRaw: 64 * 1024 * 1024, DrainRatio: 0.0}
+	cb := NewChunkBuffer(cfg, newBufTestLogger())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -308,14 +353,13 @@ func TestChunkBuffer_ConcurrentPush(t *testing.T) {
 	wg.Wait()
 
 	if !bufWaitDrained(cb, n, 3*time.Second) {
-		t.Fatalf("concurrent chunks not drained: pushed=%d drained=%d",
+		t.Fatalf("concurrent not drained: pushed=%d drained=%d",
 			cb.totalPushed.Load(), cb.totalDrained.Load())
 	}
 }
 
 // --- Helpers ---
 
-// bufWaitDrained aguarda até que totalDrained >= n dentro de timeout.
 func bufWaitDrained(cb *ChunkBuffer, n int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {

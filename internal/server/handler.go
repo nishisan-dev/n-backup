@@ -2083,6 +2083,15 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	}
 
 	// Finaliza o assembler (flush + close)
+	// Primeiro flush do buffer de memória: garante que nenhum chunk ainda em
+	// trânsito no ChunkBuffer seja perdido antes do Finalize.
+	if h.chunkBuffer != nil {
+		if err := h.chunkBuffer.Flush(); err != nil {
+			logger.Error("flushing chunk buffer before finalize", "error", err)
+			protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+			return
+		}
+	}
 	assembledPath, totalBytes, err := assembler.Finalize()
 	if err != nil {
 		logger.Error("finalizing assembly", "error", err)

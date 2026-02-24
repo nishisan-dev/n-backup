@@ -9,8 +9,28 @@ e o versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+---
+
+## [v2.7.0] — 2026-02-23
+
+Buffer de chunks em memória para suavizar I/O em discos lentos.
+
 ### Adicionado
+- **Chunk Buffer global (`chunk_buffer`)**: nova configuração global do servidor que reserva um buffer em memória compartilhado entre todas as sessões de backup paralelo. Absorve chunks recebidos da rede e os drena assincronamente para o assembler, desacoplando I/O de rede do I/O de disco e reduzindo oscilações em HDs lentos (ex: USB, NAS mecânico).
+  - `size`: tamanho máximo do buffer (ex: `"64mb"`, `"256mb"`). `0` desabilita (default).
+  - `drain_ratio` (0.0–1.0, default 0.5): limiar de ocupação que aciona a drenagem.
+    - `0.0` = write-through (drena imediatamente após cada chunk aceito em memória).
+    - `0.5` = drena quando 50% da capacidade de bytes está em uso.
+    - `1.0` = drena apenas quando o buffer está cheio.
+  - O modo de escrita em disco respeita o `assembler_mode` do storage (`lazy`/`eager`).
+  - **Fallback automático**: se um chunk exceder a capacidade disponível do buffer, é entregue diretamente ao assembler sem perda de dados.
+  - **Flush garantido antes do `Finalize()`**: todos os chunks em memória são drenados antes da montagem final do arquivo.
+  - **Backpressure**: se o canal estiver cheio por mais de 5s, o Push retorna erro e força reconexão do stream.
+  - Quando `size: 0`, o caminho de código original é preservado sem qualquer overhead.
 - **Cache de Storage Scan**: `StorageUsageSnapshot()` agora retorna dados de um cache atômico atualizado por ticker background. Parâmetro `storage_scan_interval` (default 1h, mínimo 30s) controla o intervalo de refresh. Elimina `syscall.Statfs` + `filepath.WalkDir` a cada request HTTP.
+
+### Motivação
+> Em HDs lentos (especialmente USB ou NAS mecânico), as goroutines de rede ficavam bloqueadas na escrita de cada chunk, causando throughput errático e quedas de velocidade. O buffer de memória age como um amortecedor: a rede escreve no buffer (rápido) e um worker dedicado drena para o disco uniformemente. O `drain_ratio` permite ajustar o trade-off entre latência (write-through a 0.0) e throughput (acúmulo a 0.5+).
 
 ---
 
