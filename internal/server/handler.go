@@ -470,6 +470,7 @@ func (h *Handler) SessionsSnapshot() []observability.SessionSummary {
 			// Dados de buffer por sessão (zero quando buffer desabilitado).
 			if h.chunkBuffer != nil {
 				bufBytes := h.chunkBuffer.SessionBytes(s.Assembler)
+				summary.BufferEnabled = true
 				summary.BufferInFlightBytes = bufBytes
 				if h.chunkBuffer.Stats().CapacityBytes > 0 {
 					summary.BufferFillPercent = float64(bufBytes) / float64(h.chunkBuffer.Stats().CapacityBytes) * 100
@@ -679,6 +680,7 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 		// Dados de buffer por sessão (zero quando buffer desabilitado).
 		if h.chunkBuffer != nil {
 			bufBytes := h.chunkBuffer.SessionBytes(s.Assembler)
+			detail.BufferEnabled = true
 			detail.BufferInFlightBytes = bufBytes
 			if cap := h.chunkBuffer.Stats().CapacityBytes; cap > 0 {
 				detail.BufferFillPercent = float64(bufBytes) / float64(cap) * 100

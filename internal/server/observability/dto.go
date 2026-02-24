@@ -52,6 +52,7 @@ type SessionSummary struct {
 	AutoScale    *AutoScaleInfo  `json:"auto_scale,omitempty"`
 
 	// Campos de chunk buffer por sessão (zero quando buffer desabilitado).
+	BufferEnabled       bool    `json:"buffer_enabled,omitempty"`
 	BufferInFlightBytes int64   `json:"buffer_in_flight_bytes,omitempty"`
 	BufferFillPercent   float64 `json:"buffer_fill_percent,omitempty"`
 }

@@ -315,7 +315,7 @@ const Components = {
                         ${s.eta ? `<span>ETA: ${s.eta}</span>` : ''}
                         ${s.assembly_eta ? `<span>Assembly ETA: ${s.assembly_eta}</span>` : ''}
                     </div>
-                    ${s.buffer_in_flight_bytes > 0 ? this.renderBufferSessionInline(s) : ''}
+                    ${s.buffer_enabled ? this.renderBufferSessionInline(s) : ''}
                 </div>
                 <div class="session-card-stats">
                     <span class="session-bytes">${this.formatBytes(s.bytes_received)}</span>
@@ -364,7 +364,7 @@ const Components = {
             ${detail.started_at ? `<div class="info-item"><span class="info-label">Duração</span><span class="info-value">${this.formatElapsed(detail.started_at)}</span></div>` : ''}
             ${detail.assembler ? this.renderAssemblerProgress(detail.assembler, detail.assembly_eta) : ''}
             ${detail.auto_scale ? this.renderAutoScaleInfo(detail.auto_scale) : ''}
-            ${detail.buffer_in_flight_bytes > 0 ? this.renderBufferMemoryBlock(detail) : ''}
+            ${detail.buffer_enabled ? this.renderBufferMemoryBlock(detail) : ''}
             ${progressHtml}
         `;
 
