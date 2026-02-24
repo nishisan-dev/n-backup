@@ -771,23 +771,21 @@ const Components = {
     },
 
     // Renderiza bloco "Buffer de Memória" no detalhe da sessão.
-    // Chamado apenas quando detail.buffer_in_flight_bytes > 0.
+    // Chamado sempre que detail.buffer_enabled == true.
     renderBufferMemoryBlock(detail) {
         const pct = (detail.buffer_fill_percent || 0).toFixed(1);
+        const bufMB = ((detail.buffer_in_flight_bytes || 0) / (1024 * 1024)).toFixed(2);
         return `
-            <div class="info-item" style="grid-column:1/-1;border-top:1px solid var(--border-color);margin-top:0.5rem;padding-top:0.5rem;">
+            <div class="info-item" style="grid-column:1/-1;">
                 <span class="info-label">Buffer de Memória</span>
-                <div class="info-value" style="display:flex;flex-direction:column;gap:0.25rem;">
-                    <table style="font-size:0.8rem;border-collapse:collapse;">
-                        <tr>
-                            <td style="color:var(--text-muted);padding-right:16px;">Bytes no buffer</td>
-                            <td style="font-family:var(--font-mono);">${this.formatBytes(detail.buffer_in_flight_bytes)}</td>
-                        </tr>
-                        <tr>
-                            <td style="color:var(--text-muted);padding-right:16px;">% do buffer total</td>
-                            <td style="font-family:var(--font-mono);">${pct}%</td>
-                        </tr>
-                    </table>
+                <div style="display:flex;flex-direction:column;gap:8px;margin-top:6px;">
+                    <div class="sparkline-card" style="padding:10px 14px;">
+                        <div class="sparkline-header">
+                            <span class="sparkline-label">Bytes em buffer</span>
+                            <span class="sparkline-value" id="buf-value">${bufMB} MB (${pct}%)</span>
+                        </div>
+                        <canvas class="sparkline-canvas" id="spark-buffer" width="600" height="50"></canvas>
+                    </div>
                 </div>
             </div>`;
     },

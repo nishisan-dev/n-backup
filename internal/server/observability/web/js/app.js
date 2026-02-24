@@ -323,7 +323,7 @@
     function updateSparkHistory(session) {
         const id = session.session_id;
         if (!sparkHistory[id]) {
-            sparkHistory[id] = { net: [], disk: [], lastBytes: session.bytes_received, lastDisk: session.disk_write_bytes || 0, smoothNet: null, smoothDisk: null };
+            sparkHistory[id] = { net: [], disk: [], buf: [], lastBytes: session.bytes_received, lastDisk: session.disk_write_bytes || 0, smoothNet: null, smoothDisk: null };
             return;
         }
 
@@ -345,6 +345,13 @@
         h.disk.push(h.smoothDisk);
         h.lastDisk = diskBytes;
 
+        // Buffer em voo — nível absoluto em MB (não delta)
+        if (session.buffer_enabled) {
+            const bufMB = (session.buffer_in_flight_bytes || 0) / (1024 * 1024);
+            h.buf.push(bufMB);
+            if (h.buf.length > SPARK_MAX_POINTS) h.buf.shift();
+        }
+
         // Trim to max points
         if (h.net.length > SPARK_MAX_POINTS) h.net.shift();
         if (h.disk.length > SPARK_MAX_POINTS) h.disk.shift();
@@ -361,13 +368,11 @@
 
         const netCanvas = document.getElementById('spark-net');
         const diskCanvas = document.getElementById('spark-disk');
+        const bufCanvas = document.getElementById('spark-buffer');
 
-        if (netCanvas && hist.net.length > 1) {
-            Components.drawSparkline(netCanvas, hist.net, '#6366f1');
-        }
-        if (diskCanvas && hist.disk.length > 1) {
-            Components.drawSparkline(diskCanvas, hist.disk, '#10b981');
-        }
+        if (netCanvas && hist.net.length > 1) Components.drawSparkline(netCanvas, hist.net, '#6366f1');
+        if (diskCanvas && hist.disk.length > 1) Components.drawSparkline(diskCanvas, hist.disk, '#10b981');
+        if (bufCanvas && hist.buf && hist.buf.length > 1) Components.drawSparkline(bufCanvas, hist.buf, '#06b6d4');
     }
 
     // ============ Theme Toggle ============
