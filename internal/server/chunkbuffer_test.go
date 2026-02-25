@@ -7,9 +7,12 @@ package server
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -549,5 +552,150 @@ func TestChunkBuffer_DrainRateMBs_AfterDrain(t *testing.T) {
 	}
 	if s.TotalDrained != 5 {
 		t.Errorf("expected 5 drained, got %d", s.TotalDrained)
+	}
+}
+
+// --- drainSlot failure handling ---
+
+// TestChunkBuffer_DrainSlot_WriteChunkFailure_SessionMarkedFailed é o teste de
+// regressão para o bug de produção onde drainSlot engolia erros de WriteChunk
+// silenciosamente, descartando chunks e causando "missing chunk seq N in lazy
+// assembly" horas depois na finalização.
+//
+// O fix: drainSlot faz retry 3x com backoff. Em falha permanente, registra a
+// sessão como falhada via failedSessions. O handler consulta SessionFailed()
+// antes de Finalize() para falhar fast com erro descritivo.
+func TestChunkBuffer_DrainSlot_WriteChunkFailure_SessionMarkedFailed(t *testing.T) {
+	// Cria assembler lazy com chunkDir em path read-only para forçar falha em writeChunkFile.
+	tmpDir := t.TempDir()
+	assembler, err := NewChunkAssemblerWithOptions("drain-fail", tmpDir, newBufTestLogger(), ChunkAssemblerOptions{
+		Mode:             AssemblerModeLazy,
+		PendingMemLimit:  0,
+		FsyncChunkWrites: true, // fsync ativo para forçar passagem por writeChunkFile
+	})
+	if err != nil {
+		t.Fatalf("NewChunkAssemblerWithOptions: %v", err)
+	}
+	t.Cleanup(func() { assembler.Cleanup() })
+
+	// Injeta falha no syncFile para simular I/O error persistente.
+	origSync := syncFile
+	syncFile = func(f *os.File) error {
+		return fmt.Errorf("injected I/O error: disk full")
+	}
+	t.Cleanup(func() { syncFile = origSync })
+
+	cb := NewChunkBuffer(newBufConfig(64*1024*1024, 0.0), newBufTestLogger())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cb.StartDrainer(ctx)
+
+	// Antes de qualquer push, sessão deve estar saudável.
+	if err := cb.SessionFailed(assembler); err != nil {
+		t.Fatalf("SessionFailed should be nil before push, got: %v", err)
+	}
+
+	// Push chunk — drainer vai tentar WriteChunk que falhará via syncFile.
+	data := []byte("CHUNK_THAT_WILL_FAIL")
+	if err := cb.Push(0, data, assembler); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	// Aguarda o drainer processar (retry 3x com backoff ~100ms+200ms+400ms ≈ 700ms).
+	if !bufWaitDrained(cb, 1, 5*time.Second) {
+		t.Fatalf("drainer não processou o slot: drained=%d", cb.totalDrained.Load())
+	}
+
+	// INVARIANTE CRÍTICO: sessão deve estar marcada como falhada.
+	if err := cb.SessionFailed(assembler); err == nil {
+		t.Fatal("BUG: SessionFailed retornou nil após WriteChunk falhar — " +
+			"chunk descartado silenciosamente, causaria 'missing chunk seq' no Finalize")
+	} else {
+		t.Logf("OK: SessionFailed retornou erro esperado: %v", err)
+	}
+}
+
+// TestChunkBuffer_DrainSlot_RetrySuccess verifica que o retry do drainSlot
+// funciona: falha na 1ª tentativa (syncFile mockado) e sucede na 2ª.
+func TestChunkBuffer_DrainSlot_RetrySuccess(t *testing.T) {
+	tmpDir := t.TempDir()
+	assembler, err := NewChunkAssemblerWithOptions("drain-retry", tmpDir, newBufTestLogger(), ChunkAssemblerOptions{
+		Mode:             AssemblerModeLazy,
+		PendingMemLimit:  0,
+		FsyncChunkWrites: true,
+	})
+	if err != nil {
+		t.Fatalf("NewChunkAssemblerWithOptions: %v", err)
+	}
+	t.Cleanup(func() { assembler.Cleanup() })
+
+	// Fail na 1ª chamada, succeed nas subsequentes.
+	var callCount int32
+	origSync := syncFile
+	syncFile = func(f *os.File) error {
+		n := atomic.AddInt32(&callCount, 1)
+		if n == 1 {
+			return fmt.Errorf("transient I/O error")
+		}
+		return origSync(f)
+	}
+	t.Cleanup(func() { syncFile = origSync })
+
+	cb := NewChunkBuffer(newBufConfig(64*1024*1024, 0.0), newBufTestLogger())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cb.StartDrainer(ctx)
+
+	if err := cb.Push(0, []byte("RETRY_CHUNK"), assembler); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	if !bufWaitDrained(cb, 1, 5*time.Second) {
+		t.Fatalf("drainer não processou o slot")
+	}
+
+	// Sessão NÃO deve estar falhada — retry foi bem-sucedido.
+	if err := cb.SessionFailed(assembler); err != nil {
+		t.Fatalf("SessionFailed should be nil after successful retry, got: %v", err)
+	}
+
+	// O chunk deve estar no assembler (pendingChunks).
+	assembler.mu.Lock()
+	_, exists := assembler.pendingChunks[0]
+	assembler.mu.Unlock()
+	if !exists {
+		t.Fatal("chunk seq 0 deveria existir no assembler após retry bem-sucedido")
+	}
+}
+
+// TestChunkBuffer_SessionFailed_NilBuffer verifica que SessionFailed é no-op em buffer nil.
+func TestChunkBuffer_SessionFailed_NilBuffer(t *testing.T) {
+	var cb *ChunkBuffer
+	if err := cb.SessionFailed(nil); err != nil {
+		t.Fatalf("nil ChunkBuffer SessionFailed should return nil, got: %v", err)
+	}
+}
+
+// TestChunkBuffer_SessionFailed_HealthySession verifica que SessionFailed retorna nil
+// quando a sessão está saudável (sem falhas de drain).
+func TestChunkBuffer_SessionFailed_HealthySession(t *testing.T) {
+	assembler := newBufAssembler(t, "healthy")
+	cb := NewChunkBuffer(newBufConfig(64*1024*1024, 0.0), newBufTestLogger())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cb.StartDrainer(ctx)
+
+	if err := cb.Push(0, []byte("OK"), assembler); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	if err := cb.Flush(assembler); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	if err := cb.SessionFailed(assembler); err != nil {
+		t.Fatalf("SessionFailed should be nil for healthy session, got: %v", err)
 	}
 }

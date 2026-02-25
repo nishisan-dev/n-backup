@@ -2135,6 +2135,18 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 			protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
 			return
 		}
+		// Verifica se algum chunk falhou permanentemente durante a drenagem.
+		// Sem esta verificação, finalizeLazy() retornaria "missing chunk seq N"
+		// sem contexto do que realmente ocorreu (falha de I/O no drainSlot).
+		if err := h.chunkBuffer.SessionFailed(assembler); err != nil {
+			logger.Error("session aborted: chunk buffer drain failure", "error", err)
+			protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+			if h.Events != nil {
+				h.Events.PushEvent("error", "drain_failure", agentName,
+					fmt.Sprintf("%s/%s chunk drain failed: %v", storageName, backupName, err), 0)
+			}
+			return
+		}
 	}
 	assembledPath, totalBytes, err := assembler.Finalize()
 	if err != nil {

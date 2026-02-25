@@ -690,14 +690,18 @@ func (d *Dispatcher) WaitAllSenders(ctx context.Context) error {
 	done := make(chan error, 1)
 
 	go func() {
+		var deadErr error
 		for i := 0; i < d.maxStreams; i++ {
 			if d.streams[i].active.Load() || d.streams[i].dead.Load() {
 				if err := d.WaitSender(i); err != nil {
-					// Stream morto após esgotar retries — log mas não aborta imediatamente.
-					// Outros streams podem ainda estar transmitindo.
+					// Stream morto após esgotar retries — chunks no ring buffer foram perdidos.
+					// Acumula o primeiro erro para retorno, mas espera todos os senders.
 					if d.streams[i].dead.Load() {
 						d.logger.Warn("dead stream sender finished with error",
 							"stream", i, "error", err)
+						if deadErr == nil {
+							deadErr = fmt.Errorf("stream %d died with unsent data: %w", i, err)
+						}
 						continue
 					}
 					done <- fmt.Errorf("stream %d sender error: %w", i, err)
@@ -705,7 +709,7 @@ func (d *Dispatcher) WaitAllSenders(ctx context.Context) error {
 				}
 			}
 		}
-		done <- nil
+		done <- deadErr
 	}()
 
 	select {

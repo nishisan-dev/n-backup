@@ -30,6 +30,13 @@ const chunkBufferFlushTimeout = 30 * time.Second
 // canal de slots antes de retornar backpressure ao chamador.
 const chunkBufferPushTimeout = 5 * time.Second
 
+// drainSlotMaxRetries é o número de tentativas que drainSlot faz ao WriteChunk
+// falhar antes de marcar a sessão como permanentemente falhada.
+const drainSlotMaxRetries = 3
+
+// drainSlotBaseBackoff é o intervalo base para backoff exponencial no retry de drainSlot.
+const drainSlotBaseBackoff = 100 * time.Millisecond
+
 // chunkSlot representa um chunk em trânsito no buffer de memória.
 type chunkSlot struct {
 	globalSeq uint32
@@ -79,6 +86,11 @@ type ChunkBuffer struct {
 	// sessionBytes rastreia bytes em voo por sessão (*ChunkAssembler → *atomic.Int64).
 	// FIX #1: permite Flush() aguardar apenas os bytes da sessão solicitante.
 	sessionBytes sync.Map
+
+	// failedSessions rastreia sessões que sofreram falha permanente de drain.
+	// Mapeamento: *ChunkAssembler → error.
+	// Consultado pelo handler antes de Finalize() via SessionFailed().
+	failedSessions sync.Map
 
 	// Métricas atômicas
 	totalPushed        atomic.Int64
@@ -276,14 +288,34 @@ func (cb *ChunkBuffer) drainAll() {
 }
 
 // drainSlot entrega um único slot ao assembler de destino e libera os bytes reservados.
+//
+// FIX: Retry com backoff exponencial antes de marcar sessão como falhada.
+// Anteriormente o erro era apenas logado e o chunk descartado silenciosamente,
+// causando "missing chunk seq N in lazy assembly" horas depois na finalização.
 func (cb *ChunkBuffer) drainSlot(slot chunkSlot) {
 	dataLen := int64(len(slot.data))
 
-	if err := slot.assembler.WriteChunk(slot.globalSeq, bytes.NewReader(slot.data), dataLen); err != nil {
-		cb.logger.Error("chunk buffer drain error",
+	var lastErr error
+	for attempt := 0; attempt < drainSlotMaxRetries; attempt++ {
+		if err := slot.assembler.WriteChunk(slot.globalSeq, bytes.NewReader(slot.data), dataLen); err != nil {
+			lastErr = err
+			cb.logger.Warn("chunk buffer drain retry",
+				"globalSeq", slot.globalSeq,
+				"attempt", attempt+1,
+				"error", err,
+			)
+			time.Sleep(drainSlotBaseBackoff * time.Duration(1<<attempt))
+			continue
+		}
+		lastErr = nil
+		break
+	}
+	if lastErr != nil {
+		cb.logger.Error("chunk buffer drain FAILED permanently — session will be aborted",
 			"globalSeq", slot.globalSeq,
-			"error", err,
+			"error", lastErr,
 		)
+		cb.failedSessions.Store(slot.assembler, lastErr)
 	}
 
 	// Libera bytes globais e por sessão — após WriteChunk para que
@@ -304,6 +336,20 @@ func (cb *ChunkBuffer) SessionBytes(a *ChunkAssembler) int64 {
 		return 0
 	}
 	return counter.Load()
+}
+
+// SessionFailed verifica se a sessão identificada pelo assembler sofreu falha
+// permanente de drenagem. Retorna o erro da falha ou nil se a sessão está saudável.
+// Deve ser consultado pelo handler antes de Finalize() para evitar
+// "missing chunk seq" causado por chunks descartados silenciosamente.
+func (cb *ChunkBuffer) SessionFailed(assembler *ChunkAssembler) error {
+	if cb == nil {
+		return nil
+	}
+	if v, ok := cb.failedSessions.Load(assembler); ok {
+		return v.(error)
+	}
+	return nil
 }
 
 // drainRateMBs calcula a taxa de drenagem em MB/s com janela deslizante de ~5s.
