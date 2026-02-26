@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/nishisan-dev/n-backup/internal/config"
+	"github.com/nishisan-dev/n-backup/internal/logging"
 	"github.com/nishisan-dev/n-backup/internal/protocol"
 	"github.com/nishisan-dev/n-backup/internal/server/observability"
 )
@@ -2027,6 +2028,22 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	defer h.locks.Delete(lockKey)
 
 	logger = logger.With("session", sessionID, "mode", "parallel", "maxStreams", pi.MaxStreams)
+
+	// Session logger: grava logs desta sessão em arquivo dedicado para post-mortem.
+	var sessionLogPath string
+	if h.cfg.Logging.SessionLogDir != "" {
+		var sessionLogCloser io.Closer
+		var slErr error
+		logger, sessionLogCloser, sessionLogPath, slErr = logging.NewSessionLogger(
+			logger, h.cfg.Logging.SessionLogDir, agentName, sessionID)
+		if slErr != nil {
+			logger.Warn("failed to create session logger", "error", slErr)
+		} else {
+			defer sessionLogCloser.Close()
+			logger.Info("session log file created", "path", sessionLogPath)
+		}
+	}
+
 	logger.Info("starting parallel backup session")
 
 	// Emite evento de início de sessão paralela
@@ -2148,6 +2165,17 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 			return
 		}
 	}
+	// Log do estado do assembler antes do Finalize para diagnóstico post-mortem.
+	preStats := assembler.Stats()
+	logger.Info("pre_finalize_state",
+		"nextExpectedSeq", preStats.NextExpectedSeq,
+		"pendingChunks", preStats.PendingChunks,
+		"pendingMemBytes", preStats.PendingMemBytes,
+		"totalBytes", preStats.TotalBytes,
+		"totalChunks", preStats.TotalChunks,
+		"phase", preStats.Phase,
+	)
+
 	assembledPath, totalBytes, err := assembler.Finalize()
 	if err != nil {
 		logger.Error("finalizing assembly", "error", err)
@@ -2179,6 +2207,16 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	result := h.validateAndCommitWithTrailer(conn, writer, assembledPath, totalBytes, trailer, serverChecksum, storageInfo, logger)
 	h.recordSessionEnd(sessionID, agentName, storageName, backupName, "parallel", storageInfo.CompressionMode, result, now, totalBytes)
 	h.sessions.Delete(sessionID) // remove somente após commit+recordSessionEnd
+
+	// Gerencia arquivo de log da sessão: remove em sucesso, retém para post-mortem em falha.
+	if sessionLogPath != "" {
+		if result == "ok" {
+			logging.RemoveSessionLog(h.cfg.Logging.SessionLogDir, agentName, sessionID)
+			logger.Info("session log removed (backup ok)")
+		} else {
+			logger.Warn("session log retained for post-mortem", "path", sessionLogPath, "result", result)
+		}
+	}
 }
 
 // receiveParallelStream recebe dados de um stream paralelo usando ChunkHeader framing.
@@ -2249,6 +2287,15 @@ func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, read
 		h.TrafficIn.Add(int64(hdr.Length))
 		h.DiskWrite.Add(int64(hdr.Length))
 		session.DiskWriteBytes.Add(int64(hdr.Length))
+
+		// Log detalhado de chunk recebido — vai para o arquivo de sessão (DEBUG)
+		// e para stdout apenas se o nível global for DEBUG.
+		logger.Debug("chunk_received",
+			"stream", streamIndex,
+			"globalSeq", hdr.GlobalSeq,
+			"length", hdr.Length,
+			"totalBytes", bytesReceived,
+		)
 
 		// Per-stream stats: incrementa tráfego e atualiza last activity
 		if counter, ok := session.StreamTrafficIn.Load(streamIndex); ok {

@@ -601,6 +601,8 @@ func (ca *ChunkAssembler) Finalize() (string, int64, error) {
 		"session", ca.sessionID,
 		"totalBytes", total,
 		"nextExpectedSeq", ca.nextExpectedSeq.Load(),
+		"mode", ca.mode,
+		"pendingAtFinalize", pendingCnt,
 	)
 
 	return ca.outPath, total, nil
@@ -617,6 +619,11 @@ func (ca *ChunkAssembler) finalizeLazy() error {
 	for seq := uint32(0); seq <= lazyMax; seq++ {
 		pc, ok := ca.pendingChunks[seq]
 		if !ok {
+			ca.logger.Error("missing_chunk_in_assembly",
+				"missingSeq", seq,
+				"lazyMaxSeq", lazyMax,
+				"totalPending", len(ca.pendingChunks),
+			)
 			return fmt.Errorf("missing chunk seq %d in lazy assembly", seq)
 		}
 		f, err := os.Open(pc.filePath)

@@ -313,6 +313,7 @@ func (cb *ChunkBuffer) drainSlot(slot chunkSlot) {
 	if lastErr != nil {
 		cb.logger.Error("chunk buffer drain FAILED permanently — session will be aborted",
 			"globalSeq", slot.globalSeq,
+			"session", slot.assembler.sessionID,
 			"error", lastErr,
 		)
 		cb.failedSessions.Store(slot.assembler, lastErr)

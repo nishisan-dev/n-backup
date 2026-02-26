@@ -58,16 +58,16 @@ type TLSClient struct {
 
 // BackupEntry representa um bloco de backup nomeado com storage de destino.
 type BackupEntry struct {
-	Name            string         `yaml:"name"`            // Identificador local do backup
-	Storage         string         `yaml:"storage"`         // Nome do storage no server
-	Schedule        string         `yaml:"schedule"`        // Cron expression individual deste backup
-	Sources         []BackupSource `yaml:"sources"`
-	Exclude         []string       `yaml:"exclude"`
-	Parallels       int            `yaml:"parallels"`       // 0=desabilitado (single stream), 1-255=máx streams paralelos
-	DSCP            string         `yaml:"dscp"`            // DSCP marking (ex: "AF41", "EF"), vazio=desabilitado
-	AutoScaler      string         `yaml:"auto_scaler"`     // "efficiency" (default) | "adaptive"
-	BandwidthLimit  string         `yaml:"bandwidth_limit"` // Limite de upload em Bytes/seg (ex: "50mb", "1gb"), vazio=sem limite
-	BandwidthLimitRaw int64        `yaml:"-"`               // valor parseado em bytes/seg
+	Name              string         `yaml:"name"`     // Identificador local do backup
+	Storage           string         `yaml:"storage"`  // Nome do storage no server
+	Schedule          string         `yaml:"schedule"` // Cron expression individual deste backup
+	Sources           []BackupSource `yaml:"sources"`
+	Exclude           []string       `yaml:"exclude"`
+	Parallels         int            `yaml:"parallels"`       // 0=desabilitado (single stream), 1-255=máx streams paralelos
+	DSCP              string         `yaml:"dscp"`            // DSCP marking (ex: "AF41", "EF"), vazio=desabilitado
+	AutoScaler        string         `yaml:"auto_scaler"`     // "efficiency" (default) | "adaptive"
+	BandwidthLimit    string         `yaml:"bandwidth_limit"` // Limite de upload em Bytes/seg (ex: "50mb", "1gb"), vazio=sem limite
+	BandwidthLimitRaw int64          `yaml:"-"`               // valor parseado em bytes/seg
 }
 
 // BackupSource representa um diretório de origem para backup.
@@ -95,10 +95,11 @@ type ResumeConfig struct {
 
 // LoggingInfo contém configurações de logging.
 type LoggingInfo struct {
-	Level       string `yaml:"level"`
-	Format      string `yaml:"format"`
-	File        string `yaml:"file"`         // Caminho para arquivo de log (ex: /var/log/nbackup/agent.log)
-	StreamStats bool   `yaml:"stream_stats"` // Habilita stats por stream em sessões paralelas (padrão: false)
+	Level         string `yaml:"level"`
+	Format        string `yaml:"format"`
+	File          string `yaml:"file"`            // Caminho para arquivo de log (ex: /var/log/nbackup/agent.log)
+	StreamStats   bool   `yaml:"stream_stats"`    // Habilita stats por stream em sessões paralelas (padrão: false)
+	SessionLogDir string `yaml:"session_log_dir"` // Diretório para logs por sessão (ex: /var/log/nbackup/sessions), vazio = desabilitado
 }
 
 // LoadAgentConfig lê e valida o arquivo YAML de configuração do agent.
