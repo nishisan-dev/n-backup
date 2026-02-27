@@ -1336,6 +1336,52 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 				h.Events.PushEvent("info", "ingestion_done_signal", agentName, fmt.Sprintf("agent confirmed all data sent (session %s)", cidnSessionID), 0)
 			}
 
+		case protocol.MagicControlRetransmitResult:
+			// Agent informou resultado de tentativa de retransmissão após NACK
+			result, err := protocol.ReadControlRetransmitResultPayload(conn)
+			if err != nil {
+				logger.Warn("control channel: reading retransmit result payload", "error", err)
+				return
+			}
+
+			logger.Info("control channel: received ControlRetransmitResult",
+				"missingSeq", result.MissingSeq, "success", result.Success)
+
+			if result.Success {
+				// Chunk retransmitido com sucesso — gap será resolvido quando o chunk chegar via stream.
+				// ResolveGap é chamado proativamente aqui para limpar o tracker.
+				h.sessions.Range(func(_, value any) bool {
+					ps, ok := value.(*ParallelSession)
+					if !ok || ps.AgentName != agentName || ps.GapTracker == nil {
+						return true
+					}
+					ps.GapTracker.ResolveGap(result.MissingSeq)
+					logger.Info("gap resolved via retransmission", "seq", result.MissingSeq)
+					return false
+				})
+			} else {
+				// Chunk irrecuperável (ring buffer sobrescrito) — aborta sessão.
+				logger.Error("chunk irrecoverable, aborting session",
+					"missingSeq", result.MissingSeq)
+				if h.Events != nil {
+					h.Events.PushEvent("error", "chunk_lost", agentName, fmt.Sprintf("chunk seq %d irrecoverable (buffer overwritten)", result.MissingSeq), 0)
+				}
+				// Fecha todos os streams da sessão para forçar abort
+				h.sessions.Range(func(_, value any) bool {
+					ps, ok := value.(*ParallelSession)
+					if !ok || ps.AgentName != agentName {
+						return true
+					}
+					ps.StreamConns.Range(func(key, val any) bool {
+						if c, ok := val.(net.Conn); ok {
+							c.Close()
+						}
+						return true
+					})
+					return false
+				})
+			}
+
 		default:
 			logger.Warn("control channel: unknown magic", "magic", string(magic[:]))
 			return
@@ -1361,6 +1407,79 @@ func (h *Handler) extractAgentName(conn net.Conn, logger *slog.Logger) string {
 	// Fallback: usa o remote address agrupado por IP (sem porta)
 	host, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	return host
+}
+
+// gapCheckLoop roda como goroutine por sessão paralela, verificando periodicamente
+// se há chunks faltantes persistentes (gaps) e enviando ControlNACK ao agent via control channel.
+//
+// A goroutine termina quando:
+// - O contexto é cancelado (sessão finalizada ou server shutdown)
+// - IngestionDone é sinalizado (agent confirmou envio completo)
+func (h *Handler) gapCheckLoop(ctx context.Context, ps *ParallelSession) {
+	interval := h.cfg.GapDetection.CheckInterval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	logger := ps.Logger.With("component", "gap_check")
+	logger.Info("gap check loop started",
+		"interval", interval,
+		"timeout", h.cfg.GapDetection.Timeout,
+		"maxNACKsPerCycle", h.cfg.GapDetection.MaxNACKsPerCycle,
+	)
+
+	for {
+		select {
+		case <-ctx.Done():
+			logger.Info("gap check loop stopped (context cancelled)")
+			return
+		case <-ps.IngestionDone:
+			logger.Info("gap check loop stopped (ingestion done)")
+			return
+		case <-ticker.C:
+		}
+
+		gaps := ps.GapTracker.CheckGaps()
+		if len(gaps) == 0 {
+			continue
+		}
+
+		// Obtém control conn do agent para enviar NACKs
+		ctrlRaw, hasCtrl := h.controlConns.Load(ps.AgentName)
+		if !hasCtrl {
+			logger.Warn("gap detected but no control channel available",
+				"gaps", gaps, "agent", ps.AgentName)
+			continue
+		}
+		cci := ctrlRaw.(*ControlConnInfo)
+
+		muRaw, hasMu := h.controlConnsMu.Load(ps.AgentName)
+		if !hasMu {
+			continue
+		}
+		mu := muRaw.(*sync.Mutex)
+
+		for _, seq := range gaps {
+			mu.Lock()
+			err := protocol.WriteControlNACK(cci.Conn, seq, ps.SessionID)
+			mu.Unlock()
+
+			if err != nil {
+				logger.Warn("failed to send ControlNACK",
+					"missingSeq", seq, "error", err)
+				break // conn provavelmente morreu, não insiste
+			}
+
+			logger.Info("nack_sent",
+				"missingSeq", seq,
+				"session", ps.SessionID,
+				"pendingGaps", ps.GapTracker.PendingGaps(),
+			)
+		}
+	}
 }
 
 // handleBackup processa uma sessão de backup completa.
@@ -2019,6 +2138,7 @@ type ParallelSession struct {
 	AutoScaleInfo     atomic.Value  // *observability.AutoScaleInfo (atualizado via ControlAutoScaleStats)
 	IngestionDone     chan struct{} // fechado quando agent envia ControlIngestionDone
 	ingestionOnce     sync.Once     // garante close único do IngestionDone
+	GapTracker        *GapTracker   // detector proativo de chunks faltantes (nil quando gap_detection desabilitado)
 	Logger            *slog.Logger  // Session logger (enriquecido com session_log_dir quando habilitado)
 }
 
@@ -2092,6 +2212,16 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		CreatedAt:     now,
 		IngestionDone: make(chan struct{}),
 	}
+
+	// Inicializa gap tracker se habilitado na config
+	if h.cfg.GapDetection.Enabled {
+		pSession.GapTracker = NewGapTracker(
+			sessionID,
+			h.cfg.GapDetection.Timeout,
+			h.cfg.GapDetection.MaxNACKsPerCycle,
+			logger,
+		)
+	}
 	pSession.Logger = logger // session logger (com fan-out para arquivo quando habilitado)
 	pSession.LastActivity.Store(now.UnixNano())
 	h.sessions.Store(sessionID, pSession)
@@ -2114,6 +2244,14 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		h.sessions.Delete(sessionID)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
 		return
+	}
+
+	// Inicia gap check loop se gap detection está habilitado.
+	// A goroutine roda até o contexto ser cancelado ou IngestionDone sinalizado.
+	if pSession.GapTracker != nil {
+		gapCtx, gapCancel := context.WithCancel(ctx)
+		defer gapCancel()
+		go h.gapCheckLoop(gapCtx, pSession)
 	}
 
 	// Espera sinal explícito do agent (ControlIngestionDone) ou timeout.
@@ -2298,6 +2436,11 @@ func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, read
 			"length", hdr.Length,
 			"totalBytes", bytesReceived,
 		)
+
+		// Registra chunk no gap tracker para detecção de gaps
+		if session.GapTracker != nil {
+			session.GapTracker.RecordChunk(hdr.GlobalSeq)
+		}
 
 		// Per-stream stats: incrementa tráfego e atualiza last activity
 		if counter, ok := session.StreamTrafficIn.Load(streamIndex); ok {
