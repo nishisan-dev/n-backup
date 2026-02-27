@@ -89,6 +89,10 @@ jobs:
     needs: release
 
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -100,8 +104,32 @@ jobs:
           cat checksums-*.txt | sort > checksums.txt
           rm checksums-*.txt
 
+      - name: Generate release notes
+        id: notes
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          PREV_TAG=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || echo "")
+
+          if [ -n "$PREV_TAG" ]; then
+            COMMITS=$(git log --pretty=format:"- %s" "${PREV_TAG}..${TAG}")
+            DIFF_URL="https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${TAG}"
+          else
+            COMMITS=$(git log --pretty=format:"- %s" "${TAG}")
+            DIFF_URL="https://github.com/${{ github.repository }}/commits/${TAG}"
+          fi
+
+          {
+            echo "body<<RELEASE_EOF"
+            echo "## O que mudou"
+            echo ""
+            echo "${COMMITS}"
+            echo ""
+            echo "**Full Changelog**: ${DIFF_URL}"
+            echo "RELEASE_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body: ${{ steps.notes.outputs.body }}
           files: dist/*
