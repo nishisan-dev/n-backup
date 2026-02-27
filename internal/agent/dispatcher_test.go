@@ -372,6 +372,7 @@ func TestAutoScaler_Adaptive_ProbeSuccessKeepsStream(t *testing.T) {
 
 	as.probeState = probeProbing
 	as.probeBaseline = 100
+	as.probeStream = 1
 	as.probeWindows = probeWindowsRequired - 1
 
 	rates := RateSample{
@@ -427,6 +428,7 @@ func TestAutoScaler_Adaptive_ProbeFailRevertsStream(t *testing.T) {
 
 	as.probeState = probeProbing
 	as.probeBaseline = 100
+	as.probeStream = 1
 	as.probeWindows = probeWindowsRequired - 1
 
 	rates := RateSample{
@@ -503,6 +505,69 @@ func TestAutoScaler_Adaptive_ScaleDownSetsCooldown(t *testing.T) {
 	snap := as.Snapshot()
 	if snap.State != protocol.AutoScaleStateScaleDown {
 		t.Fatalf("expected snapshot state ScaleDown, got %d", snap.State)
+	}
+}
+
+func TestAutoScaler_ScaleDownSkipsInactiveHole(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	d := NewDispatcher(DispatcherConfig{
+		MaxStreams:  4,
+		BufferSize:  1024 * 1024,
+		ChunkSize:   1024,
+		SessionID:   "test-scale-down-hole",
+		ServerAddr:  "localhost:9847",
+		AgentName:   "test-agent",
+		StorageName: "test-storage",
+		Logger:      logger,
+		PrimaryConn: nil,
+	})
+
+	activateStreamManually(d, 0, &mockConn{})
+	activateStreamManually(d, 2, &mockConn{})
+	d.streams[1].dead.Store(true)
+
+	as := NewAutoScaler(AutoScalerConfig{
+		Dispatcher: d,
+		Logger:     logger,
+	})
+
+	as.scaleDown("test")
+
+	if d.streams[2].active.Load() {
+		t.Fatal("expected highest active stream to be deactivated")
+	}
+	if !d.streams[0].active.Load() {
+		t.Fatal("expected stream 0 to remain active")
+	}
+	if d.ActiveStreams() != 1 {
+		t.Fatalf("expected 1 active stream after scale-down, got %d", d.ActiveStreams())
+	}
+}
+
+func TestDispatcher_ActivateStreamRejectsDeadStream(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	d := NewDispatcher(DispatcherConfig{
+		MaxStreams:  2,
+		BufferSize:  1024 * 1024,
+		ChunkSize:   1024,
+		SessionID:   "test-dead-activate",
+		ServerAddr:  "localhost:9847",
+		AgentName:   "test-agent",
+		StorageName: "test-storage",
+		Logger:      logger,
+		PrimaryConn: nil,
+	})
+
+	d.streams[1].dead.Store(true)
+
+	err := d.ActivateStream(1)
+	if err == nil {
+		t.Fatal("expected error when activating dead stream")
+	}
+	if d.ActiveStreams() != 0 {
+		t.Fatalf("expected no active streams, got %d", d.ActiveStreams())
 	}
 }
 

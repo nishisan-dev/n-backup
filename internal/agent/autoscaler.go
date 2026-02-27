@@ -48,6 +48,7 @@ type AutoScaler struct {
 	// Probe state (modo adaptive)
 	probeState    int     // 0=idle, 1=probing, 2=cooldown
 	probeBaseline float64 // throughput baseline antes do probe (bytes/s)
+	probeStream   int     // índice ativado no probe atual (-1 quando nenhum)
 	probeWindows  int     // janelas decorridas no probe
 	probeCooldown int     // janelas restantes de cooldown
 
@@ -97,11 +98,12 @@ func NewAutoScaler(cfg AutoScalerConfig) *AutoScaler {
 	}
 
 	return &AutoScaler{
-		dispatcher: cfg.Dispatcher,
-		interval:   cfg.Interval,
-		hysteresis: cfg.Hysteresis,
-		logger:     cfg.Logger,
-		mode:       cfg.Mode,
+		dispatcher:  cfg.Dispatcher,
+		interval:    cfg.Interval,
+		hysteresis:  cfg.Hysteresis,
+		logger:      cfg.Logger,
+		mode:        cfg.Mode,
+		probeStream: -1,
 	}
 }
 
@@ -266,15 +268,26 @@ func (as *AutoScaler) evaluateAdaptive(efficiency float64, rates RateSample, act
 				as.probeState = probeProbing
 				as.scaleUpCount = 0
 
-				nextIdx := active
+				nextIdx := as.dispatcher.NextActivatableStream()
+				if nextIdx < 0 {
+					as.logger.Debug("auto-scaler: no stream available for probe")
+					as.probeState = probeIdle
+					as.probeBaseline = 0
+					as.probeStream = -1
+					as.updateSnapshot(efficiency, rates, active, protocol.AutoScaleStateStable, false)
+					return
+				}
 				if err := as.dispatcher.ActivateStream(nextIdx); err != nil {
 					as.logger.Warn("auto-scaler: probe activation failed",
 						"stream", nextIdx, "error", err)
 					as.probeState = probeIdle
+					as.probeBaseline = 0
+					as.probeStream = -1
 					as.probeCooldown = probeCooldownWindows
 					as.updateSnapshot(efficiency, rates, active, protocol.AutoScaleStateStable, false)
 					return
 				}
+				as.probeStream = nextIdx
 
 				as.logger.Info("auto-scaler: probe started",
 					"baseline", as.probeBaseline/(1024*1024),
@@ -310,12 +323,12 @@ func (as *AutoScaler) evaluateAdaptive(efficiency float64, rates RateSample, act
 				)
 				as.probeState = probeIdle
 				as.probeBaseline = 0
+				as.probeStream = -1
 				as.updateSnapshot(efficiency, rates, as.dispatcher.ActiveStreams(), protocol.AutoScaleStateScalingUp, false)
 			} else {
 				// Probe failed — reverte
-				currentActive := as.dispatcher.ActiveStreams()
-				if currentActive > 1 {
-					as.dispatcher.DeactivateStream(currentActive - 1)
+				if as.probeStream >= 0 {
+					as.dispatcher.DeactivateStream(as.probeStream)
 				}
 				as.logger.Info("auto-scaler: probe failed, reverting",
 					"gain", gain,
@@ -325,6 +338,7 @@ func (as *AutoScaler) evaluateAdaptive(efficiency float64, rates RateSample, act
 				)
 				as.probeState = probeIdle
 				as.probeBaseline = 0
+				as.probeStream = -1
 				as.probeCooldown = probeCooldownWindows
 				as.updateSnapshot(efficiency, rates, as.dispatcher.ActiveStreams(), protocol.AutoScaleStateStable, false)
 			}
@@ -344,7 +358,11 @@ func (as *AutoScaler) scaleUp(reason string) {
 		return
 	}
 
-	nextIdx := active
+	nextIdx := as.dispatcher.NextActivatableStream()
+	if nextIdx < 0 {
+		as.logger.Debug("auto-scaler: no stream available for scale-up")
+		return
+	}
 	if err := as.dispatcher.ActivateStream(nextIdx); err != nil {
 		as.logger.Warn("auto-scaler: scale-up failed", "stream", nextIdx, "error", err)
 		return
@@ -368,7 +386,11 @@ func (as *AutoScaler) scaleDown(reason string) {
 		return
 	}
 
-	lastIdx := active - 1
+	lastIdx := as.dispatcher.LastActiveStream()
+	if lastIdx <= 0 {
+		as.logger.Debug("auto-scaler: no eligible stream for scale-down")
+		return
+	}
 	as.dispatcher.DeactivateStream(lastIdx)
 
 	as.logger.Info("auto-scaler: scale-down",

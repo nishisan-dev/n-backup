@@ -631,6 +631,9 @@ func (d *Dispatcher) ActivateStream(streamIdx int) error {
 	}
 
 	stream := d.streams[streamIdx]
+	if stream.dead.Load() {
+		return fmt.Errorf("stream %d is permanently dead", streamIdx)
+	}
 	if stream.active.Load() {
 		return nil // já ativo
 	}
@@ -713,6 +716,29 @@ func (d *Dispatcher) DeactivateStream(streamIdx int) {
 // ActiveStreams retorna o número de streams ativos.
 func (d *Dispatcher) ActiveStreams() int {
 	return int(atomic.LoadInt32(&d.activeCount))
+}
+
+// NextActivatableStream retorna o primeiro índice livre que ainda não foi marcado
+// como permanentemente morto. Retorna -1 se não houver candidatos.
+func (d *Dispatcher) NextActivatableStream() int {
+	for i := 0; i < d.maxStreams; i++ {
+		stream := d.streams[i]
+		if stream.active.Load() || stream.dead.Load() {
+			continue
+		}
+		return i
+	}
+	return -1
+}
+
+// LastActiveStream retorna o maior índice atualmente ativo. Retorna -1 se não houver.
+func (d *Dispatcher) LastActiveStream() int {
+	for i := d.maxStreams - 1; i >= 0; i-- {
+		if d.streams[i].active.Load() {
+			return i
+		}
+	}
+	return -1
 }
 
 // DrainStream prepara um stream para flow rotation graceful.
