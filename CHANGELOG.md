@@ -11,6 +11,23 @@ e o versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v2.8.4] — 2026-02-26
+
+Session logging por arquivo dedicado e diagnóstico aprimorado de assembly.
+
+### Adicionado
+- **Session Logger (`session_log_dir`)**: novo campo opcional em `logging` que cria um arquivo de log dedicado por sessão de backup paralelo. Fan-out: grava tanto no logger global quanto no arquivo `{session_log_dir}/{agent}/{sessionID}.log`. Arquivo removido automaticamente em backups OK, retido para post-mortem em falhas.
+- **Log `chunk_received` (DEBUG)**: cada chunk recebido por stream é logado com `globalSeq`, `length`, `stream` e `totalBytes`. Capturado no arquivo de sessão sem poluir stdout.
+- **Log `pre_finalize_state`**: dump do estado do assembler antes do Finalize (nextExpectedSeq, pendingChunks, pendingMemBytes, totalBytes, totalChunks, phase).
+- **Log `missing_chunk_in_assembly`**: quando chunk está faltando no lazy assembly, agora loga `missingSeq`, `lazyMaxSeq` e `totalPending` para diagnóstico de gaps.
+- **Resumo enriquecido do Finalize**: inclui `mode` e `pendingAtFinalize` no log de assembly finalizado.
+- **`sessionID` no log de falha de drain do ChunkBuffer**: facilita correlação com session logs.
+
+### Motivação
+> Backups paralelos longos (~33GB, ~2h) falhavam com `missing chunk seq N in lazy assembly` sem contexto suficiente para diagnóstico. Os logs globais misturavam eventos de múltiplas sessões e streams, dificultando a análise post-mortem. O session logger resolve isso criando um arquivo isolado por sessão com rastreamento chunk a chunk.
+
+---
+
 ## [v2.7.0] — 2026-02-23
 
 Buffer de chunks em memória para suavizar I/O em discos lentos.
