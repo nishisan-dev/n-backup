@@ -6,6 +6,7 @@ package observability
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"runtime"
 	"strconv"
@@ -50,6 +51,7 @@ func NewRouter(metrics HandlerMetrics, cfg *config.ServerConfig, acl *ACL, store
 	// API v1
 	mux.HandleFunc("GET /api/v1/health", handleHealth)
 	mux.HandleFunc("GET /api/v1/metrics", makeMetricsHandler(metrics))
+	mux.HandleFunc("GET /metrics", makePrometheusHandler(metrics))
 	mux.HandleFunc("GET /api/v1/sessions", makeSessionsHandler(metrics))
 	mux.HandleFunc("GET /api/v1/sessions/{id}", makeSessionDetailHandler(metrics))
 	mux.HandleFunc("GET /api/v1/agents", makeAgentsHandler(metrics))
@@ -115,6 +117,127 @@ func makeMetricsHandler(metrics HandlerMetrics) http.HandlerFunc {
 			ChunkBuffer:    data.ChunkBuffer,
 		}
 		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+// makePrometheusHandler retorna um handler que expõe métricas em formato texto
+// compatível com Prometheus, sem depender de client_golang.
+func makePrometheusHandler(metrics HandlerMetrics) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		data := metrics.MetricsSnapshot()
+		sessions := metrics.SessionsSnapshot()
+		agents := metrics.ConnectedAgents()
+
+		if sessions == nil {
+			sessions = []SessionSummary{}
+		}
+		if agents == nil {
+			agents = []AgentInfo{}
+		}
+
+		var singleSessions int
+		var parallelSessions int
+		var activeStreams int
+		for _, s := range sessions {
+			switch s.Mode {
+			case "parallel":
+				parallelSessions++
+				activeStreams += s.ActiveStreams
+			default:
+				singleSessions++
+				activeStreams++
+			}
+		}
+
+		var mem runtime.MemStats
+		runtime.ReadMemStats(&mem)
+
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+
+		fmt.Fprintf(w, "# HELP nbackup_server_active_connections Active TLS backup/control connections currently open.\n")
+		fmt.Fprintf(w, "# TYPE nbackup_server_active_connections gauge\n")
+		fmt.Fprintf(w, "nbackup_server_active_connections %d\n", data.ActiveConns)
+
+		fmt.Fprintf(w, "# HELP nbackup_server_active_sessions Active backup sessions currently tracked.\n")
+		fmt.Fprintf(w, "# TYPE nbackup_server_active_sessions gauge\n")
+		fmt.Fprintf(w, "nbackup_server_active_sessions %d\n", data.Sessions)
+
+		fmt.Fprintf(w, "# HELP nbackup_server_active_sessions_by_mode Active sessions split by transfer mode.\n")
+		fmt.Fprintf(w, "# TYPE nbackup_server_active_sessions_by_mode gauge\n")
+		fmt.Fprintf(w, "nbackup_server_active_sessions_by_mode{mode=\"single\"} %d\n", singleSessions)
+		fmt.Fprintf(w, "nbackup_server_active_sessions_by_mode{mode=\"parallel\"} %d\n", parallelSessions)
+
+		fmt.Fprintf(w, "# HELP nbackup_server_active_streams Active data streams across all running sessions.\n")
+		fmt.Fprintf(w, "# TYPE nbackup_server_active_streams gauge\n")
+		fmt.Fprintf(w, "nbackup_server_active_streams %d\n", activeStreams)
+
+		fmt.Fprintf(w, "# HELP nbackup_server_connected_agents Agents currently connected via control channel.\n")
+		fmt.Fprintf(w, "# TYPE nbackup_server_connected_agents gauge\n")
+		fmt.Fprintf(w, "nbackup_server_connected_agents %d\n", len(agents))
+
+		fmt.Fprintf(w, "# HELP nbackup_server_runtime_goroutines Number of live goroutines.\n")
+		fmt.Fprintf(w, "# TYPE nbackup_server_runtime_goroutines gauge\n")
+		fmt.Fprintf(w, "nbackup_server_runtime_goroutines %d\n", runtime.NumGoroutine())
+
+		fmt.Fprintf(w, "# HELP nbackup_server_runtime_heap_alloc_bytes Bytes of allocated heap objects.\n")
+		fmt.Fprintf(w, "# TYPE nbackup_server_runtime_heap_alloc_bytes gauge\n")
+		fmt.Fprintf(w, "nbackup_server_runtime_heap_alloc_bytes %d\n", mem.HeapAlloc)
+
+		fmt.Fprintf(w, "# HELP nbackup_server_runtime_heap_sys_bytes Bytes of heap memory obtained from the OS.\n")
+		fmt.Fprintf(w, "# TYPE nbackup_server_runtime_heap_sys_bytes gauge\n")
+		fmt.Fprintf(w, "nbackup_server_runtime_heap_sys_bytes %d\n", mem.HeapSys)
+
+		fmt.Fprintf(w, "# HELP nbackup_server_runtime_gc_cycles_total Total completed GC cycles.\n")
+		fmt.Fprintf(w, "# TYPE nbackup_server_runtime_gc_cycles_total counter\n")
+		fmt.Fprintf(w, "nbackup_server_runtime_gc_cycles_total %d\n", mem.NumGC)
+
+		if data.ChunkBuffer != nil {
+			cb := data.ChunkBuffer
+			enabled := 0
+			if cb.Enabled {
+				enabled = 1
+			}
+
+			fmt.Fprintf(w, "# HELP nbackup_server_chunk_buffer_enabled Whether the shared chunk buffer is enabled.\n")
+			fmt.Fprintf(w, "# TYPE nbackup_server_chunk_buffer_enabled gauge\n")
+			fmt.Fprintf(w, "nbackup_server_chunk_buffer_enabled %d\n", enabled)
+
+			fmt.Fprintf(w, "# HELP nbackup_server_chunk_buffer_capacity_bytes Configured chunk buffer capacity in bytes.\n")
+			fmt.Fprintf(w, "# TYPE nbackup_server_chunk_buffer_capacity_bytes gauge\n")
+			fmt.Fprintf(w, "nbackup_server_chunk_buffer_capacity_bytes %d\n", cb.CapacityBytes)
+
+			fmt.Fprintf(w, "# HELP nbackup_server_chunk_buffer_in_flight_bytes Bytes currently in flight inside the chunk buffer.\n")
+			fmt.Fprintf(w, "# TYPE nbackup_server_chunk_buffer_in_flight_bytes gauge\n")
+			fmt.Fprintf(w, "nbackup_server_chunk_buffer_in_flight_bytes %d\n", cb.InFlightBytes)
+
+			fmt.Fprintf(w, "# HELP nbackup_server_chunk_buffer_fill_ratio Fraction of buffer currently occupied.\n")
+			fmt.Fprintf(w, "# TYPE nbackup_server_chunk_buffer_fill_ratio gauge\n")
+			fmt.Fprintf(w, "nbackup_server_chunk_buffer_fill_ratio %g\n", cb.FillRatio)
+
+			fmt.Fprintf(w, "# HELP nbackup_server_chunk_buffer_total_pushed_total Total chunks pushed into the shared chunk buffer.\n")
+			fmt.Fprintf(w, "# TYPE nbackup_server_chunk_buffer_total_pushed_total counter\n")
+			fmt.Fprintf(w, "nbackup_server_chunk_buffer_total_pushed_total %d\n", cb.TotalPushed)
+
+			fmt.Fprintf(w, "# HELP nbackup_server_chunk_buffer_total_drained_total Total chunks drained from the shared chunk buffer.\n")
+			fmt.Fprintf(w, "# TYPE nbackup_server_chunk_buffer_total_drained_total counter\n")
+			fmt.Fprintf(w, "nbackup_server_chunk_buffer_total_drained_total %d\n", cb.TotalDrained)
+
+			fmt.Fprintf(w, "# HELP nbackup_server_chunk_buffer_fallbacks_total Total synchronous fallbacks when chunk buffer push failed.\n")
+			fmt.Fprintf(w, "# TYPE nbackup_server_chunk_buffer_fallbacks_total counter\n")
+			fmt.Fprintf(w, "nbackup_server_chunk_buffer_fallbacks_total %d\n", cb.TotalFallbacks)
+
+			fmt.Fprintf(w, "# HELP nbackup_server_chunk_buffer_backpressure_events_total Total backpressure events observed in the chunk buffer.\n")
+			fmt.Fprintf(w, "# TYPE nbackup_server_chunk_buffer_backpressure_events_total counter\n")
+			fmt.Fprintf(w, "nbackup_server_chunk_buffer_backpressure_events_total %d\n", cb.BackpressureEvents)
+
+			fmt.Fprintf(w, "# HELP nbackup_server_chunk_buffer_drain_ratio Ratio of drained chunks to pushed chunks.\n")
+			fmt.Fprintf(w, "# TYPE nbackup_server_chunk_buffer_drain_ratio gauge\n")
+			fmt.Fprintf(w, "nbackup_server_chunk_buffer_drain_ratio %g\n", cb.DrainRatio)
+
+			fmt.Fprintf(w, "# HELP nbackup_server_chunk_buffer_drain_mbps Current chunk buffer drain rate in MB/s.\n")
+			fmt.Fprintf(w, "# TYPE nbackup_server_chunk_buffer_drain_mbps gauge\n")
+			fmt.Fprintf(w, "nbackup_server_chunk_buffer_drain_mbps %g\n", cb.DrainRateMBs)
+		}
 	}
 }
 

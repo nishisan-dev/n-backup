@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -140,6 +141,66 @@ func TestMetrics_ReturnsData(t *testing.T) {
 	}
 	if resp.Sessions != 2 {
 		t.Errorf("expected sessions 2, got %d", resp.Sessions)
+	}
+}
+
+func TestPrometheusMetrics_ReturnsTextFormat(t *testing.T) {
+	mock := newMockMetrics()
+	mock.data = MetricsData{
+		ActiveConns: 2,
+		Sessions:    2,
+		ChunkBuffer: &ChunkBufferDTO{
+			Enabled:            true,
+			CapacityBytes:      1024,
+			InFlightBytes:      256,
+			FillRatio:          0.25,
+			TotalPushed:        10,
+			TotalDrained:       8,
+			TotalFallbacks:     1,
+			BackpressureEvents: 3,
+			DrainRatio:         0.8,
+			DrainRateMBs:       12.5,
+		},
+	}
+	mock.sessions = []SessionSummary{
+		{SessionID: "single-1", Mode: "single", ActiveStreams: 1},
+		{SessionID: "parallel-1", Mode: "parallel", ActiveStreams: 3},
+	}
+	mock.agents = []AgentInfo{
+		{Name: "agent-a"},
+		{Name: "agent-b"},
+	}
+
+	router := NewRouter(mock, testCfg(), localhostACL(t), nil)
+
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); !strings.Contains(got, "text/plain") {
+		t.Fatalf("expected text/plain content type, got %q", got)
+	}
+
+	body := rec.Body.String()
+	for _, want := range []string{
+		"# HELP nbackup_server_active_connections",
+		"nbackup_server_active_connections 2",
+		"nbackup_server_active_sessions 2",
+		"nbackup_server_active_sessions_by_mode{mode=\"single\"} 1",
+		"nbackup_server_active_sessions_by_mode{mode=\"parallel\"} 1",
+		"nbackup_server_active_streams 4",
+		"nbackup_server_connected_agents 2",
+		"nbackup_server_chunk_buffer_enabled 1",
+		"nbackup_server_chunk_buffer_total_pushed_total 10",
+		"nbackup_server_chunk_buffer_drain_mbps 12.5",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected metrics body to contain %q\nbody:\n%s", want, body)
+		}
 	}
 }
 
