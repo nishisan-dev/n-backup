@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"net"
@@ -75,6 +76,11 @@ type Dispatcher struct {
 	// Diagnóstico producer/consumer: identifica gargalo
 	producerBlockedNs int64 // atomic — ns que o producer ficou bloqueado em rb.Write (buffer cheio = rede lenta)
 	senderIdleNs      int64 // atomic — ns que os senders ficaram bloqueados em rb.ReadAt (buffer vazio = producer lento)
+
+	// chunkMap mapeia globalSeq → localização no ring buffer para retransmissão via NACK.
+	// Consultado apenas no caminho de retransmissão (raro), não impacta performance normal.
+	chunkMap   map[uint32]chunkLocation
+	chunkMapMu sync.RWMutex
 }
 
 // ParallelStream representa um stream individual com seu ring buffer e conexão.
@@ -93,6 +99,14 @@ type ParallelStream struct {
 	dead          atomic.Bool // permanentemente morto (esgotou retries)
 	senderDone    chan struct{}
 	senderErr     chan error
+}
+
+// chunkLocation armazena onde um chunk foi escrito no ring buffer de um stream.
+// Usado pelo RetransmitChunk para localizar e reenviar chunks perdidos.
+type chunkLocation struct {
+	streamIdx int   // índice do stream cujo ring buffer contém o chunk
+	rbOffset  int64 // offset absoluto do ChunkHeader no ring buffer
+	length    int64 // tamanho total (ChunkHeaderSize + len(data))
 }
 
 // DispatcherConfig contém os parâmetros para criar um Dispatcher.
@@ -129,6 +143,7 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 		lastSampleAt:   time.Now(),
 		pending:        make([]byte, cfg.ChunkSize),
 		pendingLen:     0,
+		chunkMap:       make(map[uint32]chunkLocation),
 	}
 
 	// Inicializa todos os streams com ring buffers (inativos)
@@ -226,6 +241,9 @@ func (d *Dispatcher) emitChunk(data []byte) error {
 	hdr[6] = byte(l >> 8)
 	hdr[7] = byte(l)
 
+	// Captura offset antes do write para registrar no chunkMap
+	headerOffset := stream.rb.Head()
+
 	// Diagnóstico: mede tempo bloqueado em rb.Write (indica buffer cheio = rede lenta)
 	writeStart := time.Now()
 	if _, err := stream.rb.Write(hdr); err != nil {
@@ -240,7 +258,117 @@ func (d *Dispatcher) emitChunk(data []byte) error {
 		atomic.AddInt64(&d.producerBlockedNs, elapsed.Nanoseconds())
 	}
 
+	// Registra localização no chunkMap para suportar retransmissão via NACK
+	chunkLen := int64(protocol.ChunkHeaderSize) + int64(len(data))
+	d.chunkMapMu.Lock()
+	d.chunkMap[seq] = chunkLocation{
+		streamIdx: int(stream.index),
+		rbOffset:  headerOffset,
+		length:    chunkLen,
+	}
+	d.chunkMapMu.Unlock()
+
 	return nil
+}
+
+// RetransmitChunk tenta retransmitir um chunk perdido identificado pelo globalSeq.
+// Consulta o chunkMap para localizar o chunk no ring buffer do stream original.
+// Se o chunk ainda está no buffer, lê os dados e envia por qualquer stream ativo.
+// Retorna (true, nil) se retransmitido com sucesso, (false, nil) se irrecuperável.
+func (d *Dispatcher) RetransmitChunk(globalSeq uint32) (bool, error) {
+	// Lookup no chunkMap
+	d.chunkMapMu.RLock()
+	loc, exists := d.chunkMap[globalSeq]
+	d.chunkMapMu.RUnlock()
+
+	if !exists {
+		d.logger.Warn("retransmit: chunk not found in chunkMap",
+			"globalSeq", globalSeq)
+		return false, nil
+	}
+
+	// Verifica se o chunk ainda está no ring buffer
+	stream := d.streams[loc.streamIdx]
+	if !stream.rb.ContainsRange(loc.rbOffset, loc.length) {
+		d.logger.Error("retransmit: chunk expired from ring buffer",
+			"globalSeq", globalSeq,
+			"stream", loc.streamIdx,
+			"rbOffset", loc.rbOffset,
+			"bufferTail", stream.rb.Tail(),
+		)
+		return false, nil
+	}
+
+	// Lê os dados completos (ChunkHeader + payload) do ring buffer
+	buf := make([]byte, loc.length)
+	n, err := stream.rb.ReadAt(loc.rbOffset, buf)
+	if err != nil {
+		d.logger.Error("retransmit: failed to read from ring buffer",
+			"globalSeq", globalSeq, "error", err)
+		return false, fmt.Errorf("reading chunk %d from ring buffer: %w", globalSeq, err)
+	}
+	if int64(n) < loc.length {
+		d.logger.Error("retransmit: short read from ring buffer",
+			"globalSeq", globalSeq, "expected", loc.length, "got", n)
+		return false, nil
+	}
+
+	// Encontra qualquer stream ativo para enviar a retransmissão
+	var targetStream *ParallelStream
+	for _, s := range d.streams {
+		if s.active.Load() && !s.dead.Load() {
+			targetStream = s
+			break
+		}
+	}
+	if targetStream == nil {
+		return false, ErrAllStreamsDead
+	}
+
+	// Envia diretamente pela conexão do stream (com write deadline)
+	targetStream.connMu.Lock()
+	conn := targetStream.conn
+	targetStream.connMu.Unlock()
+
+	if conn == nil {
+		return false, fmt.Errorf("retransmit: stream %d has no connection", targetStream.index)
+	}
+
+	if netConn, ok := conn.(net.Conn); ok {
+		netConn.SetWriteDeadline(time.Now().Add(writeDeadline))
+	}
+
+	if _, err := io.Copy(conn, io.NewSectionReader(
+		&byteReaderAt{data: buf}, 0, int64(len(buf)),
+	)); err != nil {
+		d.logger.Error("retransmit: failed to write to stream",
+			"globalSeq", globalSeq, "stream", targetStream.index, "error", err)
+		return false, fmt.Errorf("retransmitting chunk %d: %w", globalSeq, err)
+	}
+
+	d.logger.Info("retransmit: chunk sent successfully",
+		"globalSeq", globalSeq,
+		"stream", targetStream.index,
+		"bytes", loc.length,
+	)
+
+	return true, nil
+}
+
+// byteReaderAt implements io.ReaderAt for a byte slice.
+type byteReaderAt struct {
+	data []byte
+}
+
+func (r *byteReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if off >= int64(len(r.data)) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
 }
 
 // startSenderWithRetry inicia a goroutine sender para um stream com retry automático.
