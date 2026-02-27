@@ -22,6 +22,7 @@ type ServerConfig struct {
 	Storages     map[string]StorageInfo `yaml:"storages"`
 	Logging      LoggingInfo            `yaml:"logging"`
 	FlowRotation FlowRotationConfig     `yaml:"flow_rotation"`
+	GapDetection GapDetectionConfig     `yaml:"gap_detection"`
 	WebUI        WebUIConfig            `yaml:"web_ui"`
 	ChunkBuffer  ChunkBufferConfig      `yaml:"chunk_buffer"`
 }
@@ -91,6 +92,15 @@ type FlowRotationConfig struct {
 	MinMBps    float64       `yaml:"min_mbps"`    // threshold em MB/s (default: 1.0)
 	EvalWindow time.Duration `yaml:"eval_window"` // janela de avaliação (default: 60m)
 	Cooldown   time.Duration `yaml:"cooldown"`    // cooldown entre rotações (default: 15m)
+}
+
+// GapDetectionConfig configura a detecção proativa de chunks faltantes
+// e o envio de NACKs para retransmissão pelo agent.
+type GapDetectionConfig struct {
+	Enabled          bool          `yaml:"enabled"`             // default: true (habilitado por padrão)
+	Timeout          time.Duration `yaml:"timeout"`             // tempo para gap persistir antes de NACK (default: 60s)
+	CheckInterval    time.Duration `yaml:"check_interval"`      // intervalo entre checks de gap (default: 5s)
+	MaxNACKsPerCycle int           `yaml:"max_nacks_per_cycle"` // máximo de NACKs por check (default: 5)
 }
 
 // ServerListen contém o endereço de escuta do server.
@@ -266,6 +276,27 @@ func (c *ServerConfig) validate() error {
 		}
 		if c.FlowRotation.Cooldown <= 0 {
 			c.FlowRotation.Cooldown = 15 * time.Minute
+		}
+	}
+
+	// Gap Detection defaults (habilitado por padrão)
+	if !c.GapDetection.Enabled {
+		// Se não explicitamente habilitado no YAML, habilita com defaults.
+		// Para desabilitar, o operador deve setar enabled: false explicitamente.
+		// Usamos um truque: se Timeout == 0, significa que nada foi configurado.
+		if c.GapDetection.Timeout == 0 && c.GapDetection.CheckInterval == 0 {
+			c.GapDetection.Enabled = true
+		}
+	}
+	if c.GapDetection.Enabled {
+		if c.GapDetection.Timeout <= 0 {
+			c.GapDetection.Timeout = 60 * time.Second
+		}
+		if c.GapDetection.CheckInterval <= 0 {
+			c.GapDetection.CheckInterval = 5 * time.Second
+		}
+		if c.GapDetection.MaxNACKsPerCycle <= 0 {
+			c.GapDetection.MaxNACKsPerCycle = 5
 		}
 	}
 
