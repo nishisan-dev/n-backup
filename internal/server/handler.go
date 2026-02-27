@@ -2019,6 +2019,7 @@ type ParallelSession struct {
 	AutoScaleInfo     atomic.Value  // *observability.AutoScaleInfo (atualizado via ControlAutoScaleStats)
 	IngestionDone     chan struct{} // fechado quando agent envia ControlIngestionDone
 	ingestionOnce     sync.Once     // garante close único do IngestionDone
+	Logger            *slog.Logger  // Session logger (enriquecido com session_log_dir quando habilitado)
 }
 
 // handleParallelBackup processa um backup paralelo.
@@ -2091,6 +2092,7 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		CreatedAt:     now,
 		IngestionDone: make(chan struct{}),
 	}
+	pSession.Logger = logger // session logger (com fan-out para arquivo quando habilitado)
 	pSession.LastActivity.Store(now.UnixNano())
 	h.sessions.Store(sessionID, pSession)
 
@@ -2433,7 +2435,10 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 	pSession.streamReadyOnce.Do(func() { close(pSession.StreamReady) })
 
 	// Recebe dados do stream com ChunkHeader framing
-	bytesReceived, err := h.receiveParallelStream(streamCtx, conn, conn, conn, pj.StreamIndex, pSession, logger)
+	// Usa o session logger da ParallelSession (com fan-out para arquivo de sessão)
+	// em vez do logger da conexão TCP do stream.
+	streamLogger := pSession.Logger.With("stream", pj.StreamIndex, "remote", conn.RemoteAddr().String())
+	bytesReceived, err := h.receiveParallelStream(streamCtx, conn, conn, conn, pj.StreamIndex, pSession, streamLogger)
 	pSession.StreamWg.Done()
 
 	if err != nil {
