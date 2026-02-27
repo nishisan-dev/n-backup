@@ -1348,15 +1348,15 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 				"missingSeq", result.MissingSeq, "success", result.Success)
 
 			if result.Success {
-				// Chunk retransmitido com sucesso — gap será resolvido quando o chunk chegar via stream.
-				// ResolveGap é chamado proativamente aqui para limpar o tracker.
+				// Chunk retransmitido pelo agent. Rearma o timer do gap e aguarda a
+				// chegada real do chunk via stream antes de considerá-lo resolvido.
 				h.sessions.Range(func(_, value any) bool {
 					ps, ok := value.(*ParallelSession)
 					if !ok || ps.AgentName != agentName || ps.GapTracker == nil {
 						return true
 					}
-					ps.GapTracker.ResolveGap(result.MissingSeq)
-					logger.Info("gap resolved via retransmission", "seq", result.MissingSeq)
+					ps.GapTracker.RearmGap(result.MissingSeq)
+					logger.Info("gap retransmission accepted", "seq", result.MissingSeq)
 					return false
 				})
 			} else {
@@ -1414,7 +1414,6 @@ func (h *Handler) extractAgentName(conn net.Conn, logger *slog.Logger) string {
 //
 // A goroutine termina quando:
 // - O contexto é cancelado (sessão finalizada ou server shutdown)
-// - IngestionDone é sinalizado (agent confirmou envio completo)
 func (h *Handler) gapCheckLoop(ctx context.Context, ps *ParallelSession) {
 	interval := h.cfg.GapDetection.CheckInterval
 	if interval <= 0 {
@@ -1435,9 +1434,6 @@ func (h *Handler) gapCheckLoop(ctx context.Context, ps *ParallelSession) {
 		select {
 		case <-ctx.Done():
 			logger.Info("gap check loop stopped (context cancelled)")
-			return
-		case <-ps.IngestionDone:
-			logger.Info("gap check loop stopped (ingestion done)")
 			return
 		case <-ticker.C:
 		}
@@ -1473,6 +1469,7 @@ func (h *Handler) gapCheckLoop(ctx context.Context, ps *ParallelSession) {
 				break // conn provavelmente morreu, não insiste
 			}
 
+			ps.GapTracker.MarkNotified(seq)
 			logger.Info("nack_sent",
 				"missingSeq", seq,
 				"session", ps.SessionID,
@@ -2247,7 +2244,7 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	}
 
 	// Inicia gap check loop se gap detection está habilitado.
-	// A goroutine roda até o contexto ser cancelado ou IngestionDone sinalizado.
+	// A goroutine roda até o contexto ser cancelado no encerramento real da sessão.
 	if pSession.GapTracker != nil {
 		gapCtx, gapCancel := context.WithCancel(ctx)
 		defer gapCancel()

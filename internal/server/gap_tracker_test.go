@@ -38,6 +38,20 @@ func TestGapTracker_DetectsGapAfterTimeout(t *testing.T) {
 	}
 }
 
+func TestGapTracker_DetectsInitialGapZero(t *testing.T) {
+	gt := NewGapTracker("test-session", 50*time.Millisecond, 5, testGapLogger())
+
+	// Primeiro chunk chega fora de ordem: seq 0 ainda não chegou.
+	gt.RecordChunk(2)
+
+	time.Sleep(60 * time.Millisecond)
+
+	gaps := gt.CheckGaps()
+	if len(gaps) != 2 || gaps[0] != 0 || gaps[1] != 1 {
+		t.Fatalf("expected initial gaps [0 1], got %v", gaps)
+	}
+}
+
 func TestGapTracker_TransientGapResolved(t *testing.T) {
 	gt := NewGapTracker("test-session", 100*time.Millisecond, 5, testGapLogger())
 
@@ -114,11 +128,63 @@ func TestGapTracker_NoDuplicateNACKs(t *testing.T) {
 	if len(gaps1) != 2 {
 		t.Fatalf("expected 2 gaps on first check, got %d", len(gaps1))
 	}
+	for _, seq := range gaps1 {
+		gt.MarkNotified(seq)
+	}
 
 	// Segunda chamada: gaps já notificados, deve retornar vazio
 	gaps2 := gt.CheckGaps()
 	if len(gaps2) != 0 {
 		t.Fatalf("expected 0 gaps on second check (already notified), got %d: %v", len(gaps2), gaps2)
+	}
+}
+
+func TestGapTracker_UnsentGapRemainsEligible(t *testing.T) {
+	gt := NewGapTracker("test-session", 50*time.Millisecond, 5, testGapLogger())
+
+	gt.RecordChunk(0)
+	gt.RecordChunk(2) // gap 1
+
+	time.Sleep(60 * time.Millisecond)
+
+	gaps1 := gt.CheckGaps()
+	if len(gaps1) != 1 || gaps1[0] != 1 {
+		t.Fatalf("expected first gap [1], got %v", gaps1)
+	}
+
+	// Sem MarkNotified, o NACK falhou de sair. O gap deve continuar elegível.
+	gaps2 := gt.CheckGaps()
+	if len(gaps2) != 1 || gaps2[0] != 1 {
+		t.Fatalf("expected unsent gap [1] to remain eligible, got %v", gaps2)
+	}
+}
+
+func TestGapTracker_RearmGapAllowsRetryAfterTimeout(t *testing.T) {
+	gt := NewGapTracker("test-session", 50*time.Millisecond, 5, testGapLogger())
+
+	gt.RecordChunk(0)
+	gt.RecordChunk(2) // gap 1
+
+	time.Sleep(60 * time.Millisecond)
+
+	gaps1 := gt.CheckGaps()
+	if len(gaps1) != 1 || gaps1[0] != 1 {
+		t.Fatalf("expected first gap [1], got %v", gaps1)
+	}
+
+	gt.RearmGap(1)
+
+	// Ainda dentro da nova janela, não deve reenviar NACK.
+	gaps2 := gt.CheckGaps()
+	if len(gaps2) != 0 {
+		t.Fatalf("expected no immediate retry after rearm, got %v", gaps2)
+	}
+
+	time.Sleep(60 * time.Millisecond)
+
+	gaps3 := gt.CheckGaps()
+	if len(gaps3) != 1 || gaps3[0] != 1 {
+		t.Fatalf("expected retried gap [1] after timeout, got %v", gaps3)
 	}
 }
 
@@ -131,7 +197,9 @@ func TestGapTracker_ResolveGap(t *testing.T) {
 	time.Sleep(60 * time.Millisecond)
 
 	// CheckGaps notifica gaps
-	gt.CheckGaps()
+	for _, seq := range gt.CheckGaps() {
+		gt.MarkNotified(seq)
+	}
 
 	// Resolve gap 1 via retransmissão
 	gt.ResolveGap(1)
