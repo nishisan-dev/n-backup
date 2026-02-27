@@ -65,6 +65,10 @@ type ControlChannel struct {
 	// A função deve drenar o stream e retornar.
 	onRotate func(streamIndex uint8)
 
+	// Callback chamado quando o server envia ControlNACK (solicita retransmissão).
+	// A função deve tentar retransmitir o chunk e retornar.
+	onNACK func(missingSeq uint32, sessionID string)
+
 	// Callback que retorna dados de progresso do backup em andamento.
 	// Chamado a cada ping tick para enviar ControlProgress ao server.
 	progressProvider func() (totalObjects, objectsSent uint32, walkComplete bool)
@@ -98,6 +102,12 @@ func NewControlChannel(cfg *config.AgentConfig, logger *slog.Logger) *ControlCha
 // Deve ser chamado antes de Start().
 func (cc *ControlChannel) SetOnRotate(fn func(streamIndex uint8)) {
 	cc.onRotate = fn
+}
+
+// SetOnNACK define o callback chamado quando o server envia ControlNACK.
+// Deve ser chamado antes de Start().
+func (cc *ControlChannel) SetOnNACK(fn func(missingSeq uint32, sessionID string)) {
+	cc.onNACK = fn
 }
 
 // SetProgressProvider define o callback que fornece dados de progresso do backup.
@@ -200,6 +210,28 @@ func (cc *ControlChannel) SendIngestionDone(sessionID string) error {
 
 	if err != nil {
 		cc.logger.Warn("failed to send ControlIngestionDone", "error", err, "session", sessionID)
+	}
+	return err
+}
+
+// SendRetransmitResult envia ControlRetransmitResult ao server pelo canal de controle.
+// Thread-safe via writeMu.
+func (cc *ControlChannel) SendRetransmitResult(missingSeq uint32, success bool) error {
+	cc.connMu.Lock()
+	conn := cc.conn
+	cc.connMu.Unlock()
+
+	if conn == nil {
+		return nil
+	}
+
+	cc.writeMu.Lock()
+	err := protocol.WriteControlRetransmitResult(conn, missingSeq, success)
+	cc.writeMu.Unlock()
+
+	if err != nil {
+		cc.logger.Warn("failed to send ControlRetransmitResult", "error", err,
+			"missingSeq", missingSeq, "success", success)
 	}
 	return err
 }
@@ -497,6 +529,34 @@ func (cc *ControlChannel) pingLoop() {
 							"stream", idx)
 					}
 				}(streamIdx)
+
+			case protocol.MagicControlNACK:
+				// Server solicitou retransmissão de chunk perdido
+				nack, err := protocol.ReadControlNACKPayload(conn)
+				if err != nil {
+					cc.logger.Warn("control channel: reading NACK payload", "error", err)
+					return
+				}
+
+				cc.logger.Info("control channel: received ControlNACK",
+					"missingSeq", nack.MissingSeq, "session", nack.SessionID)
+
+				// Executa em goroutine para não bloquear o reader
+				go func(n protocol.ControlNACK) {
+					defer func() {
+						if r := recover(); r != nil {
+							cc.logger.Error("control channel: onNACK panic recovered",
+								"missingSeq", n.MissingSeq, "panic", r)
+						}
+					}()
+
+					if cc.onNACK != nil {
+						cc.onNACK(n.MissingSeq, n.SessionID)
+					} else {
+						cc.logger.Warn("control channel: onNACK handler missing",
+							"missingSeq", n.MissingSeq)
+					}
+				}(*nack)
 
 			default:
 				cc.logger.Warn("control channel: unknown magic from server",
