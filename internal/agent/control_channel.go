@@ -216,7 +216,7 @@ func (cc *ControlChannel) SendIngestionDone(sessionID string) error {
 
 // SendRetransmitResult envia ControlRetransmitResult ao server pelo canal de controle.
 // Thread-safe via writeMu.
-func (cc *ControlChannel) SendRetransmitResult(missingSeq uint32, success bool) error {
+func (cc *ControlChannel) SendRetransmitResult(sessionID string, missingSeq uint32, success bool) error {
 	cc.connMu.Lock()
 	conn := cc.conn
 	cc.connMu.Unlock()
@@ -226,12 +226,12 @@ func (cc *ControlChannel) SendRetransmitResult(missingSeq uint32, success bool) 
 	}
 
 	cc.writeMu.Lock()
-	err := protocol.WriteControlRetransmitResult(conn, missingSeq, success)
+	err := protocol.WriteControlRetransmitResult(conn, missingSeq, success, sessionID)
 	cc.writeMu.Unlock()
 
 	if err != nil {
 		cc.logger.Warn("failed to send ControlRetransmitResult", "error", err,
-			"missingSeq", missingSeq, "success", success)
+			"session", sessionID, "missingSeq", missingSeq, "success", success)
 	}
 	return err
 }

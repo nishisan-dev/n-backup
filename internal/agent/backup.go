@@ -514,7 +514,7 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 			}
 
 			// Responde ao server se conseguiu ou não retransmitir
-			if rErr := controlCh.SendRetransmitResult(missingSeq, success); rErr != nil {
+			if rErr := controlCh.SendRetransmitResult(sessionID, missingSeq, success); rErr != nil {
 				logger.Warn("failed to send retransmit result", "error", rErr)
 			}
 

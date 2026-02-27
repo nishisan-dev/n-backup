@@ -6,6 +6,7 @@ package protocol
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -244,6 +245,40 @@ func TestControlRotateACK_PayloadAfterMagic(t *testing.T) {
 	}
 	if got != streamIdx {
 		t.Errorf("stream index: want %d, got %d", streamIdx, got)
+	}
+}
+
+func TestControlRetransmitResult_RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+
+	if err := WriteControlRetransmitResult(&buf, 42, true, "sess-123"); err != nil {
+		t.Fatalf("WriteControlRetransmitResult failed: %v", err)
+	}
+
+	magic, err := ReadControlMagic(&buf)
+	if err != nil {
+		t.Fatalf("ReadControlMagic failed: %v", err)
+	}
+	if magic != MagicControlRetransmitResult {
+		t.Fatalf("expected CRTR magic, got %q", magic)
+	}
+
+	got, err := ReadControlRetransmitResultPayload(&buf)
+	if err != nil {
+		t.Fatalf("ReadControlRetransmitResultPayload failed: %v", err)
+	}
+	if got.MissingSeq != 42 || !got.Success || got.SessionID != "sess-123" {
+		t.Fatalf("unexpected retransmit result: %+v", got)
+	}
+}
+
+func TestControlRetransmitResult_SessionIDTooLong(t *testing.T) {
+	var buf bytes.Buffer
+	sessionID := strings.Repeat("x", 256)
+
+	err := WriteControlRetransmitResult(&buf, 1, false, sessionID)
+	if err == nil {
+		t.Fatal("expected error for long sessionID")
 	}
 }
 

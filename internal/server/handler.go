@@ -1345,40 +1345,47 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 			}
 
 			logger.Info("control channel: received ControlRetransmitResult",
-				"missingSeq", result.MissingSeq, "success", result.Success)
+				"session", result.SessionID,
+				"missingSeq", result.MissingSeq,
+				"success", result.Success)
+
+			val, ok := h.sessions.Load(result.SessionID)
+			if !ok {
+				logger.Warn("control channel: retransmit result for unknown session",
+					"session", result.SessionID,
+					"missingSeq", result.MissingSeq)
+				continue
+			}
+			ps, ok := val.(*ParallelSession)
+			if !ok || ps.AgentName != agentName {
+				logger.Warn("control channel: retransmit result session mismatch",
+					"session", result.SessionID,
+					"missingSeq", result.MissingSeq,
+					"agent", agentName)
+				continue
+			}
 
 			if result.Success {
 				// Chunk retransmitido pelo agent. Rearma o timer do gap e aguarda a
 				// chegada real do chunk via stream antes de considerá-lo resolvido.
-				h.sessions.Range(func(_, value any) bool {
-					ps, ok := value.(*ParallelSession)
-					if !ok || ps.AgentName != agentName || ps.GapTracker == nil {
-						return true
-					}
+				if ps.GapTracker != nil {
 					ps.GapTracker.RearmGap(result.MissingSeq)
 					logger.Info("gap retransmission accepted", "seq", result.MissingSeq)
-					return false
-				})
+				}
 			} else {
 				// Chunk irrecuperável (ring buffer sobrescrito) — aborta sessão.
 				logger.Error("chunk irrecoverable, aborting session",
+					"session", result.SessionID,
 					"missingSeq", result.MissingSeq)
 				if h.Events != nil {
 					h.Events.PushEvent("error", "chunk_lost", agentName, fmt.Sprintf("chunk seq %d irrecoverable (buffer overwritten)", result.MissingSeq), 0)
 				}
 				// Fecha todos os streams da sessão para forçar abort
-				h.sessions.Range(func(_, value any) bool {
-					ps, ok := value.(*ParallelSession)
-					if !ok || ps.AgentName != agentName {
-						return true
+				ps.StreamConns.Range(func(key, val any) bool {
+					if c, ok := val.(net.Conn); ok {
+						c.Close()
 					}
-					ps.StreamConns.Range(func(key, val any) bool {
-						if c, ok := val.(net.Conn); ok {
-							c.Close()
-						}
-						return true
-					})
-					return false
+					return true
 				})
 			}
 

@@ -157,10 +157,11 @@ type ControlNACK struct {
 }
 
 // ControlRetransmitResult é enviado pelo agent ao server informando o resultado da retransmissão.
-// Formato: [Magic "CRTR" 4B] [MissingSeq uint32 4B] [Success uint8 1B]
+// Formato: [Magic "CRTR" 4B] [MissingSeq uint32 4B] [Success uint8 1B] [SessionIDLen uint8 1B] [SessionID ...B]
 type ControlRetransmitResult struct {
 	MissingSeq uint32 // globalSeq do chunk solicitado
 	Success    bool   // true se retransmitido com sucesso, false se irrecuperável
+	SessionID  string // sessão à qual o resultado pertence
 }
 
 // ReadControlMagic lê os 4 bytes de magic do canal de controle.
@@ -588,26 +589,42 @@ func ReadControlNACKPayload(r io.Reader) (*ControlNACK, error) {
 }
 
 // WriteControlRetransmitResult escreve o frame ControlRetransmitResult (Agent → Server).
-// Frame: [Magic 4B] [MissingSeq uint32 4B] [Success uint8 1B]
-func WriteControlRetransmitResult(w io.Writer, missingSeq uint32, success bool) error {
-	buf := make([]byte, 9) // 4B magic + 4B seq + 1B success
+// Frame: [Magic 4B] [MissingSeq uint32 4B] [Success uint8 1B] [SessionIDLen uint8 1B] [SessionID ...B]
+func WriteControlRetransmitResult(w io.Writer, missingSeq uint32, success bool, sessionID string) error {
+	if len(sessionID) > 255 {
+		return fmt.Errorf("sessionID too long for ControlRetransmitResult: %d", len(sessionID))
+	}
+	buf := make([]byte, 10+len(sessionID)) // 4B magic + 4B seq + 1B success + 1B sid len + sid
 	copy(buf[0:4], MagicControlRetransmitResult[:])
 	binary.BigEndian.PutUint32(buf[4:8], missingSeq)
 	if success {
 		buf[8] = 1
 	}
+	buf[9] = byte(len(sessionID))
+	copy(buf[10:], sessionID)
 	_, err := w.Write(buf)
 	return err
 }
 
 // ReadControlRetransmitResultPayload lê o payload de ControlRetransmitResult após o magic já ter sido lido.
 func ReadControlRetransmitResultPayload(r io.Reader) (*ControlRetransmitResult, error) {
-	buf := make([]byte, 5) // 4B seq + 1B success
+	buf := make([]byte, 6) // 4B seq + 1B success + 1B sid len
 	if _, err := io.ReadFull(r, buf); err != nil {
 		return nil, fmt.Errorf("reading ControlRetransmitResult payload: %w", err)
+	}
+	sidLen := buf[5]
+
+	var sessionID string
+	if sidLen > 0 {
+		sid := make([]byte, sidLen)
+		if _, err := io.ReadFull(r, sid); err != nil {
+			return nil, fmt.Errorf("reading ControlRetransmitResult sessionID: %w", err)
+		}
+		sessionID = string(sid)
 	}
 	return &ControlRetransmitResult{
 		MissingSeq: binary.BigEndian.Uint32(buf[0:4]),
 		Success:    buf[4] == 1,
+		SessionID:  sessionID,
 	}, nil
 }
