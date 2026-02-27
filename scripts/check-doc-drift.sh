@@ -33,7 +33,7 @@ echo ""
 # ─── 1. Valores de limite validados no código ────────────────────────────────
 echo "1. Limites/ranges (código: internal/config/agent.go)"
 
-for f in docs/usage.md docs/specification.md wiki/Guia-de-Uso.md wiki/Especificação-Técnica.md; do
+for f in docs/usage.md docs/specification.md wiki/Guia-de-Uso.md wiki/Especificacao-Tecnica.md; do
   check_absent "range inválido" "$f" "1-8"
 done
 
@@ -41,7 +41,7 @@ for f in docs/usage.md wiki/Guia-de-Uso.md; do
   check "range correto parallels" "$f" "1-255"
 done
 
-for f in docs/specification.md wiki/Especificação-Técnica.md; do
+for f in docs/specification.md wiki/Especificacao-Tecnica.md; do
   check "range correto MaxStreams/parallels" "$f" "1-255"
 done
 
@@ -50,7 +50,7 @@ echo "2. Schema de configuração"
 
 # storages: (plural) — nunca storage: (singular em raiz de config)
 check_absent "schema storage singular" "docs/specification.md" "^storage:"
-check_absent "schema storage singular" "wiki/Especificação-Técnica.md" "^storage:"
+check_absent "schema storage singular" "wiki/Especificacao-Tecnica.md" "^storage:"
 
 # schedule está em backups[], não direto em daemon:
 # Detecta o padrão do erro: "daemon:\n  schedule:" sem "control_channel:" intermediário
@@ -62,7 +62,7 @@ fi
 echo "3. Frames do protocolo (CIDN obrigatório nos dois lados)"
 
 check "CIDN em docs/specification"       "docs/specification.md"          "CIDN"
-check "CIDN em wiki/Especificação"       "wiki/Especificação-Técnica.md"  "CIDN"
+check "CIDN em wiki/Especificação"       "wiki/Especificacao-Tecnica.md"  "CIDN"
 
 # ─── 4. Features novas em ambos os lados ────────────────────────────────────
 echo "4. Features novas cobertas nos dois lados"
@@ -73,16 +73,16 @@ for feature in "chunk_buffer" "dscp\|DSCP"; do
 done
 
 check "chunk_shard_levels em docs"  "docs/specification.md"         "chunk_shard_levels"
-check "chunk_shard_levels em wiki"  "wiki/Especificação-Técnica.md" "chunk_shard_levels"
+check "chunk_shard_levels em wiki"  "wiki/Especificacao-Tecnica.md" "chunk_shard_levels"
 
 # ─── 5. Seções-chave existem em ambos os lados ───────────────────────────────
 echo "5. Seções-chave espelhadas (docs/ ↔ wiki/)"
 
 declare -A PAIRS=(
   ["docs/usage.md"]="wiki/Guia-de-Uso.md"
-  ["docs/specification.md"]="wiki/Especificação-Técnica.md"
+  ["docs/specification.md"]="wiki/Especificacao-Tecnica.md"
   ["docs/architecture.md"]="wiki/Arquitetura.md"
-  ["docs/installation.md"]="wiki/Instalação.md"
+  ["docs/installation.md"]="wiki/Instalacao.md"
 )
 
 for doc in "${!PAIRS[@]}"; do

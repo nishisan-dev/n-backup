@@ -2,11 +2,11 @@
 
 - [[Home]]
 - [[Arquitetura]]
-- [[Instalação]]
+- [[Instalacao]]
 - [[Guia de Uso|Guia-de-Uso]]
-- [[Especificação Técnica|Especificação-Técnica]]
-- [[Configuração de Exemplo|Configuração-de-Exemplo]]
-- [[Cenários de Configuração|Cenários-de-Configuração]]
+- [[Especificação Técnica|Especificacao-Tecnica]]
+- [[Configuração de Exemplo|Configuracao-de-Exemplo]]
+- [[Cenários de Configuração|Cenarios-de-Configuracao]]
 - [[WebUI]]
 - [[FAQ]]
 

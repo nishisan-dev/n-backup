@@ -540,7 +540,7 @@ daemon:
 
 ## 4. Configuração
 
-Veja [[Configuração de Exemplo|Configuração-de-Exemplo]] para os arquivos YAML completos e comentados.
+Veja [[Configuração de Exemplo|Configuracao-de-Exemplo]] para os arquivos YAML completos e comentados.
 
 ---
 

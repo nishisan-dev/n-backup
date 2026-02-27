@@ -81,10 +81,10 @@ Agent ←→ Server: CTRL magic → ControlPing/Pong (keep-alive + RTT) + Contro
 | Página | Descrição |
 |--------|-----------|
 | [[Arquitetura]] | C4 Model, componentes, fluxos, decisões técnicas |
-| [[Instalação]] | Build, PKI/mTLS, configuração, systemd |
+| [[Instalacao]] | Build, PKI/mTLS, configuração, systemd |
 | [[Guia de Uso\|Guia-de-Uso]] | Comandos, daemon, retry, rotação, troubleshooting |
-| [[Especificação Técnica\|Especificação-Técnica]] | Protocolo binário, frames, sessão, resume, parallel streaming |
-| [[Configuração de Exemplo\|Configuração-de-Exemplo]] | Exemplos completos de `agent.yaml` e `server.yaml` |
+| [[Especificação Técnica\|Especificacao-Tecnica]] | Protocolo binário, frames, sessão, resume, parallel streaming |
+| [[Configuração de Exemplo\|Configuracao-de-Exemplo]] | Exemplos completos de `agent.yaml` e `server.yaml` |
 | [[WebUI]] | Painel de observabilidade (sessões, events, gauges) |
 | [[FAQ]] | Troubleshooting e perguntas frequentes |
 

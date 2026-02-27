@@ -172,7 +172,7 @@ backups:
 
 Cada source gera entradas no tar com **caminhos relativos** baseados no próprio diretório.
 
-Veja [[Configuração de Exemplo|Configuração-de-Exemplo]] para referência completa.
+Veja [[Configuração de Exemplo|Configuracao-de-Exemplo]] para referência completa.
 
 ---
 

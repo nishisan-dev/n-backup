@@ -853,7 +853,7 @@ chunk_buffer:
 
 ## Referências
 
-- [[Configuração de Exemplo|Configuração-de-Exemplo]] — Referência completa de todos os campos
+- [[Configuração de Exemplo|Configuracao-de-Exemplo]] — Referência completa de todos os campos
 - [[Guia de Uso|Guia-de-Uso]] — Comandos, retry, resume, parallel streaming, chunk_buffer, dscp
 - [[Arquitetura]] — Detalhes internos do pipeline, assembler e control channel
-- [[Especificação Técnica|Especificação-Técnica]] — Protocolo binário e frames
+- [[Especificação Técnica|Especificacao-Tecnica]] — Protocolo binário e frames

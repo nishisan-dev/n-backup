@@ -233,7 +233,7 @@ Agent                                      Server
 | ControlDefer | `CDFE` | S→C | 8 bytes |
 | ControlAbort | `CABT` | S→C | 8 bytes |
 
-Para detalhes completos dos frames, veja a [[Especificação Técnica|Especificação-Técnica]].
+Para detalhes completos dos frames, veja a [[Especificação Técnica|Especificacao-Tecnica]].
 
 ---
 
@@ -380,7 +380,7 @@ O nbackup-server embarca uma **SPA de observabilidade** acessível via HTTP, ser
 | **Active Session Store** | `internal/server/observability/active_session_store.go` | Snapshots periódicos de sessões ativas (ring + JSONL) |
 | **WebUI Assets** | `internal/server/observability/web/` | SPA (HTML, CSS, JS) embarcados |
 
-> **ACL obrigatória:** `web_ui.allow_origins` deve ser configurado quando `enabled: true`. Veja [[Configuração de Exemplo|Configuração-de-Exemplo]].
+> **ACL obrigatória:** `web_ui.allow_origins` deve ser configurado quando `enabled: true`. Veja [[Configuração de Exemplo|Configuracao-de-Exemplo]].
 
 ---
 
@@ -447,6 +447,6 @@ n-backup/
 
 ## 11. Referências
 
-- [[Especificação Técnica|Especificação-Técnica]] — Detalhes completos do protocolo binário, frames e sessão
-- [[Instalação]] — Build, PKI/mTLS, configuração, systemd
+- [[Especificação Técnica|Especificacao-Tecnica]] — Detalhes completos do protocolo binário, frames e sessão
+- [[Instalacao]] — Build, PKI/mTLS, configuração, systemd
 - [[Guia de Uso|Guia-de-Uso]] — Comandos CLI, daemon, retry, rotação, troubleshooting, WebUI

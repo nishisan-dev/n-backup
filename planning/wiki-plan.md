@@ -17,8 +17,8 @@ wiki/
 ├── Arquitetura.md             ← C4 Model, componentes, fluxos, decisões técnicas
 ├── Instalação.md              ← Build, PKI/mTLS, configuração, systemd
 ├── Guia-de-Uso.md             ← Comandos, daemon, retry, rotação, troubleshooting
-├── Especificação-Técnica.md   ← Protocolo binário, frames, sessão, resume, parallel
-├── Configuração-de-Exemplo.md ← Exemplos completos de agent.yaml e server.yaml
+├── Especificacao-Tecnica.md   ← Protocolo binário, frames, sessão, resume, parallel
+├── Configuracao-de-Exemplo.md ← Exemplos completos de agent.yaml e server.yaml
 ├── WebUI.md                   ← Documentação do painel de observabilidade
 ├── FAQ.md                     ← Perguntas frequentes e troubleshooting consolidado
 └── _Sidebar.md                ← Navegação lateral da wiki
@@ -35,8 +35,8 @@ wiki/
 | `Arquitetura.md` | `docs/architecture.md` | Adaptar diagramas ASCII. Referenciar PlantUML via proxy `uml.nishisan.dev` |
 | `Instalação.md` | `docs/installation.md` | Conteúdo integral com ajustes de links internos |
 | `Guia-de-Uso.md` | `docs/usage.md` | Conteúdo integral, extrair FAQ para página dedicada |
-| `Especificação-Técnica.md` | `docs/specification.md` | Conteúdo integral |
-| `Configuração-de-Exemplo.md` | `configs/*.example.yaml` | Ambos os YAMLs com comentários explicativos inline |
+| `Especificacao-Tecnica.md` | `docs/specification.md` | Conteúdo integral |
+| `Configuracao-de-Exemplo.md` | `configs/*.example.yaml` | Ambos os YAMLs com comentários explicativos inline |
 | `WebUI.md` | Seção de `docs/usage.md` | Extrair e expandir a seção sobre WebUI/Observabilidade |
 | `FAQ.md` | Extraído de `docs/usage.md` | Consolidar troubleshooting + perguntas comuns |
 | `_Sidebar.md` | Novo | Sidebar de navegação com links para todas as páginas |
@@ -56,10 +56,10 @@ wiki/
 
 - [[Home]]
 - [[Arquitetura]]
-- [[Instalação]]
+- [[Instalacao]]
 - [[Guia de Uso|Guia-de-Uso]]
-- [[Especificação Técnica|Especificação-Técnica]]
-- [[Configuração de Exemplo|Configuração-de-Exemplo]]
+- [[Especificação Técnica|Especificacao-Tecnica]]
+- [[Configuração de Exemplo|Configuracao-de-Exemplo]]
 - [[WebUI]]
 - [[FAQ]]
 

@@ -226,8 +226,8 @@ journalctl -u nbackup-server -n 100 --no-pager
 
 ## Referências
 
-- [[Instalação]] — Build, PKI, certificados mTLS, systemd
+- [[Instalacao]] — Build, PKI, certificados mTLS, systemd
 - [[Guia de Uso|Guia-de-Uso]] — Comandos, daemon, retry, rotação, configuração detalhada
-- [[Configuração de Exemplo|Configuração-de-Exemplo]] — Arquivos YAML completos
+- [[Configuração de Exemplo|Configuracao-de-Exemplo]] — Arquivos YAML completos
 - [[Arquitetura]] — Visão técnica do sistema
-- [[Especificação Técnica|Especificação-Técnica]] — Protocolo binário e frames
+- [[Especificação Técnica|Especificacao-Tecnica]] — Protocolo binário e frames

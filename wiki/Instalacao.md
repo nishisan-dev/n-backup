@@ -170,7 +170,7 @@ sudo mkdir -p /etc/nbackup /var/backups/scripts /var/backups/home
 sudo cp configs/server.example.yaml /etc/nbackup/server.yaml
 ```
 
-Edite `/etc/nbackup/server.yaml`. Veja [[Configuração de Exemplo|Configuração-de-Exemplo]] para referência completa.
+Edite `/etc/nbackup/server.yaml`. Veja [[Configuração de Exemplo|Configuracao-de-Exemplo]] para referência completa.
 
 ### 5.2. Agent
 
@@ -179,7 +179,7 @@ sudo mkdir -p /etc/nbackup
 sudo cp configs/agent.example.yaml /etc/nbackup/agent.yaml
 ```
 
-Edite `/etc/nbackup/agent.yaml`. Veja [[Configuração de Exemplo|Configuração-de-Exemplo]] para referência completa.
+Edite `/etc/nbackup/agent.yaml`. Veja [[Configuração de Exemplo|Configuracao-de-Exemplo]] para referência completa.
 
 ---
 

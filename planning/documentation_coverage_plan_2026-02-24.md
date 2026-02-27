@@ -11,7 +11,7 @@ Mapear lacunas e inconsistências da documentação atual (`README`, `docs/`, `w
 3. `docs/installation.md`
 4. `docs/usage.md`
 5. `docs/specification.md`
-6. `wiki/*.md` (principalmente `Guia-de-Uso`, `Especificação-Técnica`, `Configuração-de-Exemplo`, `Instalação`)
+6. `wiki/*.md` (principalmente `Guia-de-Uso`, `Especificacao-Tecnica`, `Configuracao-de-Exemplo`, `Instalação`)
 7. `configs/server.example.yaml` e `configs/agent.example.yaml` como fonte de configuração efetiva
 8. Referência de implementação: `internal/config/*.go`, `internal/protocol/control.go`, `internal/server/chunkbuffer.go`
 
@@ -21,7 +21,7 @@ Mapear lacunas e inconsistências da documentação atual (`README`, `docs/`, `w
 |---|---|---|---|
 | P0 | YAML inválido/desatualizado em docs de uso/instalação (`daemon.schedule`) | Usuário copia configuração que não reflete o schema atual | `docs/usage.md:33`, `docs/installation.md:182` |
 | P0 | `docs/specification.md` ainda descreve `storage:` (singular) em vez de `storages:` | Especificação contradiz configuração real do server | `docs/specification.md:593` |
-| P1 | Limite de streams documentado como `1-8`, mas código aceita `1-255` | Tuning incorreto de paralelismo | `docs/specification.md:291`, `docs/specification.md:351`, `wiki/Especificação-Técnica.md:291`, `wiki/Especificação-Técnica.md:358`, `internal/config/agent.go:161` |
+| P1 | Limite de streams documentado como `1-8`, mas código aceita `1-255` | Tuning incorreto de paralelismo | `docs/specification.md:291`, `docs/specification.md:351`, `wiki/Especificacao-Tecnica.md:291`, `wiki/Especificacao-Tecnica.md:358`, `internal/config/agent.go:161` |
 | P1 | Feature `chunk_buffer` sem cobertura em `docs/`/`wiki/` | Feature nova sem guia operacional/tuning | Sem ocorrências de `chunk_buffer`/`drain_ratio` em `docs/*.md` e `wiki/*.md`; config real em `configs/server.example.yaml:62` |
 | P1 | Frame `ControlIngestionDone (CIDN)` existe no protocolo e fluxo do server, mas não está na especificação | Protocolo documentado incompleto | `internal/protocol/control.go:44`, `internal/server/handler.go:1270` |
 | P1 | Campo `dscp` existe no `agent.yaml` (schema), mas não está documentado para operadores | Recurso sem adoção por falta de documentação | `internal/config/agent.go:67` |
@@ -35,7 +35,7 @@ Mapear lacunas e inconsistências da documentação atual (`README`, `docs/`, `w
 1. `docs/usage.md`
 2. `docs/installation.md`
 3. `docs/specification.md`
-4. `wiki/Especificação-Técnica.md`
+4. `wiki/Especificacao-Tecnica.md`
 5. `configs/server.example.yaml` (comentário legado)
 
 ### Fase 2 (Cobertura de features atuais)
@@ -43,20 +43,20 @@ Mapear lacunas e inconsistências da documentação atual (`README`, `docs/`, `w
 1. `README.md` (menção curta de `chunk_buffer` e link para guia)
 2. `docs/usage.md` (seção completa de `chunk_buffer`)
 3. `wiki/Guia-de-Uso.md` (espelhar seção operacional)
-4. `wiki/Configuração-de-Exemplo.md` (bloco `chunk_buffer` em `server.yaml`)
-5. `docs/specification.md` e `wiki/Especificação-Técnica.md` (adicionar `ControlIngestionDone`)
+4. `wiki/Configuracao-de-Exemplo.md` (bloco `chunk_buffer` em `server.yaml`)
+5. `docs/specification.md` e `wiki/Especificacao-Tecnica.md` (adicionar `ControlIngestionDone`)
 6. `docs/diagrams/protocol_sequence.puml` e/ou `docs/diagrams/parallel_sequence.puml` (incluir `CIDN`)
 7. `docs/usage.md` e `wiki/Guia-de-Uso.md` (adicionar `dscp`)
-8. `wiki/Cenários-de-Configuração.md` (cenário recomendado para `chunk_buffer` em HDD/NAS)
+8. `wiki/Cenarios-de-Configuracao.md` (cenário recomendado para `chunk_buffer` em HDD/NAS)
 
 ### Fase 3 (Governança e anti-drift)
 
 1. Definir fonte única de verdade: `docs/` ou `wiki/`
 2. Criar regra de sincronização (script/CI) para evitar drift entre pares:
    - `docs/usage.md` ↔ `wiki/Guia-de-Uso.md`
-   - `docs/specification.md` ↔ `wiki/Especificação-Técnica.md`
+   - `docs/specification.md` ↔ `wiki/Especificacao-Tecnica.md`
    - `docs/architecture.md` ↔ `wiki/Arquitetura.md`
-   - `docs/installation.md` ↔ `wiki/Instalação.md`
+   - `docs/installation.md` ↔ `wiki/Instalacao.md`
 3. Adicionar checklist de release para validação documental (schema + exemplos + limites)
 
 ## Plano de Execução Proposto
