@@ -26,6 +26,10 @@ const maxResumeAttempts = 5
 // resumeBackoff é o tempo inicial entre tentativas de resume.
 const resumeBackoff = 2 * time.Second
 
+// singleStreamACKPollInterval limita quanto tempo o leitor de SACK fica
+// bloqueado por iteração antes de checar se deve encerrar.
+const singleStreamACKPollInterval = 1 * time.Second
+
 // MaxBackupDuration define o tempo máximo que um backup pode rodar antes de ser cancelado.
 const MaxBackupDuration = 24 * time.Hour
 
@@ -92,6 +96,7 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 
 	// Envia byte discriminador 0x00 para sinalizar single-stream ao server
 	// (ParallelInit começa com MaxStreams >= 1, então 0x00 = single-stream)
+	conn.SetWriteDeadline(time.Now().Add(writeDeadline))
 	if _, err := conn.Write([]byte{0x00}); err != nil {
 		conn.Close()
 		return fmt.Errorf("writing single-stream marker: %w", err)
@@ -202,12 +207,32 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 
 		// ACK reader: lê SACKs do server e avança o tail
 		ackDone := make(chan error, 1)
+		ackStop := make(chan struct{})
 
 		go func() {
 			for {
+				if netConn, ok := conn.(net.Conn); ok {
+					netConn.SetReadDeadline(time.Now().Add(singleStreamACKPollInterval))
+				}
+
 				sack, err := protocol.ReadSACK(conn)
 				if err != nil {
-					ackDone <- err
+					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+						select {
+						case <-ackStop:
+							ackDone <- nil
+							return
+						default:
+							continue
+						}
+					}
+
+					select {
+					case <-ackStop:
+						ackDone <- nil
+					default:
+						ackDone <- err
+					}
 					return
 				}
 
@@ -229,6 +254,14 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 				continue // tenta resume
 			}
 			// Sender terminou sem erro = produtor terminou e ring buffer fechou
+
+		case err := <-ackDone:
+			conn.Close()
+			if err != nil {
+				logger.Warn("ack reader failed, will attempt resume", "error", err)
+				continue
+			}
+			return fmt.Errorf("ack reader stopped unexpectedly before sender completion")
 		}
 
 		// Espera produtor terminar
@@ -238,6 +271,14 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 			return fmt.Errorf("pipeline error: %w", producerErr)
 		}
 
+		close(ackStop)
+		if err := <-ackDone; err != nil {
+			conn.Close()
+			logger.Warn("ack reader failed before trailer, will attempt resume", "error", err)
+			continue
+		}
+		conn.SetReadDeadline(time.Time{})
+
 		// Envia trailer (checksum + size)
 		logger.Info("data transfer complete",
 			"bytes", producerResult.Size,
@@ -245,6 +286,7 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 		)
 
 		trailerStart := time.Now()
+		conn.SetWriteDeadline(time.Now().Add(writeDeadline))
 		if err := protocol.WriteTrailer(conn, producerResult.Checksum, producerResult.Size); err != nil {
 			conn.Close()
 			return fmt.Errorf("writing trailer: %w", err)
