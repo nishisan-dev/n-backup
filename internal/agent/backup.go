@@ -497,6 +497,33 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 			}
 		})
 		defer controlCh.SetAutoScaleStatsProvider(nil)
+
+		// Registra handler de NACK: quando o server detecta gap e envia ControlNACK,
+		// tenta retransmitir o chunk do ring buffer e responde com ControlRetransmitResult.
+		controlCh.SetOnNACK(func(missingSeq uint32, sid string) {
+			if sid != sessionID {
+				logger.Warn("NACK for different session, ignoring",
+					"expected", sessionID, "got", sid, "missingSeq", missingSeq)
+				return
+			}
+
+			logger.Info("processing NACK retransmit request", "missingSeq", missingSeq)
+			success, err := dispatcher.RetransmitChunk(missingSeq)
+			if err != nil {
+				logger.Error("retransmit failed", "missingSeq", missingSeq, "error", err)
+			}
+
+			// Responde ao server se conseguiu ou não retransmitir
+			if rErr := controlCh.SendRetransmitResult(missingSeq, success); rErr != nil {
+				logger.Warn("failed to send retransmit result", "error", rErr)
+			}
+
+			if !success {
+				logger.Error("chunk irrecoverable — server will abort session",
+					"missingSeq", missingSeq)
+			}
+		})
+		defer controlCh.SetOnNACK(nil)
 	}
 
 	go func() {
