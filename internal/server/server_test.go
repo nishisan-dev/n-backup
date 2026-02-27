@@ -5,13 +5,32 @@
 package server
 
 import (
+	"context"
+	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/nishisan-dev/n-backup/internal/protocol"
 )
+
+type trackingConn struct {
+	net.Conn
+	closed atomic.Bool
+}
+
+func (c *trackingConn) Close() error {
+	c.closed.Store(true)
+	if c.Conn != nil {
+		return c.Conn.Close()
+	}
+	return nil
+}
 
 func TestAtomicWriter_CommitAndAbort(t *testing.T) {
 	dir := t.TempDir()
@@ -274,6 +293,61 @@ func TestCleanupExpiredSessions_MixedTypes(t *testing.T) {
 	}
 }
 
+func TestCleanupExpiredSessions_ParallelSessionClosesStreamsAndCancels(t *testing.T) {
+	dir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	assembler, err := NewChunkAssembler("par-cleanup", dir, logger)
+	if err != nil {
+		t.Fatalf("NewChunkAssembler: %v", err)
+	}
+
+	serverConn1, clientConn1 := net.Pipe()
+	defer clientConn1.Close()
+	serverConn2, clientConn2 := net.Pipe()
+	defer clientConn2.Close()
+
+	closedConn1 := &trackingConn{Conn: serverConn1}
+	closedConn2 := &trackingConn{Conn: serverConn2}
+
+	cancelCount := atomic.Int32{}
+	cancel1 := func() { cancelCount.Add(1) }
+	cancel2 := func() { cancelCount.Add(1) }
+
+	expiredParallel := &ParallelSession{
+		SessionID:   "par-cleanup",
+		Assembler:   assembler,
+		AgentName:   "agent-cleanup",
+		StorageName: "storage-cleanup",
+		MaxStreams:  2,
+		Done:        make(chan struct{}),
+		CreatedAt:   time.Now().Add(-2 * time.Hour),
+	}
+	expiredParallel.LastActivity.Store(time.Now().Add(-2 * time.Hour).UnixNano())
+	expiredParallel.StreamConns.Store(uint8(0), closedConn1)
+	expiredParallel.StreamConns.Store(uint8(1), closedConn2)
+	expiredParallel.StreamCancels.Store(uint8(0), context.CancelFunc(cancel1))
+	expiredParallel.StreamCancels.Store(uint8(1), context.CancelFunc(cancel2))
+
+	sessions := &sync.Map{}
+	sessions.Store("parallel-expired", expiredParallel)
+
+	CleanupExpiredSessions(sessions, 1*time.Hour, logger)
+
+	if _, ok := sessions.Load("parallel-expired"); ok {
+		t.Fatal("parallel-expired should have been cleaned")
+	}
+	if !expiredParallel.Closing.Load() {
+		t.Fatal("expected parallel session to be marked closing during cleanup")
+	}
+	if !closedConn1.closed.Load() || !closedConn2.closed.Load() {
+		t.Fatal("expected all stream conns to be closed during cleanup")
+	}
+	if cancelCount.Load() != 2 {
+		t.Fatalf("expected both stream cancels to be invoked, got %d", cancelCount.Load())
+	}
+}
+
 // TestCleanupExpiredSessions_ActiveSessionNotCleaned verifica que uma sessão
 // com CreatedAt antigo mas LastActivity recente NÃO é limpa.
 // Este é o cenário exato do bug: backup de ~42 GB levou >1h mas estava ativo.
@@ -326,4 +400,64 @@ func TestCleanupExpiredSessions_ActiveSessionNotCleaned(t *testing.T) {
 	if _, err := os.Stat(activePartial.TmpPath); os.IsNotExist(err) {
 		t.Error("active tmp file should NOT have been removed")
 	}
+}
+
+func TestHandleParallelJoin_RejectsClosingSessionBeforeAckOK(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	handler := &Handler{
+		sessions: &sync.Map{},
+		logger:   logger,
+	}
+
+	ps := &ParallelSession{
+		SessionID:   "closing-session",
+		MaxStreams:  2,
+		Done:        make(chan struct{}),
+		StreamReady: make(chan struct{}),
+		CreatedAt:   time.Now(),
+	}
+	ps.Closing.Store(true)
+	handler.sessions.Store(ps.SessionID, ps)
+
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var magic [4]byte
+		if _, err := io.ReadFull(serverConn, magic[:]); err != nil {
+			t.Errorf("reading magic: %v", err)
+			return
+		}
+		if magic != protocol.MagicParallelJoin {
+			t.Errorf("unexpected magic: %q", magic)
+			return
+		}
+		handler.handleParallelJoin(context.Background(), serverConn, logger)
+	}()
+
+	if err := protocol.WriteParallelJoin(clientConn, ps.SessionID, 1); err != nil {
+		t.Fatalf("WriteParallelJoin: %v", err)
+	}
+
+	ack, err := protocol.ReadParallelACK(clientConn)
+	if err != nil {
+		t.Fatalf("ReadParallelACK: %v", err)
+	}
+	if ack.Status != protocol.ParallelStatusNotFound {
+		t.Fatalf("expected ParallelStatusNotFound, got %d", ack.Status)
+	}
+	if ack.LastOffset != 0 {
+		t.Fatalf("expected LastOffset=0, got %d", ack.LastOffset)
+	}
+	if _, loaded := ps.StreamConns.Load(uint8(1)); loaded {
+		t.Fatal("closing session should not register a new stream connection")
+	}
+	if _, loaded := ps.StreamCancels.Load(uint8(1)); loaded {
+		t.Fatal("closing session should not store a cancel func for rejected join")
+	}
+
+	serverConn.Close()
+	<-done
 }

@@ -48,7 +48,7 @@ const sackWriteTimeout = 10 * time.Second
 // PartialSession rastreia um backup parcial para resume.
 type PartialSession struct {
 	TmpPath         string
-	BytesWritten    int64
+	BytesWritten    atomic.Int64
 	AgentName       string
 	StorageName     string
 	BackupName      string
@@ -383,7 +383,7 @@ func (h *Handler) SessionsSnapshot() []observability.SessionSummary {
 				Compression:   s.CompressionMode,
 				StartedAt:     s.CreatedAt.Format(time.RFC3339),
 				LastActivity:  lastAct.Format(time.RFC3339),
-				BytesReceived: s.BytesWritten,
+				BytesReceived: s.BytesWritten.Load(),
 				ActiveStreams: 1,
 				Status:        sessionStatus(lastAct),
 			})
@@ -511,7 +511,7 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 				Compression:   s.CompressionMode,
 				StartedAt:     s.CreatedAt.Format(time.RFC3339),
 				LastActivity:  lastAct.Format(time.RFC3339),
-				BytesReceived: s.BytesWritten,
+				BytesReceived: s.BytesWritten.Load(),
 				ActiveStreams: 1,
 				Status:        sessionStatus(lastAct),
 			},
@@ -1724,7 +1724,7 @@ func (h *Handler) handleResume(ctx context.Context, conn net.Conn, logger *slog.
 	}
 
 	lastOffset := fi.Size()
-	session.BytesWritten = lastOffset
+	session.BytesWritten.Store(lastOffset)
 	logger.Info("resume accepted", "last_offset", lastOffset)
 
 	if err := protocol.WriteResumeACK(conn, protocol.ResumeStatusOK, uint64(lastOffset)); err != nil {
@@ -1805,7 +1805,7 @@ func (h *Handler) receiveWithSACK(ctx context.Context, reader io.Reader, sackWri
 				return bytesReceived, fmt.Errorf("writing to tmp: %w", wErr)
 			}
 			bytesReceived += int64(n)
-			session.BytesWritten += int64(n)
+			totalWritten := session.BytesWritten.Add(int64(n))
 			session.LastActivity.Store(time.Now().UnixNano())
 			h.TrafficIn.Add(int64(n))
 			h.DiskWrite.Add(int64(n))
@@ -1815,7 +1815,6 @@ func (h *Handler) receiveWithSACK(ctx context.Context, reader io.Reader, sackWri
 				if fErr := bufFile.Flush(); fErr != nil {
 					return bytesReceived, fmt.Errorf("flushing before sack: %w", fErr)
 				}
-				totalWritten := session.BytesWritten
 				if sErr := protocol.WriteSACK(sackWriter, uint64(totalWritten)); sErr != nil {
 					sackErr.Store(sErr)
 					logger.Warn("failed to send SACK", "error", sErr, "offset", totalWritten)
@@ -2097,6 +2096,15 @@ func CleanupExpiredSessions(sessions *sync.Map, ttl time.Duration, logger *slog.
 					"age", time.Since(s.CreatedAt).Round(time.Second),
 					"idle", time.Since(lastAct).Round(time.Second),
 				)
+				s.Closing.Store(true)
+				s.StreamCancels.Range(func(_, value any) bool {
+					value.(context.CancelFunc)()
+					return true
+				})
+				s.StreamConns.Range(func(_, value any) bool {
+					value.(net.Conn).Close()
+					return true
+				})
 				s.Assembler.Cleanup()
 				sessions.Delete(key)
 			}
@@ -2278,8 +2286,8 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		return
 	}
 
-	pSession.StreamWg.Wait()
 	pSession.Closing.Store(true)
+	pSession.StreamWg.Wait()
 	logger.Info("all parallel streams complete — proceeding to finalize")
 
 	// Evento de ingestão completa — a sessão permanece visível com status "finalizing"
@@ -2508,6 +2516,15 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 		return
 	}
 
+	// Rejeita join se a sessão está em fase de fechamento.
+	// O check precisa acontecer antes de cancelar/substituir o stream existente
+	// e antes de responder ACK OK.
+	if pSession.Closing.Load() {
+		logger.Warn("session closing, rejecting late join", "stream", pj.StreamIndex)
+		protocol.WriteParallelACK(conn, protocol.ParallelStatusNotFound, 0)
+		return
+	}
+
 	// --- Cancelamento da goroutine anterior (proteção contra goroutine leak) ---
 	// Se este stream já foi conectado antes (re-join), cancela o contexto da goroutine
 	// anterior para que ela saia imediatamente em vez de esperar o read timeout.
@@ -2538,37 +2555,35 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 	pSession.StreamConns.Store(pj.StreamIndex, conn)
 
 	// Atualiza uptime e reconnects do stream
-	// No primeiro connect, StreamReconnects não existe — LoadOrStore cria com zero.
-	// Em re-joins subsequentes, incrementa o contador.
-	if rcRaw, loaded := pSession.StreamReconnects.LoadOrStore(pj.StreamIndex, &atomic.Int32{}); loaded {
+	// Reutiliza o contador existente em re-joins para evitar alocações descartadas.
+	if rcRaw, loaded := pSession.StreamReconnects.Load(pj.StreamIndex); loaded {
 		rcRaw.(*atomic.Int32).Add(1)
 		// Emite evento de reconexão de stream
 		if h.Events != nil {
 			h.Events.PushEvent("warn", "stream_reconnect", pSession.AgentName, fmt.Sprintf("stream %d re-joined (session %s)", pj.StreamIndex, pj.SessionID), int(pj.StreamIndex))
 		}
+	} else {
+		pSession.StreamReconnects.Store(pj.StreamIndex, &atomic.Int32{})
 	}
 	pSession.StreamConnectedAt.Store(pj.StreamIndex, time.Now())
 
 	// Inicializa counters per-stream para stats
 	nowNano := time.Now().UnixNano()
-	trafficCounter := &atomic.Int64{}
-	pSession.StreamTrafficIn.LoadOrStore(pj.StreamIndex, trafficCounter)
-	lastActCounter := &atomic.Int64{}
-	lastActCounter.Store(nowNano)
-	pSession.StreamLastAct.LoadOrStore(pj.StreamIndex, lastActCounter)
+	if _, loaded := pSession.StreamTrafficIn.Load(pj.StreamIndex); !loaded {
+		pSession.StreamTrafficIn.Store(pj.StreamIndex, &atomic.Int64{})
+	}
+	if lastActRaw, loaded := pSession.StreamLastAct.Load(pj.StreamIndex); loaded {
+		lastActRaw.(*atomic.Int64).Store(nowNano)
+	} else {
+		lastActCounter := &atomic.Int64{}
+		lastActCounter.Store(nowNano)
+		pSession.StreamLastAct.Store(pj.StreamIndex, lastActCounter)
+	}
 
 	// Cria contexto cancelável para esta goroutine específica.
 	// Será cancelado se outro re-join chegar para o mesmo stream index.
 	streamCtx, streamCancel := context.WithCancel(ctx)
 	pSession.StreamCancels.Store(pj.StreamIndex, streamCancel)
-
-	// Rejeita join se a sessão está em fase de fechamento (Wait() já retornou).
-	// Sem esta verificação, Add(1) após Wait() causa panic.
-	if pSession.Closing.Load() {
-		logger.Warn("session closing, rejecting late join", "stream", pj.StreamIndex)
-		protocol.WriteParallelACK(conn, protocol.ParallelStatusNotFound, 0)
-		return
-	}
 
 	// StreamWg.Add(1) SEMPRE — cada goroutine (inclusive a cancelada por re-join)
 	// faz exatamente um Done(). Com cancelamento via contexto, a goroutine antiga
