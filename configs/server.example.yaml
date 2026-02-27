@@ -32,6 +32,7 @@ logging:
   format: json                     # json, text
   file: /var/log/nbackup/server.log # Log file dedicado (opcional)
   stream_stats: false              # Per-stream stats em sessões paralelas (padrão: false)
+  session_log_dir: ""              # Log por sessão paralela (ex: /var/log/nbackup/sessions), vazio = desabilitado
 
 # SPA de Observabilidade — listener HTTP separado
 web_ui:

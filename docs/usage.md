@@ -237,6 +237,26 @@ resume:
 > [!IMPORTANT]
 > Se o offset não estiver mais no ring buffer (avançou além da capacidade), o backup reinicia do zero.
 
+### Dimensionamento para Backups Paralelos (v2.8.4+)
+
+Em backups paralelos, o ring buffer é compartilhado entre todas as streams. Quando uma stream morre (timeout), as streams restantes continuam drenando o buffer — e podem sobrescrever os dados da stream morta antes que ela reconecte.
+
+Para garantir que chunks perdidos sejam retransmissíveis, dimensione o buffer com:
+
+```
+buffer_size >= (bandwidth_limit × read_timeout) + (chunk_size × parallels)
+```
+
+| bandwidth_limit | timeout | parallels | chunk_size | buffer_size mínimo |
+|-----------------|---------|-----------|------------|--------------------|
+| 20 MB/s         | 30s     | 12        | 1MB        | **612 MB**         |
+| 50 MB/s         | 30s     | 12        | 1MB        | **1.5 GB**         |
+| 10 MB/s         | 60s     | 4         | 1MB        | **604 MB**         |
+| 20 MB/s         | 15s     | 12        | 1MB        | **312 MB**         |
+
+> [!CAUTION]
+> **Sem `bandwidth_limit` configurado, a retransmissão de chunks perdidos não é garantida.** O throughput real é imprevisível e o ring buffer pode ser sobrescrito antes da detecção de gaps. Em links WAN ou instáveis, **sempre configure `bandwidth_limit`** para tornar o sistema determinístico.
+
 ---
 
 ## Chunk Buffer (Server)
@@ -404,6 +424,9 @@ backups:
 > [!TIP]
 > Use `bandwidth_limit` em links compartilhados para evitar impacto em outros serviços. Em redes dedicadas, deixe sem limite para throughput máximo.
 
+> [!WARNING]
+> Em backups paralelos, `bandwidth_limit` não é apenas QoS — é essencial para garantir retransmissão de chunks perdidos. Sem ele, o ring buffer pode ser sobrescrito antes que uma stream morta reconecte. Veja [Dimensionamento para Backups Paralelos](#dimensionamento-para-backups-paralelos-v284).
+
 ---
 
 ## Control Channel
@@ -518,6 +541,31 @@ Exemplo de log JSON do agent:
 {"time":"2026-02-12T02:00:16Z","level":"INFO","msg":"backup completed successfully","bytes":52428800}
 ```
 
+### Session Logging (v2.8.4+)
+
+Para diagnóstico de falhas em backups paralelos, o server pode gravar um **arquivo de log dedicado por sessão**:
+
+```yaml
+logging:
+  level: info
+  format: json
+  session_log_dir: /var/log/nbackup/sessions  # vazio = desabilitado
+```
+
+Quando habilitado:
+- Cada sessão paralela gera um arquivo em `{session_log_dir}/{agent}/{sessionID}.log`
+- O arquivo captura logs de nível **DEBUG** independente do nível global (chunk a chunk)
+- **Backup OK** → arquivo removido automaticamente (zero overhead em disco)
+- **Backup falhou** → arquivo retido para análise post-mortem
+
+O arquivo contém rastreamento completo de cada chunk recebido, estado do assembler pré-finalize, e detalhes de chunks faltantes:
+
+```json
+{"level":"DEBUG","msg":"chunk_received","stream":5,"globalSeq":231749,"length":1048576,"totalBytes":20251302792}
+{"level":"INFO","msg":"pre_finalize_state","nextExpectedSeq":434595,"pendingChunks":0,"totalBytes":45516144640}
+{"level":"ERROR","msg":"missing_chunk_in_assembly","missingSeq":383493,"lazyMaxSeq":434594,"totalPending":51099}
+```
+
 ---
 
 ## Troubleshooting
@@ -536,6 +584,7 @@ Exemplo de log JSON do agent:
 | `max resume attempts reached` | 5 tentativas de resume falharam | Verificar estabilidade da rede |
 | `control channel disconnected` | Server caiu ou timeout de keepalive | Canal reconectará automaticamente com backoff |
 | `keepalive_interval must be >= 1s` | Valor inválido na config | Ajustar para ≥ 1s |
+| `missing chunk seq N in lazy assembly` | Chunk perdido durante transmissão (ring buffer sobrescrito) | Configurar `bandwidth_limit` e dimensionar `buffer_size` com a fórmula. Ver [Dimensionamento para Backups Paralelos](#dimensionamento-para-backups-paralelos-v284) |
 
 ---
 

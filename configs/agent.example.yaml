@@ -44,11 +44,16 @@ retry:
 resume:
   buffer_size: 256mb               # Tamanho do ring buffer (kb, mb, gb)
   chunk_size: 1mb                  # Tamanho de cada chunk paralelo (64kb-16mb, default: 1mb)
+  # Para backups paralelos, dimensione o buffer com:
+  #   buffer_size >= (bandwidth_limit × read_timeout) + (chunk_size × parallels)
+  # Exemplo: 20mb/s × 30s + 1mb × 12 = 612mb
+  # Sem bandwidth_limit, a retransmissão de chunks perdidos NÃO é garantida.
 
 logging:
   level: info                      # debug, info, warn, error
   format: json                     # json, text
   file: /var/log/nbackup/agent.log # Log file dedicado (opcional)
+  session_log_dir: ""              # Log por sessão paralela (ex: /var/log/nbackup/sessions), vazio = desabilitado
 
 daemon:
   control_channel:
