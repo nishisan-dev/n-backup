@@ -46,6 +46,14 @@ var MagicControlAutoScaleStats = [4]byte{'C', 'A', 'S', 'S'}
 // Formato: [Magic "CIDN" 4B] — sem payload.
 var MagicControlIngestionDone = [4]byte{'C', 'I', 'D', 'N'}
 
+// MagicControlNACK é o magic para frames ControlNACK (Server → Agent).
+// Solicita retransmissão de um chunk perdido detectado pelo gap tracker.
+var MagicControlNACK = [4]byte{'C', 'N', 'A', 'K'}
+
+// MagicControlRetransmitResult é o magic para frames ControlRetransmitResult (Agent → Server).
+// Informa ao server se o chunk solicitado via NACK pôde ser retransmitido.
+var MagicControlRetransmitResult = [4]byte{'C', 'R', 'T', 'R'}
+
 // ControlPing é enviado pelo agent para o server no canal de controle.
 // Formato: [Magic "CPNG" 4B] [Timestamp int64 8B]
 type ControlPing struct {
@@ -95,6 +103,7 @@ const (
 	AbortReasonDiskFull    uint32 = 1
 	AbortReasonServerBusy  uint32 = 2
 	AbortReasonMaintenance uint32 = 3
+	AbortReasonChunkLost   uint32 = 4 // chunk irrecuperável (ring buffer sobrescrito)
 )
 
 // ControlProgress é enviado pelo agent ao server para reportar progresso do backup.
@@ -138,6 +147,20 @@ type ControlAutoScaleStats struct {
 	MaxStreams    uint8   // máximo configurado
 	State         uint8   // AutoScaleState*
 	ProbeActive   uint8   // 1 se probe em andamento
+}
+
+// ControlNACK é enviado pelo server ao agent para solicitar retransmissão de um chunk perdido.
+// Formato: [Magic "CNAK" 4B] [MissingSeq uint32 4B] [SessionIDLen uint8 1B] [SessionID ...B]
+type ControlNACK struct {
+	MissingSeq uint32 // globalSeq do chunk faltante
+	SessionID  string // sessão à qual o chunk pertence
+}
+
+// ControlRetransmitResult é enviado pelo agent ao server informando o resultado da retransmissão.
+// Formato: [Magic "CRTR" 4B] [MissingSeq uint32 4B] [Success uint8 1B]
+type ControlRetransmitResult struct {
+	MissingSeq uint32 // globalSeq do chunk solicitado
+	Success    bool   // true se retransmitido com sucesso, false se irrecuperável
 }
 
 // ReadControlMagic lê os 4 bytes de magic do canal de controle.
@@ -521,4 +544,70 @@ func ReadControlIngestionDonePayload(r io.Reader) (sessionID string, err error) 
 		}
 	}
 	return string(sid), nil
+}
+
+// WriteControlNACK escreve o frame ControlNACK (Server → Agent).
+// Frame: [Magic 4B] [MissingSeq uint32 4B] [SessionIDLen uint8 1B] [SessionID ...B]
+func WriteControlNACK(w io.Writer, missingSeq uint32, sessionID string) error {
+	if len(sessionID) > 255 {
+		return fmt.Errorf("sessionID too long for ControlNACK: %d", len(sessionID))
+	}
+	buf := make([]byte, 4+4+1+len(sessionID))
+	copy(buf[0:4], MagicControlNACK[:])
+	binary.BigEndian.PutUint32(buf[4:8], missingSeq)
+	buf[8] = byte(len(sessionID))
+	copy(buf[9:], sessionID)
+	_, err := w.Write(buf)
+	return err
+}
+
+// ReadControlNACKPayload lê o payload de ControlNACK após o magic já ter sido lido.
+// Retorna o missingSeq e o sessionID.
+func ReadControlNACKPayload(r io.Reader) (*ControlNACK, error) {
+	// Lê MissingSeq (4B) + SessionIDLen (1B)
+	hdr := make([]byte, 5)
+	if _, err := io.ReadFull(r, hdr); err != nil {
+		return nil, fmt.Errorf("reading ControlNACK header: %w", err)
+	}
+	missingSeq := binary.BigEndian.Uint32(hdr[0:4])
+	sidLen := hdr[4]
+
+	var sessionID string
+	if sidLen > 0 {
+		sid := make([]byte, sidLen)
+		if _, err := io.ReadFull(r, sid); err != nil {
+			return nil, fmt.Errorf("reading ControlNACK sessionID: %w", err)
+		}
+		sessionID = string(sid)
+	}
+
+	return &ControlNACK{
+		MissingSeq: missingSeq,
+		SessionID:  sessionID,
+	}, nil
+}
+
+// WriteControlRetransmitResult escreve o frame ControlRetransmitResult (Agent → Server).
+// Frame: [Magic 4B] [MissingSeq uint32 4B] [Success uint8 1B]
+func WriteControlRetransmitResult(w io.Writer, missingSeq uint32, success bool) error {
+	buf := make([]byte, 9) // 4B magic + 4B seq + 1B success
+	copy(buf[0:4], MagicControlRetransmitResult[:])
+	binary.BigEndian.PutUint32(buf[4:8], missingSeq)
+	if success {
+		buf[8] = 1
+	}
+	_, err := w.Write(buf)
+	return err
+}
+
+// ReadControlRetransmitResultPayload lê o payload de ControlRetransmitResult após o magic já ter sido lido.
+func ReadControlRetransmitResultPayload(r io.Reader) (*ControlRetransmitResult, error) {
+	buf := make([]byte, 5) // 4B seq + 1B success
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return nil, fmt.Errorf("reading ControlRetransmitResult payload: %w", err)
+	}
+	return &ControlRetransmitResult{
+		MissingSeq: binary.BigEndian.Uint32(buf[0:4]),
+		Success:    buf[4] == 1,
+	}, nil
 }
