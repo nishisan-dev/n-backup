@@ -30,8 +30,12 @@ import (
 )
 
 // sackInterval define a cada quantos bytes o server envia um SACK.
-// Reduzido para 1MB para evitar deadlock com buffers pequenos no agent.
-const sackInterval = 1 * 1024 * 1024 // 1MB
+// 4MB reduz overhead de ACK/flush em WAN sem atrasar demais o progresso de resume.
+const sackInterval = 4 * 1024 * 1024 // 4MB
+
+// singleStreamIOBufferSize é o tamanho dos buffers do caminho single-stream.
+// 1MB reduz syscalls e melhora vazão sustentada em transferências grandes.
+const singleStreamIOBufferSize = 1 * 1024 * 1024 // 1MB
 
 // readInactivityTimeout é o tempo máximo de inatividade na leitura de dados (single-stream).
 // Se expirar, a conexão é considerada morta e a goroutine é liberada.
@@ -1782,8 +1786,8 @@ func (h *Handler) handleResume(ctx context.Context, conn net.Conn, logger *slog.
 // receiveWithSACK lê dados do conn, escreve no tmpFile, e envia SACKs periódicos.
 // Retorna o número de bytes recebidos nesta sessão (não o total do arquivo).
 func (h *Handler) receiveWithSACK(ctx context.Context, reader io.Reader, sackWriter io.Writer, tmpFile *os.File, tmpPath string, session *PartialSession, logger *slog.Logger) (int64, error) {
-	bufConn := bufio.NewReaderSize(reader, 256*1024)
-	bufFile := bufio.NewWriterSize(tmpFile, 256*1024)
+	bufConn := bufio.NewReaderSize(reader, singleStreamIOBufferSize)
+	bufFile := bufio.NewWriterSize(tmpFile, singleStreamIOBufferSize)
 
 	var bytesReceived int64
 	var lastSACK int64
@@ -1793,7 +1797,7 @@ func (h *Handler) receiveWithSACK(ctx context.Context, reader io.Reader, sackWri
 	// Se a rede morrer silenciosamente (sem TCP RST), o read expirará em vez de travar para sempre.
 	netConn, hasDeadline := sackWriter.(net.Conn)
 
-	buf := make([]byte, 256*1024)
+	buf := make([]byte, singleStreamIOBufferSize)
 	for {
 		if hasDeadline {
 			netConn.SetReadDeadline(time.Now().Add(readInactivityTimeout))

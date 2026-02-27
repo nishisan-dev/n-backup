@@ -11,9 +11,9 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// maxBurstSize é o tamanho máximo de burst para o rate limiter (256KB).
-// Alinhado ao buffer de escrita do pipeline (bufio.NewWriterSize 256KB).
-const maxBurstSize = 256 * 1024
+// maxBurstSize é o tamanho máximo de burst para o rate limiter.
+// Alinhado ao buffer de escrita do pipeline para evitar fragmentação artificial.
+const maxBurstSize = streamIOBufferSize
 
 // ThrottledWriter é um io.Writer com rate limiting baseado em token bucket.
 // Limita a taxa de escrita a bytesPerSec bytes/segundo.

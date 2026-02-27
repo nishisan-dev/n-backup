@@ -382,7 +382,7 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 
 	go func() {
 		defer close(stream.senderDone)
-		buf := make([]byte, 256*1024)
+		buf := make([]byte, streamIOBufferSize)
 		retries := 0
 
 		for {

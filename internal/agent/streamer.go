@@ -21,6 +21,10 @@ import (
 	"github.com/nishisan-dev/n-backup/internal/protocol"
 )
 
+// streamIOBufferSize é o tamanho de buffer usado nos pontos quentes do pipeline
+// de upload para reduzir syscalls e melhorar throughput sustentado.
+const streamIOBufferSize = 1 * 1024 * 1024 // 1MB
+
 // StreamResult contém o resultado de uma operação de streaming.
 type StreamResult struct {
 	Checksum [32]byte
@@ -35,7 +39,7 @@ type StreamResult struct {
 // Retorna o checksum e total de bytes escritos no destino.
 func Stream(ctx context.Context, scanner *Scanner, dest io.Writer, progress *ProgressReporter, onObject func(), compressionMode byte, bandwidthLimit int64) (*StreamResult, error) {
 	// Buffer de escrita para reduzir syscalls na conexão TLS
-	bufDest := bufio.NewWriterSize(dest, 256*1024) // 256KB
+	bufDest := bufio.NewWriterSize(dest, streamIOBufferSize)
 
 	// Aplica throttle sobre o buffer de escrita (antes do hash, para não atrasar o cálculo)
 	throttled := NewThrottledWriter(ctx, bufDest, bandwidthLimit)
@@ -163,8 +167,10 @@ func addToTar(tw *tar.Writer, entry FileEntry) error {
 			return fmt.Errorf("writing tar header for %s: %w", entry.Path, err)
 		}
 
-		// LimitReader garante que nunca escrevemos mais que o declarado no header
-		if _, err := io.Copy(tw, io.LimitReader(f, fi.Size())); err != nil {
+		// LimitReader garante que nunca escrevemos mais que o declarado no header.
+		// CopyBuffer evita o buffer interno pequeno do io.Copy no hot path.
+		copyBuf := make([]byte, streamIOBufferSize)
+		if _, err := io.CopyBuffer(tw, io.LimitReader(f, fi.Size()), copyBuf); err != nil {
 			return fmt.Errorf("writing file %s to tar: %w", entry.Path, err)
 		}
 

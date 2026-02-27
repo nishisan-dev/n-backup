@@ -178,7 +178,7 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 
 		go func() {
 			defer close(senderDone)
-			buf := make([]byte, 256*1024)
+			buf := make([]byte, streamIOBufferSize)
 			for {
 				sendMu.Lock()
 				offset := sendOffset
