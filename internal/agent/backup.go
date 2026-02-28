@@ -89,6 +89,18 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 			return fmt.Errorf("writing ParallelInit: %w", err)
 		}
 
+		// Aguarda o ACK do servidor confirmando que a sessão foi registrada,
+		// prevenindo a race condition onde o ParallelJoin chega antes do handshake.
+		initACK, err := protocol.ReadParallelInitACK(conn)
+		if err != nil {
+			conn.Close()
+			return fmt.Errorf("reading ParallelInit ACK: %w", err)
+		}
+		if initACK.Status != protocol.ParallelInitStatusOK {
+			conn.Close()
+			return fmt.Errorf("server rejected parallel init (status: %d)", initACK.Status)
+		}
+
 		return runParallelBackup(ctx, cfg, entry, conn, sessionID, compressionMode, tlsCfg, logger, progress, job, controlCh)
 	}
 

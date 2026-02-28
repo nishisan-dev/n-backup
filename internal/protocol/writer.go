@@ -201,6 +201,15 @@ func WriteParallelInit(w io.Writer, maxStreams uint8, chunkSize uint32) error {
 	return nil
 }
 
+// WriteParallelInitACK escreve a resposta ao ParallelInit (Server → Client).
+// Formato: [Status 1B]
+func WriteParallelInitACK(w io.Writer, status byte) error {
+	if _, err := w.Write([]byte{status}); err != nil {
+		return fmt.Errorf("writing parallel init ack: %w", err)
+	}
+	return nil
+}
+
 // WriteParallelJoin escreve o frame ParallelJoin (Client → Server, conexão secundária).
 // Formato: [Magic "PJIN" 4B] [Version 1B] [SessionID UTF-8 '\n'] [StreamIndex uint8 1B]
 func WriteParallelJoin(w io.Writer, sessionID string, streamIndex uint8) error {

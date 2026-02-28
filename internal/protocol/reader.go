@@ -301,6 +301,19 @@ func ReadParallelInit(r io.Reader) (*ParallelInit, error) {
 	}, nil
 }
 
+// ReadParallelInitACK lê a resposta ao ParallelInit (Server → Client).
+// Formato: [Status 1B]
+func ReadParallelInitACK(r io.Reader) (*ParallelInitACK, error) {
+	var status [1]byte
+	if _, err := io.ReadFull(r, status[:]); err != nil {
+		return nil, fmt.Errorf("reading parallel init ack: %w", err)
+	}
+
+	return &ParallelInitACK{
+		Status: status[0],
+	}, nil
+}
+
 // ReadParallelInitAfterMaxStreams lê o restante do ParallelInit quando o byte
 // MaxStreams já foi consumido pelo discriminador de modo (handler.go).
 // Lê apenas ChunkSize (4B) e reconstrói o ParallelInit completo.

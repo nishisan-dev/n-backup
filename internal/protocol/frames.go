@@ -139,6 +139,17 @@ type ParallelInit struct {
 	ChunkSize  uint32 // Tamanho de cada chunk em bytes
 }
 
+// Status codes para ParallelInitACK.
+const (
+	ParallelInitStatusOK    byte = 0x00
+	ParallelInitStatusError byte = 0x01
+)
+
+// ParallelInitACK é enviado pelo server para confirmar que a sessão paralela foi inicializada.
+type ParallelInitACK struct {
+	Status byte
+}
+
 // ParallelJoin é enviado por conexões secundárias para se juntar a uma sessão existente.
 // Formato: Magic "PJIN" [4B] [Version 1B] [SessionID UTF-8 '\n'] [StreamIndex uint8 1B]
 type ParallelJoin struct {

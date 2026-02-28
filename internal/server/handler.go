@@ -1630,6 +1630,11 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 		}
 		logger.Info("parallel mode detected", "maxStreams", pi.MaxStreams, "chunkSize", pi.ChunkSize)
 
+		if err := protocol.WriteParallelInitACK(conn, protocol.ParallelInitStatusOK); err != nil {
+			logger.Error("writing ParallelInit ACK", "error", err)
+			return
+		}
+
 		h.handleParallelBackup(ctx, conn, br, sessionID, agentName, storageName, backupName, clientVersion, storageInfo, pi, lockKey, logger)
 		return
 	}

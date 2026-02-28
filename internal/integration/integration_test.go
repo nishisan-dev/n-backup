@@ -490,6 +490,14 @@ func TestEndToEnd_ParallelBackupSession(t *testing.T) {
 		t.Fatalf("WriteParallelInit: %v", err)
 	}
 
+	initACK, err := protocol.ReadParallelInitACK(conn)
+	if err != nil {
+		t.Fatalf("ReadParallelInitACK: %v", err)
+	}
+	if initACK.Status != protocol.ParallelInitStatusOK {
+		t.Fatalf("expected ParallelInitStatusOK, got %d", initACK.Status)
+	}
+
 	// 3. Prepara dados tar.gz
 	var streamBuf bytes.Buffer
 	hasher := sha256.New()
