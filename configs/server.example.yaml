@@ -53,6 +53,23 @@ web_ui:
     - "127.0.0.1/32"
     # - "10.0.0.0/8"              # Descomente para rede interna
 
+# Detecção proativa de gaps em sessões paralelas.
+# timeout: quanto tempo um gap "normal" pode persistir antes do server enviar NACK.
+# in_flight_timeout: quanto tempo um chunk que já começou a ser recebido pode ficar
+# sem progresso de payload antes de ser considerado stale e elegível para NACK.
+#
+# IMPORTANTE:
+# - in_flight_timeout NÃO altera o timeout TCP do stream.
+# - O timeout de leitura do socket continua sendo controlado internamente por
+#   streamReadDeadline (30s no código atual).
+# - in_flight_timeout afeta apenas a lógica do GapTracker.
+gap_detection:
+  enabled: true
+  timeout: 60s
+  in_flight_timeout: 30s
+  check_interval: 5s
+  max_nacks_per_cycle: 5
+
 # Buffer de chunks em memória — suaviza oscilações de I/O em HDs lentos.
 # Quando habilitado, o servidor reserva a memória no startup e absorve chunks
 # recebidos da rede no buffer antes de escrevê-los no disco.

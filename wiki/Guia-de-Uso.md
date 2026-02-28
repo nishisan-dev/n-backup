@@ -263,6 +263,33 @@ chunk_buffer:
 
 ---
 
+## Gap Detection (Server)
+
+O server detecta gaps em sessões paralelas e pode solicitar retransmissão via NACK.
+
+```yaml
+# server.yaml
+gap_detection:
+  enabled: true
+  timeout: 60s
+  in_flight_timeout: 30s
+  check_interval: 5s
+  max_nacks_per_cycle: 5
+```
+
+### Semântica dos Timeouts
+
+| Campo | Função |
+|-------|--------|
+| `gap_detection.timeout` | Tempo mínimo para um gap normal persistir antes do envio de NACK |
+| `gap_detection.in_flight_timeout` | Tempo máximo sem progresso de payload para um chunk já iniciado ser tratado como stale |
+
+> **Importante:** `in_flight_timeout` afeta apenas a lógica do `GapTracker`. Ele **não altera** o timeout TCP do stream. O deadline de leitura do socket continua sendo controlado pelo `streamReadDeadline` interno do server.
+
+> **Nota:** Para chunks em fase `in-flight`, o `in_flight_timeout` tem precedência prática sobre `gap_detection.timeout`: se um chunk começou a chegar e para de progredir, ele pode virar elegível para NACK assim que o `in_flight_timeout` expirar.
+
+---
+
 ## DSCP Marking (Agent)
 
 O agent suporta marcação de DSCP (Differentiated Services Code Point) nos sockets de backup:

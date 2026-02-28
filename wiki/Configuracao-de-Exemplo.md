@@ -150,6 +150,16 @@ web_ui:
     - "10.0.0.0/8"
     - "192.168.0.0/16"
 
+# Detecção proativa de gaps em sessões paralelas.
+# in_flight_timeout afeta apenas a lógica do GapTracker; não altera o timeout
+# TCP do stream, que continua sendo controlado pelo streamReadDeadline interno.
+gap_detection:
+  enabled: true
+  timeout: 60s
+  in_flight_timeout: 30s
+  check_interval: 5s
+  max_nacks_per_cycle: 5
+
 # Buffer de chunks em memória — suaviza I/O em HDD/NAS lentos.
 # 0 (ou ausente) = desligado. Quando habilitado, a memória é reservada no startup.
 chunk_buffer:
@@ -179,6 +189,11 @@ chunk_buffer:
 | `web_ui.session_history_file` | ❌ | Caminho do arquivo JSONL de histórico de sessões. |
 | `web_ui.active_sessions_file` | ❌ | Caminho do arquivo JSONL de sessões ativas (snapshot periódico). |
 | `web_ui.active_snapshot_interval` | ❌ | Intervalo entre snapshots de sessões ativas (default: `5m`). |
+| `gap_detection.enabled` | ❌ | `true` (padrão) habilita detecção proativa de gaps em sessões paralelas. |
+| `gap_detection.timeout` | ❌ | Default: `60s`. Tempo mínimo para um gap normal persistir antes do envio de NACK. |
+| `gap_detection.in_flight_timeout` | ❌ | Default: `30s`. Tempo máximo sem progresso de payload para um chunk já iniciado ser tratado como stale. Não altera o timeout TCP do stream. |
+| `gap_detection.check_interval` | ❌ | Default: `5s`. Intervalo entre verificações do GapTracker. |
+| `gap_detection.max_nacks_per_cycle` | ❌ | Default: `5`. Limite de NACKs enviados por ciclo de verificação. |
 | `chunk_buffer.size` | ❌ | Tamanho do buffer global em memória (ex: `128mb`). `0` ou ausente = desligado. |
 | `chunk_buffer.drain_ratio` | ❌ | Nível de ocupação que aciona drenagem: `0.0` = write-through, `0.5` = 50% (padrão), `1.0` = cheio. |
 
@@ -194,3 +209,4 @@ chunk_buffer:
 6. **Bandwidth Throttling**: O `bandwidth_limit` aplica-se ao throughput agregado do backup entry. Para single-stream, limita a conexão única. Para parallel-stream, limita a soma de todos os streams. Mínimo aceito: `64kb`.
 7. **Chunk Shard Levels**: `chunk_shard_levels: 2` distribui os chunks em 2 níveis de subdiretórios (`XX/YYYYYY`), reduzindo a contagem de entradas por diretório em sessões paralelas intensas. Recomendado quando `parallels ≥ 4` com backup de dados grandes.
 8. **Persistência da WebUI**: Os arquivos `events_file`, `session_history_file` e `active_sessions_file` permitem recuperar eventos e histórico após reiniciar o server. Os diretórios pai devem existir e ter permissão de escrita.
+9. **Gap Detection**: `gap_detection.in_flight_timeout` governa apenas a lógica do `GapTracker`. O timeout TCP do stream continua sendo controlado separadamente pelo `streamReadDeadline` interno do server.
