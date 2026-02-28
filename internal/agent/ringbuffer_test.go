@@ -195,6 +195,39 @@ func TestRingBuffer_ReadAtWaitsForData(t *testing.T) {
 	}
 }
 
+func TestRingBuffer_ReadFullAtWaitsForCompleteRange(t *testing.T) {
+	rb := NewRingBuffer(256)
+
+	done := make(chan []byte, 1)
+	go func() {
+		buf := make([]byte, 10)
+		if _, err := rb.ReadFullAt(0, buf); err != nil {
+			t.Errorf("ReadFullAt error: %v", err)
+			return
+		}
+		done <- buf
+	}()
+
+	rb.Write([]byte("hello"))
+
+	select {
+	case <-done:
+		t.Fatal("ReadFullAt should wait until the full range is available")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	rb.Write([]byte("world"))
+
+	select {
+	case got := <-done:
+		if !bytes.Equal(got, []byte("helloworld")) {
+			t.Fatalf("expected helloworld, got %q", got)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("ReadFullAt should unblock after the full range is written")
+	}
+}
+
 func TestRingBuffer_ConcurrentWriteRead(t *testing.T) {
 	rb := NewRingBuffer(4096)
 	totalBytes := int64(4096 * 50) // 200KB no total

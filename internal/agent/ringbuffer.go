@@ -136,6 +136,23 @@ func (rb *RingBuffer) ReadAt(offset int64, p []byte) (int, error) {
 	return readable, nil
 }
 
+// ReadFullAt lê exatamente len(p) bytes a partir do offset absoluto.
+// Bloqueia enquanto a faixa ainda não estiver totalmente disponível.
+// Retorna erro se o offset expirar ou o buffer fechar antes de completar a leitura.
+func (rb *RingBuffer) ReadFullAt(offset int64, p []byte) (int, error) {
+	total := 0
+	for total < len(p) {
+		n, err := rb.ReadAt(offset+int64(total), p[total:])
+		if n > 0 {
+			total += n
+		}
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
+}
+
 // Advance move o tail para o offset especificado, liberando espaço no buffer.
 // Chamado quando o server confirma recebimento (SACK).
 func (rb *RingBuffer) Advance(offset int64) {

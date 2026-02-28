@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1379,19 +1380,14 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 				}
 			} else {
 				// Chunk irrecuperável (ring buffer sobrescrito) — aborta sessão.
+				abortErr := fmt.Errorf("chunk seq %d irrecoverable (buffer overwritten)", result.MissingSeq)
 				logger.Error("chunk irrecoverable, aborting session",
 					"session", result.SessionID,
 					"missingSeq", result.MissingSeq)
 				if h.Events != nil {
-					h.Events.PushEvent("error", "chunk_lost", agentName, fmt.Sprintf("chunk seq %d irrecoverable (buffer overwritten)", result.MissingSeq), 0)
+					h.Events.PushEvent("error", "chunk_lost", agentName, abortErr.Error(), 0)
 				}
-				// Fecha todos os streams da sessão para forçar abort
-				ps.StreamConns.Range(func(key, val any) bool {
-					if c, ok := val.(net.Conn); ok {
-						c.Close()
-					}
-					return true
-				})
+				ps.abort(abortErr)
 			}
 
 		default:
@@ -1630,11 +1626,6 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 		}
 		logger.Info("parallel mode detected", "maxStreams", pi.MaxStreams, "chunkSize", pi.ChunkSize)
 
-		if err := protocol.WriteParallelInitACK(conn, protocol.ParallelInitStatusOK); err != nil {
-			logger.Error("writing ParallelInit ACK", "error", err)
-			return
-		}
-
 		h.handleParallelBackup(ctx, conn, br, sessionID, agentName, storageName, backupName, clientVersion, storageInfo, pi, lockKey, logger)
 		return
 	}
@@ -1645,7 +1636,9 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	writer, err := NewAtomicWriter(storageInfo.BaseDir, agentName, backupName, storageInfo.FileExtension())
 	if err != nil {
 		logger.Error("creating atomic writer", "error", err)
-		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+		if ackErr := protocol.WriteParallelInitACK(conn, protocol.ParallelInitStatusError); ackErr != nil {
+			logger.Error("writing ParallelInit ACK", "error", ackErr)
+		}
 		return
 	}
 
@@ -2161,8 +2154,46 @@ type ParallelSession struct {
 	AutoScaleInfo     atomic.Value  // *observability.AutoScaleInfo (atualizado via ControlAutoScaleStats)
 	IngestionDone     chan struct{} // fechado quando agent envia ControlIngestionDone
 	ingestionOnce     sync.Once     // garante close único do IngestionDone
+	Aborted           chan struct{} // fechado quando a sessão é abortada antes do finalize
+	abortOnce         sync.Once     // garante close único do Aborted
+	AbortErr          atomic.Value  // error do aborto (quando houver)
 	GapTracker        *GapTracker   // detector proativo de chunks faltantes (nil quando gap_detection desabilitado)
 	Logger            *slog.Logger  // Session logger (enriquecido com session_log_dir quando habilitado)
+}
+
+func (ps *ParallelSession) abort(err error) {
+	if err != nil {
+		ps.AbortErr.Store(err)
+	}
+	ps.Closing.Store(true)
+	ps.abortOnce.Do(func() {
+		close(ps.Aborted)
+	})
+
+	ps.StreamCancels.Range(func(_, val any) bool {
+		if cancel, ok := val.(context.CancelFunc); ok {
+			cancel()
+		}
+		return true
+	})
+	ps.StreamConns.Range(func(_, val any) bool {
+		if c, ok := val.(net.Conn); ok {
+			c.Close()
+		}
+		return true
+	})
+}
+
+func (ps *ParallelSession) aborted() (error, bool) {
+	select {
+	case <-ps.Aborted:
+		if err, ok := ps.AbortErr.Load().(error); ok {
+			return err, true
+		}
+		return nil, true
+	default:
+		return nil, false
+	}
 }
 
 // handleParallelBackup processa um backup paralelo.
@@ -2212,7 +2243,9 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	})
 	if err != nil {
 		logger.Error("creating chunk assembler", "error", err)
-		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+		if ackErr := protocol.WriteParallelInitACK(conn, protocol.ParallelInitStatusError); ackErr != nil {
+			logger.Error("writing ParallelInit ACK", "error", ackErr)
+		}
 		return
 	}
 	defer assembler.Cleanup()
@@ -2234,6 +2267,7 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		Done:          make(chan struct{}),
 		CreatedAt:     now,
 		IngestionDone: make(chan struct{}),
+		Aborted:       make(chan struct{}),
 	}
 
 	// Inicializa gap tracker se habilitado na config
@@ -2249,6 +2283,12 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	pSession.Logger = logger // session logger (com fan-out para arquivo quando habilitado)
 	pSession.LastActivity.Store(now.UnixNano())
 	h.sessions.Store(sessionID, pSession)
+
+	if err := protocol.WriteParallelInitACK(conn, protocol.ParallelInitStatusOK); err != nil {
+		logger.Error("writing ParallelInit ACK", "error", err)
+		h.sessions.Delete(sessionID)
+		return
+	}
 
 	// Conn primária é control-only: não recebe dados de stream 0 aqui.
 	// Todos os N streams de dados conectam via ParallelJoin (handleParallelJoin).
@@ -2283,6 +2323,24 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	select {
 	case <-pSession.IngestionDone:
 		logger.Info("agent confirmed ingestion complete")
+	case <-pSession.Aborted:
+		pSession.StreamWg.Wait()
+		err, _ := pSession.aborted()
+		if err != nil {
+			logger.Error("parallel session aborted before ingestion completed", "error", err)
+		} else {
+			logger.Error("parallel session aborted before ingestion completed")
+		}
+		h.sessions.Delete(sessionID)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+		if h.Events != nil {
+			msg := fmt.Sprintf("%s/%s aborted before ingestion completed", storageName, backupName)
+			if err != nil {
+				msg = fmt.Sprintf("%s/%s aborted before ingestion completed: %v", storageName, backupName, err)
+			}
+			h.Events.PushEvent("error", "session_aborted", agentName, msg, 0)
+		}
+		return
 	case <-time.After(25 * time.Hour):
 		logger.Error("ingestion timeout — agent never confirmed completion")
 		h.sessions.Delete(sessionID)
@@ -2660,9 +2718,23 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 	pSession.StreamWg.Done()
 
 	if err != nil {
+		if abortErr, aborted := pSession.aborted(); aborted {
+			if abortErr != nil {
+				logger.Info("parallel stream closed due to session abort", "bytes", bytesReceived, "error", abortErr)
+			} else {
+				logger.Info("parallel stream closed due to session abort", "bytes", bytesReceived)
+			}
+			pSession.StreamConns.Delete(pj.StreamIndex)
+			return
+		}
 		// context.Canceled é esperado em re-join — não é um erro real
 		if ctx.Err() == nil && streamCtx.Err() == context.Canceled {
 			logger.Info("parallel stream replaced by re-join", "bytes", bytesReceived)
+			return
+		}
+		if errors.Is(err, net.ErrClosed) || (ctx.Err() != nil && streamCtx.Err() == context.Canceled) {
+			logger.Info("parallel stream closed", "bytes", bytesReceived, "error", err)
+			pSession.StreamConns.Delete(pj.StreamIndex)
 			return
 		}
 		logger.Error("receiving parallel stream", "error", err, "bytes", bytesReceived)
