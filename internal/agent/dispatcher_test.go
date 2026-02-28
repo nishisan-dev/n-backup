@@ -266,6 +266,9 @@ func TestDispatcher_RetransmitChunk_UsesOriginalStream(t *testing.T) {
 	if _, err := d.Write(data); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
+	frameLen := d.streams[1].rb.Head()
+	d.streams[1].sendOffset = frameLen
+	d.streams[1].wireOffset = frameLen
 
 	ok, err := d.RetransmitChunk(0)
 	if err != nil {
@@ -278,8 +281,38 @@ func TestDispatcher_RetransmitChunk_UsesOriginalStream(t *testing.T) {
 	if got := atomic.LoadInt64(&conn0.written); got != 0 {
 		t.Fatalf("expected stream 0 conn to remain untouched, got %d bytes", got)
 	}
-	if got := atomic.LoadInt64(&conn1.written); got == 0 {
-		t.Fatal("expected retransmit to be written to original stream 1")
+	if got := atomic.LoadInt64(&conn1.written); got != frameLen {
+		t.Fatalf("expected retransmit write of %d bytes on original stream 1, got %d", frameLen, got)
+	}
+	if got := d.streams[1].rb.Head(); got != frameLen {
+		t.Fatalf("expected ring buffer head to remain at %d, got %d", frameLen, got)
+	}
+	if got := d.streams[1].sendOffset; got != frameLen {
+		t.Fatalf("expected sendOffset to remain at %d, got %d", frameLen, got)
+	}
+	if got := d.streams[1].wireOffset; got != frameLen*2 {
+		t.Fatalf("expected wireOffset to advance to %d, got %d", frameLen*2, got)
+	}
+}
+
+func TestParallelStream_TranslateWireOffsetWithRetransmits(t *testing.T) {
+	var s ParallelStream
+	s.sendMu.Lock()
+	s.sendOffset = 4096
+	s.wireOffset = 4096
+	s.recordRetransmitLocked(1024)
+	base := s.applyACKLocked(5120)
+	s.sendMu.Unlock()
+
+	if base != 4096 {
+		t.Fatalf("expected base offset 4096 after ACKing retransmit, got %d", base)
+	}
+
+	s.sendMu.Lock()
+	resume := s.resumeFromWireOffsetLocked(5120)
+	s.sendMu.Unlock()
+	if resume != 4096 {
+		t.Fatalf("expected resume send offset 4096, got %d", resume)
 	}
 }
 

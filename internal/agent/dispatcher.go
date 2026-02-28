@@ -90,9 +90,17 @@ type ParallelStream struct {
 	conn       net.Conn
 	connMu     sync.Mutex // protege conn durante reconnect
 	writeMu    sync.Mutex // serializa frames no socket (sender + retransmit)
-	sendOffset int64
-	sendMu     sync.Mutex
-	drainBytes int64 // atomic — bytes drenados (ACK'd) por este stream
+	sendOffset int64      // próximo offset de dados "reais" no ring buffer
+	wireOffset int64      // próximo offset observado pelo server (inclui retransmits)
+	// ackedRetransmit acumula bytes de retransmissão já ACK'd pelo server.
+	// Isso permite traduzir offsets do byte-stream remoto de volta para offsets
+	// do ring buffer local, sem precisar materializar retransmits no buffer.
+	ackedRetransmit int64
+	// retransmitSpans registra retransmits ainda não incorporados em
+	// ackedRetransmit. Protegido por sendMu.
+	retransmitSpans []retransmitSpan
+	sendMu          sync.Mutex
+	drainBytes      int64 // atomic — bytes drenados (ACK'd) por este stream
 	// senderStarted evita múltiplos sender goroutines para o mesmo stream.
 	// Reativação de stream deve reutilizar o sender existente.
 	senderStarted atomic.Bool
@@ -100,6 +108,11 @@ type ParallelStream struct {
 	dead          atomic.Bool // permanentemente morto (esgotou retries)
 	senderDone    chan struct{}
 	senderErr     chan error
+}
+
+type retransmitSpan struct {
+	start int64
+	end   int64
 }
 
 // chunkLocation armazena onde um chunk foi escrito no ring buffer de um stream.
@@ -275,8 +288,10 @@ func (d *Dispatcher) emitChunk(data []byte) error {
 // RetransmitChunk tenta retransmitir um chunk perdido identificado pelo globalSeq.
 // Consulta o chunkMap para localizar o chunk no ring buffer do stream original.
 // Se o chunk ainda está no buffer, lê os dados e reenvia pelo MESMO stream que
-// contém o chunk no ring buffer. O offset de ChunkSACK é relativo ao byte stream
-// daquela conexão; enviar por outro stream corrompe a contabilidade de ACKs.
+// contém o chunk no ring buffer. Retransmits não são reanexados ao ring buffer:
+// em vez disso, o stream mantém um ledger de bytes retransmitidos para traduzir
+// offsets de ChunkSACK/Resume do byte-stream remoto de volta para offsets do
+// ring buffer local.
 // Retorna (true, nil) se retransmitido com sucesso, (false, nil) se irrecuperável.
 func (d *Dispatcher) RetransmitChunk(globalSeq uint32) (bool, error) {
 	// Lookup no chunkMap
@@ -326,13 +341,92 @@ func (d *Dispatcher) RetransmitChunk(globalSeq uint32) (bool, error) {
 		return false, fmt.Errorf("retransmitting chunk %d on original stream %d: %w",
 			globalSeq, stream.index, err)
 	}
+	stream.sendMu.Lock()
+	stream.recordRetransmitLocked(int64(len(buf)))
+	stream.sendMu.Unlock()
 
 	d.logger.Info("retransmit: chunk sent successfully",
 		"globalSeq", globalSeq,
 		"stream", stream.index,
+		"bytes", len(buf),
 	)
 
 	return true, nil
+}
+
+func (s *ParallelStream) recordRetransmitLocked(length int64) {
+	start := s.wireOffset
+	s.wireOffset += length
+	s.retransmitSpans = append(s.retransmitSpans, retransmitSpan{
+		start: start,
+		end:   start + length,
+	})
+}
+
+func (s *ParallelStream) advanceNormalLocked(length int64) {
+	s.sendOffset += length
+	s.wireOffset += length
+}
+
+func (s *ParallelStream) translateWireOffsetLocked(wireOffset int64) int64 {
+	baseOffset := wireOffset - s.ackedRetransmit
+	for _, span := range s.retransmitSpans {
+		if wireOffset <= span.start {
+			break
+		}
+		overlapEnd := minInt64(wireOffset, span.end)
+		if overlapEnd > span.start {
+			baseOffset -= overlapEnd - span.start
+		}
+	}
+	if baseOffset < 0 {
+		return 0
+	}
+	return baseOffset
+}
+
+func (s *ParallelStream) applyACKLocked(wireOffset int64) int64 {
+	filtered := s.retransmitSpans[:0]
+	for _, span := range s.retransmitSpans {
+		switch {
+		case span.end <= wireOffset:
+			s.ackedRetransmit += span.end - span.start
+		case span.start < wireOffset:
+			// Nao deveria ocorrer: server so ACKa chunks completos.
+			s.ackedRetransmit += wireOffset - span.start
+			filtered = append(filtered, retransmitSpan{start: wireOffset, end: span.end})
+		default:
+			filtered = append(filtered, span)
+		}
+	}
+	s.retransmitSpans = filtered
+	return s.translateWireOffsetLocked(wireOffset)
+}
+
+func (s *ParallelStream) resumeFromWireOffsetLocked(wireOffset int64) int64 {
+	for _, span := range s.retransmitSpans {
+		if span.start >= wireOffset {
+			continue
+		}
+		ackedEnd := minInt64(span.end, wireOffset)
+		if ackedEnd > span.start {
+			s.ackedRetransmit += ackedEnd - span.start
+		}
+	}
+	s.retransmitSpans = nil
+	s.wireOffset = wireOffset
+	s.sendOffset = wireOffset - s.ackedRetransmit
+	if s.sendOffset < 0 {
+		s.sendOffset = 0
+	}
+	return s.sendOffset
+}
+
+func minInt64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (d *Dispatcher) readChunkFrame(stream *ParallelStream, offset int64) ([]byte, error) {
@@ -535,11 +629,12 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 				}
 
 				stream.sendMu.Lock()
-				stream.sendOffset = resumeOffset
+				stream.resumeFromWireOffsetLocked(resumeOffset)
 				stream.sendMu.Unlock()
 
 				d.logger.Info("stream reconnected, resuming from offset",
 					"stream", streamIdx, "offset", resumeOffset,
+					"resumeSendOffset", stream.sendOffset,
 					"rbTail", stream.rb.Tail(), "rbHead", stream.rb.Head())
 				retries = 0 // reset após reconexão bem-sucedida — evita morte permanente por acúmulo
 				continue
@@ -548,7 +643,7 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 			// Write bem-sucedido — reset retries e avança offset
 			retries = 0
 			stream.sendMu.Lock()
-			stream.sendOffset += int64(len(frame))
+			stream.advanceNormalLocked(int64(len(frame)))
 			stream.sendMu.Unlock()
 		}
 	}()
@@ -624,7 +719,7 @@ func (d *Dispatcher) startACKReader(streamIdx int) {
 	stream := d.streams[streamIdx]
 
 	go func() {
-		var lastOffset int64
+		lastBaseOffset := stream.rb.Tail()
 		for {
 			stream.connMu.Lock()
 			conn := stream.conn
@@ -635,20 +730,24 @@ func (d *Dispatcher) startACKReader(streamIdx int) {
 				return // conn fechada ou erro — sender tratará a reconexão
 			}
 
-			newOffset := int64(csack.Offset)
-			stream.rb.Advance(newOffset)
+			newWireOffset := int64(csack.Offset)
+			stream.sendMu.Lock()
+			newBaseOffset := stream.applyACKLocked(newWireOffset)
+			stream.sendMu.Unlock()
+			stream.rb.Advance(newBaseOffset)
 
 			// Acumula apenas o delta (bytes novos drenados desde o último SACK)
-			delta := newOffset - lastOffset
+			delta := newBaseOffset - lastBaseOffset
 			if delta > 0 {
 				atomic.AddInt64(&stream.drainBytes, delta)
 			}
-			lastOffset = newOffset
+			lastBaseOffset = newBaseOffset
 
 			d.logger.Debug("ChunkSACK received",
 				"stream", streamIdx,
 				"chunkSeq", csack.ChunkSeq,
-				"offset", csack.Offset,
+				"wireOffset", csack.Offset,
+				"baseOffset", newBaseOffset,
 			)
 		}
 	}()
