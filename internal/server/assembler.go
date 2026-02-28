@@ -539,8 +539,12 @@ func writeChunkToTemp(dir string, data []byte, fsyncEnabled bool) (string, error
 
 // chunkPath retorna o caminho de staging do chunk usando directory sharding
 // de 1 ou 2 níveis, conforme configurado em shardLevels.
-// Usa cache interno para evitar syscalls os.MkdirAll repetidas.
 // Deve ser chamado com ca.mu held.
+//
+// Importante: o cache createdShards é apenas uma pista para observabilidade;
+// nao pode ser tratado como prova de existencia do diretório. Se o diretório
+// for removido externamente (cleanup, crash-restart parcial, volume reapresentado),
+// writeChunkLazy precisa se autocurar e recriar a arvore.
 func (ca *ChunkAssembler) chunkPath(globalSeq uint32) (string, error) {
 	level1 := fmt.Sprintf("%02x", globalSeq%chunkShardFanout)
 	var shardDir string
@@ -551,13 +555,11 @@ func (ca *ChunkAssembler) chunkPath(globalSeq uint32) (string, error) {
 		shardDir = filepath.Join(ca.chunkDir, level1)
 	}
 
-	if _, exists := ca.createdShards[shardDir]; !exists {
-		if err := os.MkdirAll(shardDir, 0755); err != nil {
-			return "", fmt.Errorf("creating chunk shard directory: %w", err)
-		}
-		ca.createdShards[shardDir] = struct{}{}
-		ca.chunkDirExists = true
+	if err := os.MkdirAll(shardDir, 0755); err != nil {
+		return "", fmt.Errorf("creating chunk shard directory: %w", err)
 	}
+	ca.createdShards[shardDir] = struct{}{}
+	ca.chunkDirExists = true
 
 	name := fmt.Sprintf("chunk_%010d.tmp", globalSeq)
 	return filepath.Join(shardDir, name), nil
