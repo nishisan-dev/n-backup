@@ -252,6 +252,49 @@ func TestEvaluateFlowRotation_FallbackOnACKTimeout(t *testing.T) {
 	ctrlConn.mu.Unlock()
 }
 
+func TestControlChannelReconnectDoesNotDropNewConn(t *testing.T) {
+	h, _ := newFlowRotationTestHandler()
+
+	oldConn := &controlTestConn{}
+	oldMu := &sync.Mutex{}
+	oldCCI := &ControlConnInfo{Conn: oldConn, RemoteAddr: "old:1234", KeepaliveS: 30}
+
+	newConn := &controlTestConn{}
+	newMu := &sync.Mutex{}
+	newCCI := &ControlConnInfo{Conn: newConn, RemoteAddr: "new:1234", KeepaliveS: 30}
+
+	h.registerControlConn("agent-test", oldCCI, oldMu)
+	h.registerControlConn("agent-test", newCCI, newMu)
+
+	// Simula cleanup tardio da conexão antiga após uma reconexão já estabelecida.
+	h.unregisterControlConn("agent-test", oldCCI, oldMu)
+
+	gotRaw, ok := h.controlConns.Load("agent-test")
+	if !ok {
+		t.Fatal("new control connection should remain registered")
+	}
+	if gotRaw.(*ControlConnInfo) != newCCI {
+		t.Fatal("old control connection cleanup must not remove newer registration")
+	}
+
+	gotMuRaw, ok := h.controlConnsMu.Load("agent-test")
+	if !ok {
+		t.Fatal("new control write mutex should remain registered")
+	}
+	if gotMuRaw.(*sync.Mutex) != newMu {
+		t.Fatal("old mutex cleanup must not remove newer registration")
+	}
+
+	h.unregisterControlConn("agent-test", newCCI, newMu)
+
+	if _, ok := h.controlConns.Load("agent-test"); ok {
+		t.Fatal("current control connection should be removable by matching cleanup")
+	}
+	if _, ok := h.controlConnsMu.Load("agent-test"); ok {
+		t.Fatal("current control mutex should be removable by matching cleanup")
+	}
+}
+
 // --- Testes de streamStatus ---
 
 func TestStreamStatus_Disconnected(t *testing.T) {

@@ -110,6 +110,20 @@ type ControlConnInfo struct {
 	Stats         atomic.Value // *observability.AgentStats
 }
 
+// registerControlConn publica a conexão de controle atual para um agent.
+func (h *Handler) registerControlConn(agentName string, cci *ControlConnInfo, writeMu *sync.Mutex) {
+	h.controlConns.Store(agentName, cci)
+	h.controlConnsMu.Store(agentName, writeMu)
+}
+
+// unregisterControlConn remove o registro somente se ele ainda aponta para a
+// mesma conexão/mutex que esta goroutine instalou. Isso evita que um disconnect
+// tardio apague uma reconexão mais recente do mesmo agent.
+func (h *Handler) unregisterControlConn(agentName string, cci *ControlConnInfo, writeMu *sync.Mutex) {
+	h.controlConns.CompareAndDelete(agentName, cci)
+	h.controlConnsMu.CompareAndDelete(agentName, writeMu)
+}
+
 // NewHandler cria um novo Handler.
 func NewHandler(cfg *config.ServerConfig, logger *slog.Logger, locks *sync.Map, sessions *sync.Map) *Handler {
 	return &Handler{
@@ -1131,10 +1145,8 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 		DiskUsagePercent: initialStats.DiskUsagePercent,
 		LoadAverage:      initialStats.LoadAverage,
 	})
-	h.controlConns.Store(agentName, cci)
-	h.controlConnsMu.Store(agentName, writeMu)
-	defer h.controlConns.Delete(agentName)
-	defer h.controlConnsMu.Delete(agentName)
+	h.registerControlConn(agentName, cci, writeMu)
+	defer h.unregisterControlConn(agentName, cci, writeMu)
 
 	logger = logger.With("agent", agentName)
 	logger.Info("control channel established",
