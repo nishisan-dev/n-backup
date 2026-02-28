@@ -10,6 +10,7 @@
     --bg-card-hover: rgba(30, 41, 59, 0.9);
     --bg-glass: rgba(255, 255, 255, 0.03);
     --border-subtle: rgba(255, 255, 255, 0.06);
+    --border-color: var(--border-subtle);
     --border-active: rgba(99, 102, 241, 0.4);
 
     --text-primary: #f1f5f9;

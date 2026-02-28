@@ -10,6 +10,9 @@
     let selectedSessionId = null;
     let isVisible = true;
     let isNavigating = false; // guard contra loops hash ↔ switchView
+    let currentRequestId = 0;
+    let currentAbortController = null;
+    let configLoaded = false;
 
     // Ring buffer de dados de throughput por sessão
     // Chave: session_id → { net: number[], disk: number[], lastBytes: number, lastDisk: number }
@@ -24,6 +27,40 @@
 
     // Cache dos eventos carregados (para export)
     let cachedEvents = [];
+
+    function cancelInFlightRequest() {
+        if (currentAbortController) {
+            currentAbortController.abort();
+            currentAbortController = null;
+        }
+    }
+
+    function beginViewRequest() {
+        cancelInFlightRequest();
+        currentRequestId += 1;
+        currentAbortController = new AbortController();
+        return {
+            requestId: currentRequestId,
+            signal: currentAbortController.signal,
+        };
+    }
+
+    function isLatestRequest(requestId) {
+        return requestId === currentRequestId;
+    }
+
+    function isAbortError(err) {
+        return err && err.name === 'AbortError';
+    }
+
+    function pruneSparkHistory(activeSessionIds) {
+        const activeIds = new Set(activeSessionIds);
+        Object.keys(sparkHistory).forEach((sessionId) => {
+            if (!activeIds.has(sessionId)) {
+                delete sparkHistory[sessionId];
+            }
+        });
+    }
 
     // ============ Hash Routing ============
 
@@ -104,16 +141,20 @@
     // ============ Data Fetching ============
 
     async function fetchOverview() {
+        const { requestId, signal } = beginViewRequest();
         try {
             const [health, metrics, sessions, agents, storages] = await Promise.all([
-                API.health(),
-                API.metrics(),
-                API.sessions(),
-                API.agents(),
-                API.storages(),
+                API.health({ signal }),
+                API.metrics({ signal }),
+                API.sessions({ signal }),
+                API.agents({ signal }),
+                API.storages({ signal }),
             ]);
+            if (!isLatestRequest(requestId)) return;
 
             updateConnectionStatus('connected');
+            sessions.forEach(s => updateSparkHistory(s));
+            pruneSparkHistory(sessions.map(s => s.session_id));
 
             Components.renderServerInfo(health);
             Components.renderOverviewMetrics(metrics);
@@ -140,21 +181,25 @@
             // Atualiza topbar
             document.getElementById('version-badge').textContent = health.version || 'dev';
         } catch (err) {
+            if (isAbortError(err) || !isLatestRequest(requestId)) return;
             updateConnectionStatus('error');
             console.error('fetchOverview error:', err);
         }
     }
 
     async function fetchSessions() {
+        const { requestId, signal } = beginViewRequest();
         try {
             const [sessions, history] = await Promise.all([
-                API.sessions(),
-                API.sessionsHistory(),
+                API.sessions({ signal }),
+                API.sessionsHistory({ signal }),
             ]);
+            if (!isLatestRequest(requestId)) return;
             updateConnectionStatus('connected');
 
             // Atualiza ring buffers para cada sessão
             sessions.forEach(s => updateSparkHistory(s));
+            pruneSparkHistory(sessions.map(s => s.session_id));
 
             Components.renderSessionsList(sessions);
             Components.renderSessionHistory(history);
@@ -168,14 +213,17 @@
                 }
             });
         } catch (err) {
+            if (isAbortError(err) || !isLatestRequest(requestId)) return;
             updateConnectionStatus('error');
             console.error('fetchSessions error:', err);
         }
     }
 
     async function fetchSessionDetail(id) {
+        const { requestId, signal } = beginViewRequest();
         try {
-            const detail = await API.session(id);
+            const detail = await API.session(id, { signal });
+            if (!isLatestRequest(requestId)) return;
             updateConnectionStatus('connected');
             updateSparkHistory(detail);
             Components.renderSessionDetail(detail);
@@ -183,30 +231,50 @@
             // Desenha sparklines após render
             drawSessionSparklines(id);
         } catch (err) {
+            if (isAbortError(err) || !isLatestRequest(requestId)) return;
+            if (err.status === 404 && selectedSessionId === id) {
+                selectedSessionId = null;
+                document.getElementById('sessions-list').style.display = '';
+                document.getElementById('session-detail').style.display = 'none';
+                pushRoute('sessions');
+                fetchSessions();
+                return;
+            }
             updateConnectionStatus('error');
             console.error('fetchSessionDetail error:', err);
         }
     }
 
     async function fetchEvents() {
+        const { requestId, signal } = beginViewRequest();
         try {
             const limit = parseInt(document.getElementById('events-limit').value) || 50;
-            const events = await API.events(limit);
+            const events = await API.events(limit, { signal });
+            if (!isLatestRequest(requestId)) return;
             updateConnectionStatus('connected');
             cachedEvents = events; // cache para export
             Components.renderEvents(events);
         } catch (err) {
+            if (isAbortError(err) || !isLatestRequest(requestId)) return;
             updateConnectionStatus('error');
             console.error('fetchEvents error:', err);
         }
     }
 
     async function fetchConfig() {
+        if (configLoaded) {
+            cancelInFlightRequest();
+            return;
+        }
+        const { requestId, signal } = beginViewRequest();
         try {
-            const cfg = await API.config();
+            const cfg = await API.config({ signal });
+            if (!isLatestRequest(requestId)) return;
             updateConnectionStatus('connected');
+            configLoaded = true;
             Components.renderConfig(cfg);
         } catch (err) {
+            if (isAbortError(err) || !isLatestRequest(requestId)) return;
             updateConnectionStatus('error');
             console.error('fetchConfig error:', err);
         }
@@ -254,7 +322,7 @@
         stopPolling();
         fetchCurrentView();
         pollTimer = setInterval(() => {
-            if (isVisible) {
+            if (isVisible && currentView !== 'config') {
                 fetchCurrentView();
             }
         }, POLL_INTERVAL);
@@ -285,7 +353,7 @@
         const row = e.target.closest('tr[data-session]');
         if (row) {
             switchView('sessions');
-            setTimeout(() => showSessionDetail(row.dataset.session), 50);
+            showSessionDetail(row.dataset.session);
         }
     });
 
@@ -310,7 +378,7 @@
     // Visibility change — pause polling when tab hidden
     document.addEventListener('visibilitychange', () => {
         isVisible = !document.hidden;
-        if (isVisible) {
+        if (isVisible && currentView !== 'config') {
             fetchCurrentView(); // Fetch imediato ao voltar
         }
     });

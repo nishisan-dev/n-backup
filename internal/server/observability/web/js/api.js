@@ -3,25 +3,28 @@
 const API = {
     base: '',  // same origin
 
-    async get(path) {
-        const res = await fetch(`${this.base}${path}`);
+    async get(path, init = {}) {
+        const res = await fetch(`${this.base}${path}`, init);
         if (!res.ok) {
-            throw new Error(`API ${res.status}: ${res.statusText}`);
+            const err = new Error(`API ${res.status}: ${res.statusText}`);
+            err.status = res.status;
+            err.path = path;
+            throw err;
         }
         return res.json();
     },
 
-    health() { return this.get('/api/v1/health'); },
-    metrics() { return this.get('/api/v1/metrics'); },
-    sessions() { return this.get('/api/v1/sessions'); },
-    session(id) { return this.get(`/api/v1/sessions/${encodeURIComponent(id)}`); },
-    events(limit = 50) { return this.get(`/api/v1/events?limit=${limit}`); },
-    config() { return this.get('/api/v1/config/effective'); },
-    agents() { return this.get('/api/v1/agents'); },
-    storages() { return this.get('/api/v1/storages'); },
-    sessionsHistory() { return this.get('/api/v1/sessions/history'); },
-    activeSessionsHistory(limit = 120, sessionId = "") {
+    health(init) { return this.get('/api/v1/health', init); },
+    metrics(init) { return this.get('/api/v1/metrics', init); },
+    sessions(init) { return this.get('/api/v1/sessions', init); },
+    session(id, init) { return this.get(`/api/v1/sessions/${encodeURIComponent(id)}`, init); },
+    events(limit = 50, init) { return this.get(`/api/v1/events?limit=${limit}`, init); },
+    config(init) { return this.get('/api/v1/config/effective', init); },
+    agents(init) { return this.get('/api/v1/agents', init); },
+    storages(init) { return this.get('/api/v1/storages', init); },
+    sessionsHistory(init) { return this.get('/api/v1/sessions/history', init); },
+    activeSessionsHistory(limit = 120, sessionId = "", init) {
         const sid = sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : "";
-        return this.get(`/api/v1/sessions/active-history?limit=${limit}${sid}`);
+        return this.get(`/api/v1/sessions/active-history?limit=${limit}${sid}`, init);
     },
 };
