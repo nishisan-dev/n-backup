@@ -382,6 +382,13 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 
 	go func() {
 		defer close(stream.senderDone)
+		defer func() {
+			stream.connMu.Lock()
+			if stream.conn != nil {
+				stream.conn.Close()
+			}
+			stream.connMu.Unlock()
+		}()
 		buf := make([]byte, streamIOBufferSize)
 		retries := 0
 
@@ -818,9 +825,8 @@ func (d *Dispatcher) SampleRates() RateSample {
 func (d *Dispatcher) Close() {
 	for i := 0; i < d.maxStreams; i++ {
 		d.streams[i].rb.Close()
-		if d.streams[i].conn != nil {
-			d.streams[i].conn.Close()
-		}
+		// A conexão não é fechada aqui para permitir que as sender goroutines
+		// drenem o restante do buffer para a rede. A goroutine fechará a conexão via defer.
 	}
 }
 
