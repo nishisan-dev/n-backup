@@ -2653,6 +2653,10 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 		return
 	}
 
+	// A partir daqui já temos uma sessão válida: redireciona os logs do join
+	// para o session logger, facilitando correlação post-mortem por stream.
+	logger = pSession.Logger.With("stream", pj.StreamIndex, "remote", conn.RemoteAddr().String())
+
 	// Rejeita join se a sessão está em fase de fechamento.
 	// O check precisa acontecer antes de cancelar/substituir o stream existente
 	// e antes de responder ACK OK.
@@ -2693,16 +2697,19 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 
 	// Atualiza uptime e reconnects do stream
 	// Reutiliza o contador existente em re-joins para evitar alocações descartadas.
+	var reconnectCount int32
 	if rcRaw, loaded := pSession.StreamReconnects.Load(pj.StreamIndex); loaded {
-		rcRaw.(*atomic.Int32).Add(1)
+		reconnectCount = rcRaw.(*atomic.Int32).Add(1)
 		// Emite evento de reconexão de stream
 		if h.Events != nil {
 			h.Events.PushEvent("warn", "stream_reconnect", pSession.AgentName, fmt.Sprintf("stream %d re-joined (session %s)", pj.StreamIndex, pj.SessionID), int(pj.StreamIndex))
 		}
 	} else {
 		pSession.StreamReconnects.Store(pj.StreamIndex, &atomic.Int32{})
+		reconnectCount = 0
 	}
 	pSession.StreamConnectedAt.Store(pj.StreamIndex, time.Now())
+	logger.Info("parallel join accepted", "lastOffset", lastOffset, "reconnects", reconnectCount)
 
 	// Inicializa counters per-stream para stats
 	nowNano := time.Now().UnixNano()
