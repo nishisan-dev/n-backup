@@ -84,10 +84,10 @@ func TestDispatcher_RoundRobin(t *testing.T) {
 		}
 	}
 
-	// Verifica que cada ring buffer recebeu 1 chunk (8B header + 1024B data = 1032B)
+	// Verifica que cada ring buffer recebeu 1 chunk (9B header + 1024B data = 1033B)
 	for i := 0; i < 3; i++ {
 		head := d.streams[i].rb.Head()
-		expected := int64(8 + 1024) // ChunkHeader (8B) + data (1024B)
+		expected := int64(9 + 1024) // ChunkHeader (9B) + data (1024B)
 		if head != expected {
 			t.Errorf("stream %d: expected head=%d, got %d", i, expected, head)
 		}
@@ -122,7 +122,7 @@ func TestDispatcher_SingleStream(t *testing.T) {
 	}
 
 	head := d.streams[0].rb.Head()
-	expected := int64(5 * (8 + 512)) // 5 chunks × (8B header + 512B data)
+	expected := int64(5 * (9 + 512)) // 5 chunks × (9B header + 512B data)
 	if head != expected {
 		t.Errorf("expected head=%d, got %d", expected, head)
 	}

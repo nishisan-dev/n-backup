@@ -412,7 +412,7 @@ func ReadChunkSACK(r io.Reader) (*ChunkSACK, error) {
 }
 
 // ReadChunkHeader lê o header de chunk paralelo (Client → Server).
-// Formato: [GlobalSeq uint32 4B] [Length uint32 4B]
+// Formato: [GlobalSeq uint32 4B] [Length uint32 4B] [SlotID uint8 1B]
 func ReadChunkHeader(r io.Reader) (*ChunkHeader, error) {
 	var globalSeq uint32
 	if err := binary.Read(r, binary.BigEndian, &globalSeq); err != nil {
@@ -422,8 +422,31 @@ func ReadChunkHeader(r io.Reader) (*ChunkHeader, error) {
 	if err := binary.Read(r, binary.BigEndian, &length); err != nil {
 		return nil, fmt.Errorf("reading chunk header length: %w", err)
 	}
+	var slotID [1]byte
+	if _, err := io.ReadFull(r, slotID[:]); err != nil {
+		return nil, fmt.Errorf("reading chunk header slot id: %w", err)
+	}
 	return &ChunkHeader{
 		GlobalSeq: globalSeq,
 		Length:    length,
+		SlotID:    slotID[0],
 	}, nil
+}
+
+// ReadControlSlotParkPayload lê o payload de ControlSlotPark (1B) após o magic já ter sido lido.
+func ReadControlSlotParkPayload(r io.Reader) (uint8, error) {
+	buf := make([]byte, 1)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return 0, fmt.Errorf("reading control slot park payload: %w", err)
+	}
+	return buf[0], nil
+}
+
+// ReadControlSlotResumePayload lê o payload de ControlSlotResume (1B) após o magic já ter sido lido.
+func ReadControlSlotResumePayload(r io.Reader) (uint8, error) {
+	buf := make([]byte, 1)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return 0, fmt.Errorf("reading control slot resume payload: %w", err)
+	}
+	return buf[0], nil
 }

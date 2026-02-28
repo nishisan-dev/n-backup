@@ -243,7 +243,7 @@ func (d *Dispatcher) emitChunk(data []byte) error {
 		return ErrAllStreamsDead
 	}
 
-	// Escreve ChunkHeader (8 bytes) no ring buffer antes dos dados
+	// Escreve ChunkHeader (9 bytes) no ring buffer antes dos dados
 	hdr := make([]byte, protocol.ChunkHeaderSize)
 	hdr[0] = byte(seq >> 24)
 	hdr[1] = byte(seq >> 16)
@@ -254,6 +254,7 @@ func (d *Dispatcher) emitChunk(data []byte) error {
 	hdr[5] = byte(l >> 16)
 	hdr[6] = byte(l >> 8)
 	hdr[7] = byte(l)
+	hdr[8] = stream.index // SlotID
 
 	// Captura offset antes do write para registrar no chunkMap
 	headerOffset := stream.rb.Head()

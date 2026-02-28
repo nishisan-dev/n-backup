@@ -35,7 +35,8 @@ type ParallelACK struct {
 }
 
 // ProtocolVersion é a versão atual do protocolo.
-const ProtocolVersion byte = 0x04
+// v5: slots first-class, SlotID no ChunkHeader, ControlSlotPark/Resume.
+const ProtocolVersion byte = 0x05
 
 // Status codes para ACK (Server → Client após Handshake).
 const (
@@ -165,13 +166,28 @@ type ChunkSACK struct {
 	Offset      uint64
 }
 
-// ChunkHeaderSize é o tamanho em bytes do ChunkHeader no wire: GlobalSeq(4B) + Length(4B).
-const ChunkHeaderSize = 8
+// ChunkHeaderSize é o tamanho em bytes do ChunkHeader no wire: GlobalSeq(4B) + Length(4B) + SlotID(1B).
+const ChunkHeaderSize = 9
 
 // ChunkHeader precede cada chunk no stream paralelo (Client → Server).
-// Permite ao server reconstruir a ordem global dos chunks.
-// Formato: [GlobalSeq uint32 4B] [Length uint32 4B]
+// Permite ao server reconstruir a ordem global dos chunks e rastrear o slot de origem.
+// Formato: [GlobalSeq uint32 4B] [Length uint32 4B] [SlotID uint8 1B]
 type ChunkHeader struct {
 	GlobalSeq uint32 // sequência global do chunk (0, 1, 2, ...)
 	Length    uint32 // tamanho dos dados que seguem
+	SlotID    uint8  // slot que originou o chunk
+}
+
+// ControlSlotPark é enviado pelo agent ao server para indicar que vai parar
+// de enviar por um slot (scale-down). O server atualiza o estado do slot.
+// Formato: [Magic "CSLP" 4B] [SlotID uint8 1B]
+type ControlSlotPark struct {
+	SlotID uint8
+}
+
+// ControlSlotResume é enviado pelo agent ao server para indicar que vai
+// retomar envio por um slot (scale-up). O server atualiza o estado do slot.
+// Formato: [Magic "CSLR" 4B] [SlotID uint8 1B]
+type ControlSlotResume struct {
+	SlotID uint8
 }

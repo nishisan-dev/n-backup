@@ -54,6 +54,14 @@ var MagicControlNACK = [4]byte{'C', 'N', 'A', 'K'}
 // Informa ao server se o chunk solicitado via NACK pôde ser retransmitido.
 var MagicControlRetransmitResult = [4]byte{'C', 'R', 'T', 'R'}
 
+// MagicControlSlotPark é o magic para frames ControlSlotPark (Agent → Server).
+// Sinaliza que o agent vai parar de enviar por um slot (scale-down).
+var MagicControlSlotPark = [4]byte{'C', 'S', 'L', 'P'}
+
+// MagicControlSlotResume é o magic para frames ControlSlotResume (Agent → Server).
+// Sinaliza que o agent vai retomar envio por um slot (scale-up).
+var MagicControlSlotResume = [4]byte{'C', 'S', 'L', 'R'}
+
 // ControlPing é enviado pelo agent para o server no canal de controle.
 // Formato: [Magic "CPNG" 4B] [Timestamp int64 8B]
 type ControlPing struct {

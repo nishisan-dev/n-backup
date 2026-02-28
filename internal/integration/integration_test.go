@@ -580,7 +580,7 @@ func TestEndToEnd_ParallelBackupSession(t *testing.T) {
 		}
 		chunk := rawData[off:end]
 
-		if err := protocol.WriteChunkHeader(stream0Conn, globalSeq, uint32(len(chunk))); err != nil {
+		if err := protocol.WriteChunkHeader(stream0Conn, globalSeq, uint32(len(chunk)), 0); err != nil {
 			t.Fatalf("WriteChunkHeader seq %d: %v", globalSeq, err)
 		}
 		if _, err := stream0Conn.Write(chunk); err != nil {

@@ -262,13 +262,36 @@ func WriteChunkSACK(w io.Writer, streamIndex uint8, chunkSeq uint32, offset uint
 }
 
 // WriteChunkHeader escreve o header de chunk paralelo (Client → Server).
-// Formato: [GlobalSeq uint32 4B] [Length uint32 4B]
-func WriteChunkHeader(w io.Writer, globalSeq, length uint32) error {
+// Formato: [GlobalSeq uint32 4B] [Length uint32 4B] [SlotID uint8 1B]
+func WriteChunkHeader(w io.Writer, globalSeq, length uint32, slotID uint8) error {
 	if err := binary.Write(w, binary.BigEndian, globalSeq); err != nil {
 		return fmt.Errorf("writing chunk header seq: %w", err)
 	}
 	if err := binary.Write(w, binary.BigEndian, length); err != nil {
 		return fmt.Errorf("writing chunk header length: %w", err)
 	}
+	if _, err := w.Write([]byte{slotID}); err != nil {
+		return fmt.Errorf("writing chunk header slot id: %w", err)
+	}
 	return nil
+}
+
+// WriteControlSlotPark escreve o frame ControlSlotPark (Agent → Server).
+// Formato: [Magic "CSLP" 4B] [SlotID uint8 1B]
+func WriteControlSlotPark(w io.Writer, slotID uint8) error {
+	buf := make([]byte, 5) // 4B magic + 1B slot
+	copy(buf[0:4], MagicControlSlotPark[:])
+	buf[4] = slotID
+	_, err := w.Write(buf)
+	return err
+}
+
+// WriteControlSlotResume escreve o frame ControlSlotResume (Agent → Server).
+// Formato: [Magic "CSLR" 4B] [SlotID uint8 1B]
+func WriteControlSlotResume(w io.Writer, slotID uint8) error {
+	buf := make([]byte, 5) // 4B magic + 1B slot
+	copy(buf[0:4], MagicControlSlotResume[:])
+	buf[4] = slotID
+	_, err := w.Write(buf)
+	return err
 }

@@ -496,3 +496,99 @@ func TestParallelACK_RoundTrip(t *testing.T) {
 		})
 	}
 }
+
+func TestChunkHeader_RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+
+	globalSeq := uint32(42)
+	length := uint32(65536)
+	slotID := uint8(3)
+
+	if err := WriteChunkHeader(&buf, globalSeq, length, slotID); err != nil {
+		t.Fatalf("WriteChunkHeader: %v", err)
+	}
+
+	hdr, err := ReadChunkHeader(&buf)
+	if err != nil {
+		t.Fatalf("ReadChunkHeader: %v", err)
+	}
+
+	if hdr.GlobalSeq != globalSeq {
+		t.Errorf("expected globalSeq %d, got %d", globalSeq, hdr.GlobalSeq)
+	}
+	if hdr.Length != length {
+		t.Errorf("expected length %d, got %d", length, hdr.Length)
+	}
+	if hdr.SlotID != slotID {
+		t.Errorf("expected slotID %d, got %d", slotID, hdr.SlotID)
+	}
+}
+
+func TestChunkHeader_FrameSize(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteChunkHeader(&buf, 1, 1024, 0); err != nil {
+		t.Fatalf("WriteChunkHeader: %v", err)
+	}
+	// GlobalSeq(4) + Length(4) + SlotID(1) = 9 bytes
+	if buf.Len() != ChunkHeaderSize {
+		t.Errorf("expected ChunkHeader size %d, got %d", ChunkHeaderSize, buf.Len())
+	}
+}
+
+func TestControlSlotPark_RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	slotID := uint8(5)
+
+	if err := WriteControlSlotPark(&buf, slotID); err != nil {
+		t.Fatalf("WriteControlSlotPark: %v", err)
+	}
+
+	// Frame: [Magic 4B] [SlotID 1B] = 5B
+	if buf.Len() != 5 {
+		t.Errorf("expected frame size 5, got %d", buf.Len())
+	}
+
+	// Lê magic manualmente (como o dispatcher faria)
+	var magic [4]byte
+	buf.Read(magic[:])
+	if magic != MagicControlSlotPark {
+		t.Fatalf("expected magic CSLP, got %q", magic)
+	}
+
+	got, err := ReadControlSlotParkPayload(&buf)
+	if err != nil {
+		t.Fatalf("ReadControlSlotParkPayload: %v", err)
+	}
+	if got != slotID {
+		t.Errorf("expected slotID %d, got %d", slotID, got)
+	}
+}
+
+func TestControlSlotResume_RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	slotID := uint8(7)
+
+	if err := WriteControlSlotResume(&buf, slotID); err != nil {
+		t.Fatalf("WriteControlSlotResume: %v", err)
+	}
+
+	// Frame: [Magic 4B] [SlotID 1B] = 5B
+	if buf.Len() != 5 {
+		t.Errorf("expected frame size 5, got %d", buf.Len())
+	}
+
+	// Lê magic manualmente
+	var magic [4]byte
+	buf.Read(magic[:])
+	if magic != MagicControlSlotResume {
+		t.Fatalf("expected magic CSLR, got %q", magic)
+	}
+
+	got, err := ReadControlSlotResumePayload(&buf)
+	if err != nil {
+		t.Fatalf("ReadControlSlotResumePayload: %v", err)
+	}
+	if got != slotID {
+		t.Errorf("expected slotID %d, got %d", slotID, got)
+	}
+}
