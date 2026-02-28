@@ -320,14 +320,15 @@ func TestCleanupExpiredSessions_ParallelSessionClosesStreamsAndCancels(t *testin
 		AgentName:   "agent-cleanup",
 		StorageName: "storage-cleanup",
 		MaxStreams:  2,
+		Slots:       PreallocateSlots(2),
 		Done:        make(chan struct{}),
 		CreatedAt:   time.Now().Add(-2 * time.Hour),
 	}
 	expiredParallel.LastActivity.Store(time.Now().Add(-2 * time.Hour).UnixNano())
-	expiredParallel.StreamConns.Store(uint8(0), closedConn1)
-	expiredParallel.StreamConns.Store(uint8(1), closedConn2)
-	expiredParallel.StreamCancels.Store(uint8(0), context.CancelFunc(cancel1))
-	expiredParallel.StreamCancels.Store(uint8(1), context.CancelFunc(cancel2))
+	expiredParallel.Slots[0].Conn = closedConn1
+	expiredParallel.Slots[1].Conn = closedConn2
+	expiredParallel.Slots[0].CancelFn = cancel1
+	expiredParallel.Slots[1].CancelFn = cancel2
 
 	sessions := &sync.Map{}
 	sessions.Store("parallel-expired", expiredParallel)
@@ -412,6 +413,7 @@ func TestHandleParallelJoin_RejectsClosingSessionBeforeAckOK(t *testing.T) {
 	ps := &ParallelSession{
 		SessionID:   "closing-session",
 		MaxStreams:  2,
+		Slots:       PreallocateSlots(2),
 		Done:        make(chan struct{}),
 		StreamReady: make(chan struct{}),
 		CreatedAt:   time.Now(),
@@ -451,10 +453,11 @@ func TestHandleParallelJoin_RejectsClosingSessionBeforeAckOK(t *testing.T) {
 	if ack.LastOffset != 0 {
 		t.Fatalf("expected LastOffset=0, got %d", ack.LastOffset)
 	}
-	if _, loaded := ps.StreamConns.Load(uint8(1)); loaded {
+	slot1 := ps.Slots[1]
+	if slot1.Conn != nil {
 		t.Fatal("closing session should not register a new stream connection")
 	}
-	if _, loaded := ps.StreamCancels.Load(uint8(1)); loaded {
+	if slot1.CancelFn != nil {
 		t.Fatal("closing session should not store a cancel func for rejected join")
 	}
 

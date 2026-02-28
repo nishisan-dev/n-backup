@@ -412,16 +412,12 @@ func (h *Handler) SessionsSnapshot() []observability.SessionSummary {
 			lastAct := time.Unix(0, s.LastActivity.Load())
 			activeStreams := 0
 			var totalOffset int64
-			s.StreamConns.Range(func(_, _ interface{}) bool {
-				activeStreams++
-				return true
-			})
-			s.StreamOffsets.Range(func(_, v interface{}) bool {
-				if ptr, ok := v.(*int64); ok {
-					totalOffset += atomic.LoadInt64(ptr)
+			for _, slot := range s.Slots {
+				if slot.GetStatus() == SlotReceiving {
+					activeStreams++
 				}
-				return true
-			})
+				totalOffset += slot.Offset.Load()
+			}
 			// Progresso e ETA
 			totalObj := s.TotalObjects.Load()
 			sentObj := s.ObjectsSent.Load()
@@ -542,70 +538,50 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 		activeStreams := 0
 		var totalOffset int64
 		var streams []observability.StreamDetail
-		activeByIndex := make(map[uint8]bool)
 
-		s.StreamConns.Range(func(k, _ interface{}) bool {
-			if idx, ok := k.(uint8); ok {
-				activeByIndex[idx] = true
+		for _, slot := range s.Slots {
+			status := slot.GetStatus()
+			active := status == SlotReceiving
+			if active {
+				activeStreams++
 			}
-			activeStreams++
-			return true
-		})
 
-		s.StreamOffsets.Range(func(k, v interface{}) bool {
-			idx := k.(uint8)
-			var offset int64
-			if ptr, ok := v.(*int64); ok {
-				offset = atomic.LoadInt64(ptr)
-			}
+			offset := slot.Offset.Load()
 			totalOffset += offset
 
-			// Throughput por stream: usa StreamTickBytes (snapshot do último
+			// Throughput por stream: usa TickBytes (snapshot do último
 			// tick de 15s) quando FlowRotation está habilitado, pois o
-			// evaluateFlowRotation faz Swap(0) nos contadores StreamTrafficIn.
-			// Sem FlowRotation, lê direto do StreamTrafficIn acumulado.
+			// evaluateFlowRotation faz Swap(0) nos contadores TrafficIn.
+			// Sem FlowRotation, lê direto do TrafficIn acumulado.
 			var mbps float64
 			if h.cfg.FlowRotation.Enabled {
-				if tickRaw, ok := s.StreamTickBytes.Load(idx); ok {
-					mbps = float64(tickRaw.(int64)) / 15.0 / (1024 * 1024)
-				}
-			} else if trafficRaw, ok := s.StreamTrafficIn.Load(idx); ok {
-				if ai, ok := trafficRaw.(*atomic.Int64); ok {
-					bytes := ai.Load()
-					mbps = float64(bytes) / 15.0 / (1024 * 1024)
-				}
+				mbps = float64(slot.TickBytes.Load()) / 15.0 / (1024 * 1024)
+			} else {
+				mbps = float64(slot.TrafficIn.Load()) / 15.0 / (1024 * 1024)
 			}
 
 			// Idle time
 			var idleSecs int64
-			if lastActRaw, ok := s.StreamLastAct.Load(idx); ok {
-				if ai, ok := lastActRaw.(*atomic.Int64); ok {
-					lastIO := time.Unix(0, ai.Load())
-					idleSecs = int64(time.Since(lastIO).Seconds())
-				}
+			lastNano := slot.LastActivity.Load()
+			if lastNano > 0 {
+				idleSecs = int64(time.Since(time.Unix(0, lastNano)).Seconds())
 			}
 
 			// Slow since
 			var slowSince string
-			if ssRaw, ok := s.StreamSlowSince.Load(idx); ok {
-				if ts, ok := ssRaw.(time.Time); ok && !ts.IsZero() {
-					slowSince = ts.Format(time.RFC3339)
-				}
+			if ss := slot.GetSlowSince(); !ss.IsZero() {
+				slowSince = ss.Format(time.RFC3339)
 			}
-			active := activeByIndex[idx]
 
 			// Stream uptime e reconnects
 			var connectedFor string
-			if ct, ok := s.StreamConnectedAt.Load(idx); ok {
-				connectedFor = time.Since(ct.(time.Time)).Truncate(time.Second).String()
+			if ct := slot.GetConnectedAt(); !ct.IsZero() {
+				connectedFor = time.Since(ct).Truncate(time.Second).String()
 			}
-			var reconnects int32
-			if rc, ok := s.StreamReconnects.Load(idx); ok {
-				reconnects = rc.(*atomic.Int32).Load()
-			}
+			reconnects := slot.Reconnects.Load()
 
 			streams = append(streams, observability.StreamDetail{
-				Index:        idx,
+				Index:        slot.Index,
 				OffsetBytes:  offset,
 				MBps:         mbps,
 				IdleSecs:     idleSecs,
@@ -615,8 +591,7 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 				ConnectedFor: connectedFor,
 				Reconnects:   reconnects,
 			})
-			return true
-		})
+		}
 
 		// Ordena streams por index para exibição determinística na UI.
 		sort.Slice(streams, func(i, j int) bool {
@@ -835,9 +810,7 @@ func (h *Handler) logPerStreamStats(intervalSecs float64) {
 		}
 
 		var stats []streamStat
-		ps.StreamTrafficIn.Range(func(k, v any) bool {
-			idx := k.(uint8)
-			counter := v.(*atomic.Int64)
+		for _, slot := range ps.Slots {
 			// Se flow rotation está habilitado, os contadores já foram
 			// resetados por evaluateFlowRotation (Swap(0)) neste tick.
 			// Caso contrário, precisamos fazer o Swap(0) aqui para
@@ -846,31 +819,24 @@ func (h *Handler) logPerStreamStats(intervalSecs float64) {
 			if h.cfg.FlowRotation.Enabled {
 				// Em flow rotation, o contador já foi consumido por evaluateFlowRotation.
 				// Usa snapshot do último tick para manter o log fiel ao intervalo.
-				if tickBytes, ok := ps.StreamTickBytes.Load(idx); ok {
-					bytes = tickBytes.(int64)
-				} else {
-					bytes = 0
-				}
+				bytes = slot.TickBytes.Load()
 			} else {
-				bytes = counter.Swap(0)
+				bytes = slot.TrafficIn.Swap(0)
 			}
 			mbps := float64(bytes) / intervalSecs / (1024 * 1024)
 
 			var idleSec int64
-			if lastAct, ok := ps.StreamLastAct.Load(idx); ok {
-				lastNano := lastAct.(*atomic.Int64).Load()
-				if lastNano > 0 {
-					idleSec = int64(time.Since(time.Unix(0, lastNano)).Seconds())
-				}
+			lastNano := slot.LastActivity.Load()
+			if lastNano > 0 {
+				idleSec = int64(time.Since(time.Unix(0, lastNano)).Seconds())
 			}
 
 			stats = append(stats, streamStat{
-				Idx:     idx,
+				Idx:     slot.Index,
 				MBps:    fmt.Sprintf("%.2f", mbps),
 				IdleSec: idleSec,
 			})
-			return true
-		})
+		}
 
 		if len(stats) > 0 {
 			h.logger.Info("stream stats",
@@ -907,15 +873,12 @@ func (h *Handler) evaluateFlowRotation(intervalSecs float64) {
 
 		var rotated int
 
-		ps.StreamTrafficIn.Range(func(k, v any) bool {
-			idx := k.(uint8)
-			counter := v.(*atomic.Int64)
-
+		for _, slot := range ps.Slots {
 			// Swap-and-reset: lê bytes reais do intervalo e zera o contador.
 			// Isso garante que o flow rotation veja o throughput real,
 			// independente de quando logPerStreamStats roda.
-			bytes := counter.Swap(0)
-			ps.StreamTickBytes.Store(idx, bytes)
+			bytes := slot.TrafficIn.Swap(0)
+			slot.TickBytes.Store(bytes)
 			mbps := float64(bytes) / intervalSecs / (1024 * 1024)
 
 			now := time.Now()
@@ -924,39 +887,43 @@ func (h *Handler) evaluateFlowRotation(intervalSecs float64) {
 			// (ex.: fim de pipeline ou producer momentaneamente sem dados).
 			// Não tratar como degradação para evitar rotações desnecessárias.
 			if bytes == 0 {
-				ps.StreamSlowSince.Delete(idx)
-				return true
+				slot.ClearSlowSince()
+				continue
 			}
+
+			idx := slot.Index
 
 			if mbps < frCfg.MinMBps {
 				// Stream abaixo do threshold
-				if _, loaded := ps.StreamSlowSince.LoadOrStore(idx, now); loaded {
+				slowSince := slot.GetSlowSince()
+				if slowSince.IsZero() {
+					// Primeiro tick lento — marca início da degradação
+					slot.SetSlowSince(now)
+				} else {
 					// Já estava marcado — verifica se passou eval_window
-					slowSince, _ := ps.StreamSlowSince.Load(idx)
-					sinceMarked := now.Sub(slowSince.(time.Time))
+					sinceMarked := now.Sub(slowSince)
 
 					// Verifica cooldown
 					var sinceLast time.Duration
-					if lastReset, ok := ps.StreamLastReset.Load(idx); ok {
-						sinceLast = now.Sub(lastReset.(time.Time))
-					} else {
+					lastReset := slot.GetLastReset()
+					if lastReset.IsZero() {
 						sinceLast = frCfg.Cooldown + 1 // nunca resetou, permite
+					} else {
+						sinceLast = now.Sub(lastReset)
 					}
 
 					if sinceMarked >= frCfg.EvalWindow && sinceLast >= frCfg.Cooldown && rotated < maxRotationsPerTick {
 						h.rotateStream(key, ps, idx, mbps, sinceMarked)
-						ps.StreamLastReset.Store(idx, now)
-						ps.StreamSlowSince.Delete(idx)
+						slot.SetLastReset(now)
+						slot.ClearSlowSince()
 						rotated++
 					}
 				}
 			} else {
 				// Stream acima do threshold — limpa marca
-				ps.StreamSlowSince.Delete(idx)
+				slot.ClearSlowSince()
 			}
-
-			return true
-		})
+		}
 
 		return true
 	})
@@ -966,8 +933,11 @@ func (h *Handler) evaluateFlowRotation(intervalSecs float64) {
 // pelo canal de controle (ControlRotate → espera ACK → fecha conn). Se não houver
 // canal de controle ou o ACK não chegar a tempo, faz fallback para close abrupto.
 func (h *Handler) rotateStream(sessionKey any, ps *ParallelSession, idx uint8, mbps float64, slowFor time.Duration) {
-	conn, ok := ps.StreamConns.Load(idx)
-	if !ok {
+	slot := ps.Slots[idx]
+	slot.ConnMu.Lock()
+	conn := slot.Conn
+	slot.ConnMu.Unlock()
+	if conn == nil {
 		return
 	}
 
@@ -976,8 +946,14 @@ func (h *Handler) rotateStream(sessionKey any, ps *ParallelSession, idx uint8, m
 	if hasCtrl {
 		// Cria canal para esperar ACK do agent
 		ackCh := make(chan struct{}, 1)
-		ps.RotatePending.Store(idx, ackCh)
-		defer ps.RotatePending.Delete(idx)
+		slot.RotatePendMu.Lock()
+		slot.RotatePend = ackCh
+		slot.RotatePendMu.Unlock()
+		defer func() {
+			slot.RotatePendMu.Lock()
+			slot.RotatePend = nil
+			slot.RotatePendMu.Unlock()
+		}()
 
 		// Envia ControlRotate com mutex de write
 		writeOK := false
@@ -1012,7 +988,7 @@ func (h *Handler) rotateStream(sessionKey any, ps *ParallelSession, idx uint8, m
 			case <-ackCh:
 				h.logger.Info("flow rotation: received ControlRotateACK, closing data conn",
 					"agent", ps.AgentName, "stream", idx)
-				conn.(net.Conn).Close()
+				conn.Close()
 				return
 			case <-time.After(rotateACKTimeout):
 				h.logger.Warn("flow rotation: ACK timeout, falling back to abrupt close",
@@ -1035,7 +1011,7 @@ func (h *Handler) rotateStream(sessionKey any, ps *ParallelSession, idx uint8, m
 		h.Events.PushEvent("warn", "flow_rotation", ps.AgentName, fmt.Sprintf("stream %d rotated (abrupt, %.2f MB/s, slow for %s)", idx, mbps, slowFor.String()), int(idx))
 	}
 
-	conn.(net.Conn).Close()
+	conn.Close()
 }
 
 // HandleConnection processa uma conexão individual de backup.
@@ -1291,14 +1267,20 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 				if !ok || ps.AgentName != agentName {
 					return true
 				}
-				if ackCh, ok := ps.RotatePending.Load(streamIdx); ok {
-					select {
-					case ackCh.(chan struct{}) <- struct{}{}:
-					default:
+				if int(streamIdx) < len(ps.Slots) {
+					slot := ps.Slots[streamIdx]
+					slot.RotatePendMu.Lock()
+					ch := slot.RotatePend
+					slot.RotatePendMu.Unlock()
+					if ch != nil {
+						select {
+						case ch <- struct{}{}:
+						default:
+						}
+						return false // encontrou e sinalizou, pode parar
 					}
-					return false // encontrou e sinalizou, pode parar
 				}
-				return true // esta sessão não tem RotatePending para este idx, continua
+				return true // esta sessão não tem RotatePend para este idx, continua
 			})
 
 		case protocol.MagicControlProgress:
@@ -2119,14 +2101,16 @@ func CleanupExpiredSessions(sessions *sync.Map, ttl time.Duration, logger *slog.
 					"idle", time.Since(lastAct).Round(time.Second),
 				)
 				s.Closing.Store(true)
-				s.StreamCancels.Range(func(_, value any) bool {
-					value.(context.CancelFunc)()
-					return true
-				})
-				s.StreamConns.Range(func(_, value any) bool {
-					value.(net.Conn).Close()
-					return true
-				})
+				for _, slot := range s.Slots {
+					if slot.CancelFn != nil {
+						slot.CancelFn()
+					}
+					slot.ConnMu.Lock()
+					if slot.Conn != nil {
+						slot.Conn.Close()
+					}
+					slot.ConnMu.Unlock()
+				}
 				s.Assembler.Cleanup()
 				sessions.Delete(key)
 			}
@@ -2137,46 +2121,36 @@ func CleanupExpiredSessions(sessions *sync.Map, ttl time.Duration, logger *slog.
 
 // ParallelSession rastreia uma sessão de backup com streams paralelos.
 type ParallelSession struct {
-	SessionID         string
-	Assembler         *ChunkAssembler
-	Writer            *AtomicWriter
-	StorageInfo       config.StorageInfo
-	AgentName         string
-	StorageName       string
-	BackupName        string
-	StreamConns       sync.Map // streamIndex (uint8) → net.Conn
-	StreamOffsets     sync.Map // streamIndex (uint8) → *int64 (completed bytes, atômico)
-	StreamTrafficIn   sync.Map // streamIndex (uint8) → *atomic.Int64 (bytes recebidos no intervalo, para stats por stream)
-	StreamTickBytes   sync.Map // streamIndex (uint8) → int64 (bytes observados no último tick do stats reporter)
-	StreamLastAct     sync.Map // streamIndex (uint8) → *atomic.Int64 (UnixNano último I/O deste stream)
-	StreamCancels     sync.Map // streamIndex (uint8) → context.CancelFunc (cancela goroutine anterior em re-join)
-	StreamSlowSince   sync.Map // streamIndex (uint8) → time.Time (início de degradação contínua)
-	StreamLastReset   sync.Map // streamIndex (uint8) → time.Time (último flow rotation deste stream)
-	StreamConnectedAt sync.Map // streamIndex (uint8) → time.Time (timestamp do último connect/re-join)
-	StreamReconnects  sync.Map // streamIndex (uint8) → *atomic.Int32 (reconexões acumuladas por stream)
-	RotatePending     sync.Map // streamIndex (uint8) → chan struct{} (sinalizada por ControlRotateACK)
-	MaxStreams        uint8
-	ChunkSize         uint32
-	StreamWg          sync.WaitGroup // barreira para todos os streams
-	Closing           atomic.Bool    // true após StreamWg.Wait() retornar — rejeita novos Add()
-	StreamReady       chan struct{}  // fechado quando o primeiro stream conecta
-	streamReadyOnce   sync.Once      // garante close único do StreamReady
-	Done              chan struct{}  // sinaliza conclusão
-	CreatedAt         time.Time
-	LastActivity      atomic.Int64  // UnixNano do último I/O bem-sucedido
-	DiskWriteBytes    atomic.Int64  // Total de bytes escritos em disco nesta sessão
-	TotalObjects      atomic.Uint32 // Total de objetos a enviar (recebido via ControlProgress)
-	ObjectsSent       atomic.Uint32 // Objetos já enviados (recebido via ControlProgress)
-	WalkComplete      atomic.Int32  // 1 = prescan concluído, total confiável (via ControlProgress)
-	ClientVersion     string        // Versão do client (protocolo v3+)
-	AutoScaleInfo     atomic.Value  // *observability.AutoScaleInfo (atualizado via ControlAutoScaleStats)
-	IngestionDone     chan struct{} // fechado quando agent envia ControlIngestionDone
-	ingestionOnce     sync.Once     // garante close único do IngestionDone
-	Aborted           chan struct{} // fechado quando a sessão é abortada antes do finalize
-	abortOnce         sync.Once     // garante close único do Aborted
-	AbortErr          atomic.Value  // error do aborto (quando houver)
-	GapTracker        *GapTracker   // detector proativo de chunks faltantes (nil quando gap_detection desabilitado)
-	Logger            *slog.Logger  // Session logger (enriquecido com session_log_dir quando habilitado)
+	SessionID       string
+	Assembler       *ChunkAssembler
+	Writer          *AtomicWriter
+	StorageInfo     config.StorageInfo
+	AgentName       string
+	StorageName     string
+	BackupName      string
+	Slots           []*Slot // pré-alocados no ParallelInitACK, indexados por SlotID
+	MaxStreams      uint8
+	ChunkSize       uint32
+	StreamWg        sync.WaitGroup // barreira para todos os streams
+	Closing         atomic.Bool    // true após StreamWg.Wait() retornar — rejeita novos Add()
+	StreamReady     chan struct{}  // fechado quando o primeiro stream conecta
+	streamReadyOnce sync.Once      // garante close único do StreamReady
+	Done            chan struct{}  // sinaliza conclusão
+	CreatedAt       time.Time
+	LastActivity    atomic.Int64  // UnixNano do último I/O bem-sucedido
+	DiskWriteBytes  atomic.Int64  // Total de bytes escritos em disco nesta sessão
+	TotalObjects    atomic.Uint32 // Total de objetos a enviar (recebido via ControlProgress)
+	ObjectsSent     atomic.Uint32 // Objetos já enviados (recebido via ControlProgress)
+	WalkComplete    atomic.Int32  // 1 = prescan concluído, total confiável (via ControlProgress)
+	ClientVersion   string        // Versão do client (protocolo v3+)
+	AutoScaleInfo   atomic.Value  // *observability.AutoScaleInfo (atualizado via ControlAutoScaleStats)
+	IngestionDone   chan struct{} // fechado quando agent envia ControlIngestionDone
+	ingestionOnce   sync.Once     // garante close único do IngestionDone
+	Aborted         chan struct{} // fechado quando a sessão é abortada antes do finalize
+	abortOnce       sync.Once     // garante close único do Aborted
+	AbortErr        atomic.Value  // error do aborto (quando houver)
+	GapTracker      *GapTracker   // detector proativo de chunks faltantes (nil quando gap_detection desabilitado)
+	Logger          *slog.Logger  // Session logger (enriquecido com session_log_dir quando habilitado)
 }
 
 func (ps *ParallelSession) abort(err error) {
@@ -2188,18 +2162,16 @@ func (ps *ParallelSession) abort(err error) {
 		close(ps.Aborted)
 	})
 
-	ps.StreamCancels.Range(func(_, val any) bool {
-		if cancel, ok := val.(context.CancelFunc); ok {
-			cancel()
+	for _, slot := range ps.Slots {
+		if slot.CancelFn != nil {
+			slot.CancelFn()
 		}
-		return true
-	})
-	ps.StreamConns.Range(func(_, val any) bool {
-		if c, ok := val.(net.Conn); ok {
-			c.Close()
+		slot.ConnMu.Lock()
+		if slot.Conn != nil {
+			slot.Conn.Close()
 		}
-		return true
-	})
+		slot.ConnMu.Unlock()
+	}
 }
 
 func (ps *ParallelSession) aborted() (error, bool) {
@@ -2279,6 +2251,7 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		StorageName:   storageName,
 		BackupName:    backupName,
 		ClientVersion: clientVersion,
+		Slots:         PreallocateSlots(pi.MaxStreams),
 		MaxStreams:    pi.MaxStreams,
 		ChunkSize:     pi.ChunkSize,
 		StreamReady:   make(chan struct{}),
@@ -2502,11 +2475,10 @@ func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, read
 	var bytesReceived int64
 	var localChunkSeq uint32
 
-	// Inicializa ou recupera o ponteiro de offset para este stream
-	offsetPtr := new(int64)
-	if existing, loaded := session.StreamOffsets.LoadOrStore(streamIndex, offsetPtr); loaded {
-		offsetPtr = existing.(*int64)
-		bytesReceived = atomic.LoadInt64(offsetPtr)
+	// Recupera offset corrente do slot para suporte a resume
+	slot := session.Slots[streamIndex]
+	bytesReceived = slot.Offset.Load()
+	if bytesReceived > 0 {
 		logger.Info("resuming stream from offset", "stream", streamIndex, "offset", bytesReceived)
 	}
 
@@ -2601,16 +2573,14 @@ func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, read
 			"totalBytes", bytesReceived,
 		)
 
-		// Per-stream stats: incrementa tráfego e atualiza last activity
-		if counter, ok := session.StreamTrafficIn.Load(streamIndex); ok {
-			counter.(*atomic.Int64).Add(int64(hdr.Length))
-		}
-		if lastAct, ok := session.StreamLastAct.Load(streamIndex); ok {
-			lastAct.(*atomic.Int64).Store(nowNano)
-		}
+		// Per-slot stats: incrementa tráfego e atualiza last activity
+		slot.TrafficIn.Add(int64(hdr.Length))
+		slot.LastActivity.Store(nowNano)
+		slot.ChunksReceived.Add(1)
+		slot.LastChunkSeq.Store(hdr.GlobalSeq)
 
 		// Atualiza offset atômico — usado por handleParallelJoin para resume
-		atomic.StoreInt64(offsetPtr, bytesReceived)
+		slot.Offset.Store(bytesReceived)
 
 		// Envia ChunkSACK com write timeout para não bloquear se a conn está morta
 		if netConn, ok := sackWriter.(net.Conn); ok {
@@ -2683,20 +2653,23 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 	// --- Cancelamento da goroutine anterior (proteção contra goroutine leak) ---
 	// Se este stream já foi conectado antes (re-join), cancela o contexto da goroutine
 	// anterior para que ela saia imediatamente em vez de esperar o read timeout.
-	if oldCancel, loaded := pSession.StreamCancels.Load(pj.StreamIndex); loaded {
+	slot := pSession.Slots[pj.StreamIndex]
+	if oldCancel := slot.CancelFn; oldCancel != nil {
 		logger.Info("cancelling previous stream goroutine for re-join", "stream", pj.StreamIndex)
-		oldCancel.(context.CancelFunc)()
+		oldCancel()
 	}
 
 	// Fecha a conexão anterior para desbloquear reads pendentes
-	if oldConn, loaded := pSession.StreamConns.Load(pj.StreamIndex); loaded {
-		oldConn.(net.Conn).Close()
+	slot.ConnMu.Lock()
+	if slot.Conn != nil {
+		slot.Conn.Close()
 	}
+	slot.ConnMu.Unlock()
 
 	// Verifica se é re-join (stream já conectou antes) — resume offset
 	var lastOffset uint64
-	if raw, ok := pSession.StreamOffsets.Load(pj.StreamIndex); ok {
-		lastOffset = uint64(atomic.LoadInt64(raw.(*int64)))
+	if currentOffset := slot.Offset.Load(); currentOffset > 0 {
+		lastOffset = uint64(currentOffset)
 		logger.Info("parallel stream re-join (resume)", "lastOffset", lastOffset)
 	}
 
@@ -2706,42 +2679,34 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 		return
 	}
 
-	// Registra conexão do stream
-	pSession.StreamConns.Store(pj.StreamIndex, conn)
+	// Registra conexão do slot
+	slot.ConnMu.Lock()
+	slot.Conn = conn
+	slot.ConnMu.Unlock()
+	slot.SetStatus(SlotReceiving)
 
-	// Atualiza uptime e reconnects do stream
-	// Reutiliza o contador existente em re-joins para evitar alocações descartadas.
+	// Atualiza uptime e reconnects do slot
 	var reconnectCount int32
-	if rcRaw, loaded := pSession.StreamReconnects.Load(pj.StreamIndex); loaded {
-		reconnectCount = rcRaw.(*atomic.Int32).Add(1)
-		// Emite evento de reconexão de stream
+	if slot.GetConnectedAt().IsZero() {
+		// Primeira conexão
+		reconnectCount = 0
+	} else {
+		// Re-join
+		reconnectCount = slot.Reconnects.Add(1)
 		if h.Events != nil {
 			h.Events.PushEvent("warn", "stream_reconnect", pSession.AgentName, fmt.Sprintf("stream %d re-joined (session %s)", pj.StreamIndex, pj.SessionID), int(pj.StreamIndex))
 		}
-	} else {
-		pSession.StreamReconnects.Store(pj.StreamIndex, &atomic.Int32{})
-		reconnectCount = 0
 	}
-	pSession.StreamConnectedAt.Store(pj.StreamIndex, time.Now())
+	slot.SetConnectedAt(time.Now())
 	logger.Info("parallel join accepted", "lastOffset", lastOffset, "reconnects", reconnectCount)
 
-	// Inicializa counters per-stream para stats
-	nowNano := time.Now().UnixNano()
-	if _, loaded := pSession.StreamTrafficIn.Load(pj.StreamIndex); !loaded {
-		pSession.StreamTrafficIn.Store(pj.StreamIndex, &atomic.Int64{})
-	}
-	if lastActRaw, loaded := pSession.StreamLastAct.Load(pj.StreamIndex); loaded {
-		lastActRaw.(*atomic.Int64).Store(nowNano)
-	} else {
-		lastActCounter := &atomic.Int64{}
-		lastActCounter.Store(nowNano)
-		pSession.StreamLastAct.Store(pj.StreamIndex, lastActCounter)
-	}
+	// Atualiza last activity do slot
+	slot.LastActivity.Store(time.Now().UnixNano())
 
 	// Cria contexto cancelável para esta goroutine específica.
 	// Será cancelado se outro re-join chegar para o mesmo stream index.
 	streamCtx, streamCancel := context.WithCancel(ctx)
-	pSession.StreamCancels.Store(pj.StreamIndex, streamCancel)
+	slot.CancelFn = streamCancel
 
 	// StreamWg.Add(1) SEMPRE — cada goroutine (inclusive a cancelada por re-join)
 	// faz exatamente um Done(). Com cancelamento via contexto, a goroutine antiga
@@ -2768,7 +2733,7 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 			} else {
 				logger.Info("parallel stream closed due to session abort", "bytes", bytesReceived)
 			}
-			pSession.StreamConns.Delete(pj.StreamIndex)
+			slot.SetStatus(SlotDisconnected)
 			return
 		}
 		// context.Canceled é esperado em re-join — não é um erro real
@@ -2778,18 +2743,18 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 		}
 		if errors.Is(err, net.ErrClosed) || (ctx.Err() != nil && streamCtx.Err() == context.Canceled) {
 			logger.Info("parallel stream closed", "bytes", bytesReceived, "error", err)
-			pSession.StreamConns.Delete(pj.StreamIndex)
+			slot.SetStatus(SlotDisconnected)
 			return
 		}
 		logger.Error("receiving parallel stream", "error", err, "bytes", bytesReceived)
-		pSession.StreamConns.Delete(pj.StreamIndex)
+		slot.SetStatus(SlotDisconnected)
 		if h.Events != nil {
 			h.Events.PushEvent("warn", "stream_disconnected", pSession.AgentName, fmt.Sprintf("stream %d disconnected with error: %v", pj.StreamIndex, err), int(pj.StreamIndex))
 		}
 		return
 	}
 
-	pSession.StreamConns.Delete(pj.StreamIndex)
+	slot.SetStatus(SlotDisconnected)
 	if h.Events != nil {
 		h.Events.PushEvent("info", "stream_disconnected", pSession.AgentName, fmt.Sprintf("stream %d disconnected (normal, %s received)", pj.StreamIndex, formatBytesGo(bytesReceived)), int(pj.StreamIndex))
 	}

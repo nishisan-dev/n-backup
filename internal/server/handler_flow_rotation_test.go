@@ -53,6 +53,7 @@ func newParallelSessionForFlowTest() *ParallelSession {
 	ps := &ParallelSession{
 		AgentName: "agent-test",
 		Done:      make(chan struct{}),
+		Slots:     PreallocateSlots(4), // 4 slots para os testes
 	}
 	return ps
 }
@@ -62,10 +63,11 @@ func TestEvaluateFlowRotation_IdleStreamDoesNotRotate(t *testing.T) {
 	ps := newParallelSessionForFlowTest()
 	conn := &testConn{}
 
-	trafficCounter := &atomic.Int64{}
-	ps.StreamTrafficIn.Store(uint8(0), trafficCounter)
-	ps.StreamConns.Store(uint8(0), conn)
-	ps.StreamSlowSince.Store(uint8(0), time.Now().Add(-2*time.Second))
+	slot := ps.Slots[0]
+	// TrafficIn = 0 (idle, sem tráfego no intervalo)
+	slot.Conn = conn
+	slot.SetStatus(SlotReceiving)
+	slot.SetSlowSince(time.Now().Add(-2 * time.Second))
 
 	sessions.Store("session-idle", ps)
 
@@ -74,15 +76,12 @@ func TestEvaluateFlowRotation_IdleStreamDoesNotRotate(t *testing.T) {
 	if conn.closed.Load() {
 		t.Fatal("idle stream should not be closed by flow rotation")
 	}
-	if _, ok := ps.StreamSlowSince.Load(uint8(0)); ok {
+	if ss := slot.GetSlowSince(); !ss.IsZero() {
 		t.Fatal("idle stream should clear slow marker")
 	}
-	tickBytes, ok := ps.StreamTickBytes.Load(uint8(0))
-	if !ok {
-		t.Fatal("expected tick bytes snapshot for idle stream")
-	}
-	if tickBytes.(int64) != 0 {
-		t.Fatalf("expected idle tick bytes = 0, got %d", tickBytes.(int64))
+	tickBytes := slot.TickBytes.Load()
+	if tickBytes != 0 {
+		t.Fatalf("expected idle tick bytes = 0, got %d", tickBytes)
 	}
 }
 
@@ -91,11 +90,11 @@ func TestEvaluateFlowRotation_LowThroughputActiveStreamRotates(t *testing.T) {
 	ps := newParallelSessionForFlowTest()
 	conn := &testConn{}
 
-	trafficCounter := &atomic.Int64{}
-	trafficCounter.Add(1024) // >0 bytes no intervalo, mas muito abaixo de 1 MB/s
-	ps.StreamTrafficIn.Store(uint8(0), trafficCounter)
-	ps.StreamConns.Store(uint8(0), conn)
-	ps.StreamSlowSince.Store(uint8(0), time.Now().Add(-2*time.Second))
+	slot := ps.Slots[0]
+	slot.TrafficIn.Add(1024) // >0 bytes no intervalo, mas muito abaixo de 1 MB/s
+	slot.Conn = conn
+	slot.SetStatus(SlotReceiving)
+	slot.SetSlowSince(time.Now().Add(-2 * time.Second))
 
 	sessions.Store("session-low-throughput", ps)
 
@@ -104,18 +103,15 @@ func TestEvaluateFlowRotation_LowThroughputActiveStreamRotates(t *testing.T) {
 	if !conn.closed.Load() {
 		t.Fatal("low throughput active stream should be rotated")
 	}
-	if _, ok := ps.StreamSlowSince.Load(uint8(0)); ok {
+	if ss := slot.GetSlowSince(); !ss.IsZero() {
 		t.Fatal("slow marker should be cleared after rotation")
 	}
-	if _, ok := ps.StreamLastReset.Load(uint8(0)); !ok {
+	if lr := slot.GetLastReset(); lr.IsZero() {
 		t.Fatal("last reset timestamp should be stored after rotation")
 	}
-	tickBytes, ok := ps.StreamTickBytes.Load(uint8(0))
-	if !ok {
-		t.Fatal("expected tick bytes snapshot for active stream")
-	}
-	if tickBytes.(int64) != 1024 {
-		t.Fatalf("expected tick bytes = 1024, got %d", tickBytes.(int64))
+	tickBytes := slot.TickBytes.Load()
+	if tickBytes != 1024 {
+		t.Fatalf("expected tick bytes = 1024, got %d", tickBytes)
 	}
 }
 
@@ -140,11 +136,11 @@ func TestEvaluateFlowRotation_GracefulWithControlChannel(t *testing.T) {
 	ps := newParallelSessionForFlowTest()
 	dataConn := &testConn{}
 
-	trafficCounter := &atomic.Int64{}
-	trafficCounter.Add(1024) // low throughput
-	ps.StreamTrafficIn.Store(uint8(0), trafficCounter)
-	ps.StreamConns.Store(uint8(0), dataConn)
-	ps.StreamSlowSince.Store(uint8(0), time.Now().Add(-2*time.Second))
+	slot := ps.Slots[0]
+	slot.TrafficIn.Add(1024) // low throughput
+	slot.Conn = dataConn
+	slot.SetStatus(SlotReceiving)
+	slot.SetSlowSince(time.Now().Add(-2 * time.Second))
 
 	sessions.Store("session-graceful", ps)
 
@@ -156,10 +152,13 @@ func TestEvaluateFlowRotation_GracefulWithControlChannel(t *testing.T) {
 
 	// Simula ACK chegando quase imediatamente em goroutine separada
 	go func() {
-		// Espera um pouco para o rotateStream ter tempo de criar o canal RotatePending
+		// Espera um pouco para o rotateStream ter tempo de criar o canal RotatePend
 		time.Sleep(50 * time.Millisecond)
-		if ackCh, ok := ps.RotatePending.Load(uint8(0)); ok {
-			ackCh.(chan struct{}) <- struct{}{}
+		slot.RotatePendMu.Lock()
+		ch := slot.RotatePend
+		slot.RotatePendMu.Unlock()
+		if ch != nil {
+			ch <- struct{}{}
 		}
 	}()
 
@@ -187,11 +186,11 @@ func TestEvaluateFlowRotation_FallbackWithoutControlChannel(t *testing.T) {
 	ps := newParallelSessionForFlowTest()
 	dataConn := &testConn{}
 
-	trafficCounter := &atomic.Int64{}
-	trafficCounter.Add(1024) // low throughput
-	ps.StreamTrafficIn.Store(uint8(0), trafficCounter)
-	ps.StreamConns.Store(uint8(0), dataConn)
-	ps.StreamSlowSince.Store(uint8(0), time.Now().Add(-2*time.Second))
+	slot := ps.Slots[0]
+	slot.TrafficIn.Add(1024) // low throughput
+	slot.Conn = dataConn
+	slot.SetStatus(SlotReceiving)
+	slot.SetSlowSince(time.Now().Add(-2 * time.Second))
 
 	sessions.Store("session-no-ctrl", ps)
 
@@ -211,11 +210,11 @@ func TestEvaluateFlowRotation_FallbackOnACKTimeout(t *testing.T) {
 	ps := newParallelSessionForFlowTest()
 	dataConn := &testConn{}
 
-	trafficCounter := &atomic.Int64{}
-	trafficCounter.Add(1024) // low throughput
-	ps.StreamTrafficIn.Store(uint8(0), trafficCounter)
-	ps.StreamConns.Store(uint8(0), dataConn)
-	ps.StreamSlowSince.Store(uint8(0), time.Now().Add(-2*time.Second))
+	slot := ps.Slots[0]
+	slot.TrafficIn.Add(1024) // low throughput
+	slot.Conn = dataConn
+	slot.SetStatus(SlotReceiving)
+	slot.SetSlowSince(time.Now().Add(-2 * time.Second))
 
 	sessions.Store("session-timeout", ps)
 
@@ -298,7 +297,7 @@ func TestControlChannelReconnectDoesNotDropNewConn(t *testing.T) {
 // --- Testes de streamStatus ---
 
 func TestStreamStatus_Disconnected(t *testing.T) {
-	// Stream inativo (sem conexão no StreamConns) → "disconnected"
+	// Stream inativo (sem conexão) → "disconnected"
 	got := streamStatus(false, 0, "", time.Minute)
 	if got != "disconnected" {
 		t.Fatalf("expected 'disconnected', got %q", got)
