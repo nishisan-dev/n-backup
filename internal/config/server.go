@@ -102,6 +102,36 @@ type GapDetectionConfig struct {
 	InFlightTimeout  time.Duration `yaml:"in_flight_timeout"`   // tempo máximo sem progresso de payload de um chunk em voo (default: 30s)
 	CheckInterval    time.Duration `yaml:"check_interval"`      // intervalo entre checks de gap (default: 5s)
 	MaxNACKsPerCycle int           `yaml:"max_nacks_per_cycle"` // máximo de NACKs por check (default: 5)
+	enabledSet       bool          `yaml:"-"`
+}
+
+// UnmarshalYAML preserva a diferença entre campo ausente e enabled: false
+// explícito, para que validate() consiga aplicar o default corretamente.
+func (g *GapDetectionConfig) UnmarshalYAML(value *yaml.Node) error {
+	var raw struct {
+		Enabled          *bool         `yaml:"enabled"`
+		Timeout          time.Duration `yaml:"timeout"`
+		InFlightTimeout  time.Duration `yaml:"in_flight_timeout"`
+		CheckInterval    time.Duration `yaml:"check_interval"`
+		MaxNACKsPerCycle int           `yaml:"max_nacks_per_cycle"`
+	}
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+
+	if raw.Enabled != nil {
+		g.Enabled = *raw.Enabled
+		g.enabledSet = true
+	} else {
+		g.Enabled = false
+		g.enabledSet = false
+	}
+	g.Timeout = raw.Timeout
+	g.InFlightTimeout = raw.InFlightTimeout
+	g.CheckInterval = raw.CheckInterval
+	g.MaxNACKsPerCycle = raw.MaxNACKsPerCycle
+
+	return nil
 }
 
 // ServerListen contém o endereço de escuta do server.
@@ -280,14 +310,9 @@ func (c *ServerConfig) validate() error {
 		}
 	}
 
-	// Gap Detection defaults (habilitado por padrão)
-	if !c.GapDetection.Enabled {
-		// Se não explicitamente habilitado no YAML, habilita com defaults.
-		// Para desabilitar, o operador deve setar enabled: false explicitamente.
-		// Usamos um truque: se Timeout == 0, significa que nada foi configurado.
-		if c.GapDetection.Timeout == 0 && c.GapDetection.CheckInterval == 0 {
-			c.GapDetection.Enabled = true
-		}
+	// Gap Detection defaults (habilitado por padrão quando o campo é omitido).
+	if !c.GapDetection.enabledSet {
+		c.GapDetection.Enabled = true
 	}
 	if c.GapDetection.Enabled {
 		if c.GapDetection.Timeout <= 0 {
