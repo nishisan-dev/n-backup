@@ -2653,9 +2653,13 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 		return
 	}
 
-	// A partir daqui já temos uma sessão válida: redireciona os logs do join
-	// para o session logger, facilitando correlação post-mortem por stream.
-	logger = pSession.Logger.With("stream", pj.StreamIndex, "remote", conn.RemoteAddr().String())
+	// A partir daqui já temos uma sessão válida: quando disponível, redireciona
+	// os logs do join para o session logger para facilitar correlação post-mortem.
+	if pSession.Logger != nil {
+		logger = pSession.Logger.With("stream", pj.StreamIndex, "remote", conn.RemoteAddr().String())
+	} else {
+		logger = logger.With("stream", pj.StreamIndex, "remote", conn.RemoteAddr().String())
+	}
 
 	// Rejeita join se a sessão está em fase de fechamento.
 	// O check precisa acontecer antes de cancelar/substituir o stream existente
