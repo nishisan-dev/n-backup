@@ -1447,6 +1447,12 @@ func (h *Handler) gapCheckLoop(ctx context.Context, ps *ParallelSession) {
 		case <-ticker.C:
 		}
 
+		// Sessão pode ter sido abortada entre ticks — não envia NACKs desnecessários.
+		if _, aborted := ps.aborted(); aborted {
+			logger.Info("gap check loop stopping (session aborted)")
+			return
+		}
+
 		gaps := ps.GapTracker.CheckGaps()
 		if len(gaps) == 0 {
 			continue
@@ -2325,6 +2331,11 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		logger.Info("agent confirmed ingestion complete")
 	case <-pSession.Aborted:
 		pSession.StreamWg.Wait()
+		// Sinaliza ao ChunkBuffer para parar de drenar chunks desta sessão,
+		// evitando cascade de I/O errors em diretórios já removidos.
+		if h.chunkBuffer != nil {
+			h.chunkBuffer.MarkSessionAborted(assembler)
+		}
 		err, _ := pSession.aborted()
 		if err != nil {
 			logger.Error("parallel session aborted before ingestion completed", "error", err)
