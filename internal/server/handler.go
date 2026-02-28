@@ -2532,6 +2532,16 @@ func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, read
 			return bytesReceived, fmt.Errorf("reading chunk header from stream %d: %w", streamIndex, err)
 		}
 
+		// Marco de início do chunk: o header foi lido com sucesso e o server vai
+		// iniciar a leitura do payload. Isso ajuda a distinguir "nunca chegou" de
+		// "chegou o header, mas falhou/travou durante o payload".
+		logger.Debug("chunk_receive_started",
+			"stream", streamIndex,
+			"globalSeq", hdr.GlobalSeq,
+			"length", hdr.Length,
+			"offsetBefore", bytesReceived,
+		)
+
 		if session.GapTracker != nil {
 			session.GapTracker.StartChunk(hdr.GlobalSeq)
 		}
