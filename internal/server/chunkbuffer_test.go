@@ -115,7 +115,7 @@ func TestChunkBuffer_Push_And_Drain_WriteThrough(t *testing.T) {
 	cb.StartDrainer(ctx)
 
 	for i, s := range []string{"HELLO", "WORLD", "!!!!"} {
-		if err := cb.Push(uint32(i), []byte(s), assembler); err != nil {
+		if _, err := cb.Push(uint32(i), []byte(s), assembler, nil); err != nil {
 			t.Fatalf("Push(%d): %v", i, err)
 		}
 	}
@@ -144,7 +144,7 @@ func TestChunkBuffer_Push_And_Drain_Ratio(t *testing.T) {
 	cb.StartDrainer(ctx)
 
 	for i := 0; i < 5; i++ {
-		if err := cb.Push(uint32(i), []byte("AB"), assembler); err != nil {
+		if _, err := cb.Push(uint32(i), []byte("AB"), assembler, nil); err != nil {
 			t.Fatalf("Push(%d): %v", i, err)
 		}
 	}
@@ -169,7 +169,7 @@ func TestChunkBuffer_Fallback_ChunkExceedsCapacity(t *testing.T) {
 	cb.StartDrainer(ctx)
 
 	bigChunk := bytes.Repeat([]byte("X"), 8*1024) // 8KB > 4KB → fallback
-	if err := cb.Push(0, bigChunk, assembler); err != nil {
+	if _, err := cb.Push(0, bigChunk, assembler, nil); err != nil {
 		t.Fatalf("Push com fallback não deve retornar erro: %v", err)
 	}
 
@@ -200,7 +200,7 @@ func TestChunkBuffer_Stats(t *testing.T) {
 	cb.StartDrainer(ctx)
 
 	for i := 0; i < 2; i++ {
-		if err := cb.Push(uint32(i), []byte("TEST"), assembler); err != nil {
+		if _, err := cb.Push(uint32(i), []byte("TEST"), assembler, nil); err != nil {
 			t.Fatalf("Push(%d): %v", i, err)
 		}
 	}
@@ -238,7 +238,7 @@ func TestChunkBuffer_FillRatio(t *testing.T) {
 
 	assembler := newBufAssembler(t, "buf-fillratio")
 	data := make([]byte, 1*1024*1024) // 1MB → fill = 0.25
-	if err := cb.Push(0, data, assembler); err != nil {
+	if _, err := cb.Push(0, data, assembler, nil); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
 
@@ -263,7 +263,7 @@ func TestChunkBuffer_Flush_WaitsForDrain(t *testing.T) {
 	cb.StartDrainer(ctx)
 
 	for i := 0; i < 3; i++ {
-		if err := cb.Push(uint32(i), []byte("FLUSH_TEST"), assembler); err != nil {
+		if _, err := cb.Push(uint32(i), []byte("FLUSH_TEST"), assembler, nil); err != nil {
 			t.Fatalf("Push(%d): %v", i, err)
 		}
 	}
@@ -324,14 +324,14 @@ func TestChunkBuffer_Flush_NotBlockedByOtherSession(t *testing.T) {
 
 	// Envia 3 chunks da sessão A e drena completamente.
 	for i := 0; i < 3; i++ {
-		if err := cb.Push(uint32(i), []byte("SESSION_A"), assemblerA); err != nil {
+		if _, err := cb.Push(uint32(i), []byte("SESSION_A"), assemblerA, nil); err != nil {
 			t.Fatalf("Push A(%d): %v", i, err)
 		}
 	}
 
 	// Envia 1 chunk da sessão B sem drenar (simula sessão ainda ativa).
 	// O drainer vai processar, mas o teste verifica que Flush(A) não aguarda B.
-	if err := cb.Push(0, []byte("SESSION_B"), assemblerB); err != nil {
+	if _, err := cb.Push(0, []byte("SESSION_B"), assemblerB, nil); err != nil {
 		t.Fatalf("Push B: %v", err)
 	}
 
@@ -368,7 +368,7 @@ func TestChunkBuffer_CAS_NoRaceOnCapacity(t *testing.T) {
 		go func(seq int) {
 			defer wg.Done()
 			// Cada goroutine tenta fazer push concorrentemente — CAS evita race.
-			_ = cb.Push(uint32(seq), make([]byte, 512*1024), assembler) // 512KB cada
+			_, _ = cb.Push(uint32(seq), make([]byte, 512*1024), assembler, nil) // 512KB cada
 		}(i)
 	}
 	wg.Wait()
@@ -396,13 +396,16 @@ func TestChunkBuffer_Backpressure(t *testing.T) {
 
 	data := make([]byte, 64)
 	for i := 0; i < cap(cb.slots); i++ {
-		if err := cb.Push(uint32(i), data, assembler); err != nil {
+		if _, err := cb.Push(uint32(i), data, assembler, nil); err != nil {
 			t.Fatalf("Push(%d) deveria funcionar: %v", i, err)
 		}
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- cb.Push(uint32(cap(cb.slots)), data, assembler) }()
+	go func() {
+		_, err := cb.Push(uint32(cap(cb.slots)), data, assembler, nil)
+		done <- err
+	}()
 
 	select {
 	case err := <-done:
@@ -433,7 +436,7 @@ func TestChunkBuffer_ConcurrentPush(t *testing.T) {
 		wg.Add(1)
 		go func(seq int) {
 			defer wg.Done()
-			if err := cb.Push(uint32(seq), []byte("DATA"), assembler); err != nil {
+			if _, err := cb.Push(uint32(seq), []byte("DATA"), assembler, nil); err != nil {
 				t.Errorf("Push(%d): %v", seq, err)
 			}
 		}(i)
@@ -494,7 +497,7 @@ func TestChunkBuffer_SessionBytes_AfterPush(t *testing.T) {
 	cb := NewChunkBuffer(newBufConfig(32*1024*1024, 1.0), newBufTestLogger())
 	// Sem drainer — chunk fica em voo.
 	data := make([]byte, 4096)
-	if err := cb.Push(0, data, assembler); err != nil {
+	if _, err := cb.Push(0, data, assembler, nil); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
 	got := cb.SessionBytes(assembler)
@@ -534,7 +537,7 @@ func TestChunkBuffer_DrainRateMBs_AfterDrain(t *testing.T) {
 	cb.Stats()
 
 	for i := 0; i < 5; i++ {
-		if err := cb.Push(uint32(i), make([]byte, 512*1024), assembler); err != nil {
+		if _, err := cb.Push(uint32(i), make([]byte, 512*1024), assembler, nil); err != nil {
 			t.Fatalf("Push(%d): %v", i, err)
 		}
 	}
@@ -598,7 +601,7 @@ func TestChunkBuffer_DrainSlot_WriteChunkFailure_SessionMarkedFailed(t *testing.
 
 	// Push chunk — drainer vai tentar WriteChunk que falhará via syncFile.
 	data := []byte("CHUNK_THAT_WILL_FAIL")
-	if err := cb.Push(0, data, assembler); err != nil {
+	if _, err := cb.Push(0, data, assembler, nil); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
 
@@ -648,7 +651,7 @@ func TestChunkBuffer_DrainSlot_RetrySuccess(t *testing.T) {
 	defer cancel()
 	cb.StartDrainer(ctx)
 
-	if err := cb.Push(0, []byte("RETRY_CHUNK"), assembler); err != nil {
+	if _, err := cb.Push(0, []byte("RETRY_CHUNK"), assembler, nil); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
 
@@ -688,7 +691,7 @@ func TestChunkBuffer_SessionFailed_HealthySession(t *testing.T) {
 	defer cancel()
 	cb.StartDrainer(ctx)
 
-	if err := cb.Push(0, []byte("OK"), assembler); err != nil {
+	if _, err := cb.Push(0, []byte("OK"), assembler, nil); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
 	if err := cb.Flush(assembler); err != nil {

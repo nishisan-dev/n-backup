@@ -42,6 +42,7 @@ type chunkSlot struct {
 	globalSeq uint32
 	data      []byte
 	assembler *ChunkAssembler
+	onDrained func(uint32)
 }
 
 // ChunkBufferStats contém métricas instantâneas do buffer de chunks.
@@ -174,7 +175,10 @@ func (cb *ChunkBuffer) loadSessionCounter(a *ChunkAssembler) (*atomic.Int64, boo
 //
 // Se o chunk não couber, usa fallback direto ao assembler.
 // Se drain_ratio == 0, sinaliza drenagem imediata após inserção.
-func (cb *ChunkBuffer) Push(globalSeq uint32, data []byte, assembler *ChunkAssembler) error {
+//
+// Retorna buffered=true quando o chunk ficou enfileirado no buffer e ainda
+// depende do drainer para ser concluído no assembler.
+func (cb *ChunkBuffer) Push(globalSeq uint32, data []byte, assembler *ChunkAssembler, onDrained func(uint32)) (buffered bool, err error) {
 	dataLen := int64(len(data))
 
 	// FIX #2: reserva de bytes via CAS — evita race entre goroutines concorrentes.
@@ -190,7 +194,13 @@ func (cb *ChunkBuffer) Push(globalSeq uint32, data []byte, assembler *ChunkAssem
 				"availableBytes", available,
 			)
 			cb.totalFallbacks.Add(1)
-			return assembler.WriteChunk(globalSeq, bytes.NewReader(data), dataLen)
+			if err := assembler.WriteChunk(globalSeq, bytes.NewReader(data), dataLen); err != nil {
+				return false, err
+			}
+			if onDrained != nil {
+				onDrained(globalSeq)
+			}
+			return false, nil
 		}
 		if cb.inFlightBytes.CompareAndSwap(current, current+dataLen) {
 			// Reserva atômica bem-sucedida.
@@ -206,6 +216,7 @@ func (cb *ChunkBuffer) Push(globalSeq uint32, data []byte, assembler *ChunkAssem
 		globalSeq: globalSeq,
 		data:      data,
 		assembler: assembler,
+		onDrained: onDrained,
 	}
 
 	// Tenta enviar ao canal com timeout de backpressure.
@@ -217,7 +228,7 @@ func (cb *ChunkBuffer) Push(globalSeq uint32, data []byte, assembler *ChunkAssem
 		cb.inFlightBytes.Add(-dataLen)
 		cb.getSessionCounter(assembler).Add(-dataLen)
 		cb.backpressureEvents.Add(1)
-		return fmt.Errorf("chunk buffer full after %s (backpressure): seq %d",
+		return false, fmt.Errorf("chunk buffer full after %s (backpressure): seq %d",
 			chunkBufferPushTimeout, globalSeq)
 	}
 
@@ -231,7 +242,7 @@ func (cb *ChunkBuffer) Push(globalSeq uint32, data []byte, assembler *ChunkAssem
 		}
 	}
 
-	return nil
+	return true, nil
 }
 
 // signalDrain envia um sinal não-bloqueante ao drainer.
@@ -317,6 +328,8 @@ func (cb *ChunkBuffer) drainSlot(slot chunkSlot) {
 			"error", lastErr,
 		)
 		cb.failedSessions.Store(slot.assembler, lastErr)
+	} else if slot.onDrained != nil {
+		slot.onDrained(slot.globalSeq)
 	}
 
 	// Libera bytes globais e por sessão — após WriteChunk para que

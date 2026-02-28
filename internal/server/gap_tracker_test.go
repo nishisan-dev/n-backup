@@ -15,12 +15,12 @@ func testGapLogger() *slog.Logger {
 }
 
 func TestGapTracker_DetectsGapAfterTimeout(t *testing.T) {
-	gt := NewGapTracker("test-session", 50*time.Millisecond, 5, testGapLogger())
+	gt := NewGapTracker("test-session", 50*time.Millisecond, 50*time.Millisecond, 5, testGapLogger())
 
 	// Recebe seq 0, 1, 3 (gap em 2)
-	gt.RecordChunk(0)
-	gt.RecordChunk(1)
-	gt.RecordChunk(3)
+	gt.CompleteChunk(0)
+	gt.CompleteChunk(1)
+	gt.CompleteChunk(3)
 
 	// Antes do timeout, CheckGaps deve retornar vazio
 	gaps := gt.CheckGaps()
@@ -39,10 +39,10 @@ func TestGapTracker_DetectsGapAfterTimeout(t *testing.T) {
 }
 
 func TestGapTracker_DetectsInitialGapZero(t *testing.T) {
-	gt := NewGapTracker("test-session", 50*time.Millisecond, 5, testGapLogger())
+	gt := NewGapTracker("test-session", 50*time.Millisecond, 50*time.Millisecond, 5, testGapLogger())
 
 	// Primeiro chunk chega fora de ordem: seq 0 ainda não chegou.
-	gt.RecordChunk(2)
+	gt.CompleteChunk(2)
 
 	time.Sleep(60 * time.Millisecond)
 
@@ -53,15 +53,15 @@ func TestGapTracker_DetectsInitialGapZero(t *testing.T) {
 }
 
 func TestGapTracker_TransientGapResolved(t *testing.T) {
-	gt := NewGapTracker("test-session", 100*time.Millisecond, 5, testGapLogger())
+	gt := NewGapTracker("test-session", 100*time.Millisecond, 100*time.Millisecond, 5, testGapLogger())
 
 	// Recebe seq 0, 1, 3 (gap em 2)
-	gt.RecordChunk(0)
-	gt.RecordChunk(1)
-	gt.RecordChunk(3)
+	gt.CompleteChunk(0)
+	gt.CompleteChunk(1)
+	gt.CompleteChunk(3)
 
 	// Gap transiente: seq 2 chega antes do timeout
-	gt.RecordChunk(2)
+	gt.CompleteChunk(2)
 
 	// Espera timeout
 	time.Sleep(110 * time.Millisecond)
@@ -74,11 +74,11 @@ func TestGapTracker_TransientGapResolved(t *testing.T) {
 }
 
 func TestGapTracker_MultipleGaps(t *testing.T) {
-	gt := NewGapTracker("test-session", 50*time.Millisecond, 10, testGapLogger())
+	gt := NewGapTracker("test-session", 50*time.Millisecond, 50*time.Millisecond, 10, testGapLogger())
 
 	// Recebe seq 0 e 5 — gaps em 1, 2, 3, 4
-	gt.RecordChunk(0)
-	gt.RecordChunk(5)
+	gt.CompleteChunk(0)
+	gt.CompleteChunk(5)
 
 	time.Sleep(60 * time.Millisecond)
 
@@ -100,11 +100,11 @@ func TestGapTracker_MultipleGaps(t *testing.T) {
 }
 
 func TestGapTracker_MaxNACKsPerCycle(t *testing.T) {
-	gt := NewGapTracker("test-session", 50*time.Millisecond, 3, testGapLogger())
+	gt := NewGapTracker("test-session", 50*time.Millisecond, 50*time.Millisecond, 3, testGapLogger())
 
 	// 10 gaps: recebe seq 0 e 11
-	gt.RecordChunk(0)
-	gt.RecordChunk(11)
+	gt.CompleteChunk(0)
+	gt.CompleteChunk(11)
 
 	time.Sleep(60 * time.Millisecond)
 
@@ -116,10 +116,10 @@ func TestGapTracker_MaxNACKsPerCycle(t *testing.T) {
 }
 
 func TestGapTracker_NoDuplicateNACKs(t *testing.T) {
-	gt := NewGapTracker("test-session", 50*time.Millisecond, 5, testGapLogger())
+	gt := NewGapTracker("test-session", 50*time.Millisecond, 50*time.Millisecond, 5, testGapLogger())
 
-	gt.RecordChunk(0)
-	gt.RecordChunk(3) // gaps 1, 2
+	gt.CompleteChunk(0)
+	gt.CompleteChunk(3) // gaps 1, 2
 
 	time.Sleep(60 * time.Millisecond)
 
@@ -140,10 +140,10 @@ func TestGapTracker_NoDuplicateNACKs(t *testing.T) {
 }
 
 func TestGapTracker_UnsentGapRemainsEligible(t *testing.T) {
-	gt := NewGapTracker("test-session", 50*time.Millisecond, 5, testGapLogger())
+	gt := NewGapTracker("test-session", 50*time.Millisecond, 50*time.Millisecond, 5, testGapLogger())
 
-	gt.RecordChunk(0)
-	gt.RecordChunk(2) // gap 1
+	gt.CompleteChunk(0)
+	gt.CompleteChunk(2) // gap 1
 
 	time.Sleep(60 * time.Millisecond)
 
@@ -160,10 +160,10 @@ func TestGapTracker_UnsentGapRemainsEligible(t *testing.T) {
 }
 
 func TestGapTracker_RearmGapAllowsRetryAfterTimeout(t *testing.T) {
-	gt := NewGapTracker("test-session", 50*time.Millisecond, 5, testGapLogger())
+	gt := NewGapTracker("test-session", 50*time.Millisecond, 50*time.Millisecond, 5, testGapLogger())
 
-	gt.RecordChunk(0)
-	gt.RecordChunk(2) // gap 1
+	gt.CompleteChunk(0)
+	gt.CompleteChunk(2) // gap 1
 
 	time.Sleep(60 * time.Millisecond)
 
@@ -189,10 +189,10 @@ func TestGapTracker_RearmGapAllowsRetryAfterTimeout(t *testing.T) {
 }
 
 func TestGapTracker_ResolveGap(t *testing.T) {
-	gt := NewGapTracker("test-session", 50*time.Millisecond, 5, testGapLogger())
+	gt := NewGapTracker("test-session", 50*time.Millisecond, 50*time.Millisecond, 5, testGapLogger())
 
-	gt.RecordChunk(0)
-	gt.RecordChunk(3) // gaps 1, 2
+	gt.CompleteChunk(0)
+	gt.CompleteChunk(3) // gaps 1, 2
 
 	time.Sleep(60 * time.Millisecond)
 
@@ -212,16 +212,16 @@ func TestGapTracker_ResolveGap(t *testing.T) {
 }
 
 func TestGapTracker_PendingGaps(t *testing.T) {
-	gt := NewGapTracker("test-session", 50*time.Millisecond, 5, testGapLogger())
+	gt := NewGapTracker("test-session", 50*time.Millisecond, 50*time.Millisecond, 5, testGapLogger())
 
-	gt.RecordChunk(0)
-	gt.RecordChunk(5) // gaps 1, 2, 3, 4
+	gt.CompleteChunk(0)
+	gt.CompleteChunk(5) // gaps 1, 2, 3, 4
 
 	if gt.PendingGaps() != 4 {
 		t.Fatalf("expected 4 pending gaps, got %d", gt.PendingGaps())
 	}
 
-	gt.RecordChunk(2) // resolve gap 2
+	gt.CompleteChunk(2) // resolve gap 2
 
 	if gt.PendingGaps() != 3 {
 		t.Fatalf("expected 3 pending gaps after receiving seq 2, got %d", gt.PendingGaps())
@@ -229,11 +229,11 @@ func TestGapTracker_PendingGaps(t *testing.T) {
 }
 
 func TestGapTracker_SequentialChunks_NoGaps(t *testing.T) {
-	gt := NewGapTracker("test-session", 50*time.Millisecond, 5, testGapLogger())
+	gt := NewGapTracker("test-session", 50*time.Millisecond, 50*time.Millisecond, 5, testGapLogger())
 
 	// Recebe chunks sequenciais — nenhum gap deve ser criado
 	for i := uint32(0); i < 100; i++ {
-		gt.RecordChunk(i)
+		gt.CompleteChunk(i)
 	}
 
 	time.Sleep(60 * time.Millisecond)
@@ -249,5 +249,44 @@ func TestGapTracker_SequentialChunks_NoGaps(t *testing.T) {
 
 	if gt.MaxSeenSeq() != 99 {
 		t.Fatalf("expected maxSeenSeq=99, got %d", gt.MaxSeenSeq())
+	}
+}
+
+func TestGapTracker_InFlightGapIgnoredUntilTimeout(t *testing.T) {
+	gt := NewGapTracker("test-session", 50*time.Millisecond, 50*time.Millisecond, 5, testGapLogger())
+
+	gt.CompleteChunk(0)
+	gt.StartChunk(1)
+	gt.AdvanceChunk(1)
+	gt.CompleteChunk(2) // cria gap em 1, mas 1 ainda está em voo
+
+	time.Sleep(20 * time.Millisecond)
+	if gaps := gt.CheckGaps(); len(gaps) != 0 {
+		t.Fatalf("expected no gap while chunk 1 is still progressing, got %v", gaps)
+	}
+
+	time.Sleep(40 * time.Millisecond)
+	gaps := gt.CheckGaps()
+	if len(gaps) != 1 || gaps[0] != 1 {
+		t.Fatalf("expected stalled in-flight gap [1], got %v", gaps)
+	}
+}
+
+func TestGapTracker_BufferedChunkNotReportedAsGap(t *testing.T) {
+	gt := NewGapTracker("test-session", 20*time.Millisecond, 20*time.Millisecond, 5, testGapLogger())
+
+	gt.CompleteChunk(0)
+	gt.StartChunk(1)
+	gt.MarkBuffered(1)
+	gt.CompleteChunk(2) // cria gap em 1, mas 1 está seguro no chunk buffer
+
+	time.Sleep(30 * time.Millisecond)
+	if gaps := gt.CheckGaps(); len(gaps) != 0 {
+		t.Fatalf("expected no gap for buffered chunk, got %v", gaps)
+	}
+
+	gt.CompleteChunk(1)
+	if gt.PendingGaps() != 0 {
+		t.Fatalf("expected buffered chunk to clear after completion, pending=%d", gt.PendingGaps())
 	}
 }

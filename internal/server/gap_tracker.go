@@ -11,6 +11,18 @@ import (
 	"time"
 )
 
+type chunkPhase uint8
+
+const (
+	chunkPhaseInFlight chunkPhase = iota + 1
+	chunkPhaseBuffered
+)
+
+type chunkState struct {
+	phase        chunkPhase
+	lastProgress time.Time
+}
+
 // GapTracker detecta chunks faltantes em sessões paralelas de forma proativa.
 // Mantém um mapa de globalSeqs recebidos e detecta gaps persistentes quando
 // um seq N+2 chega mas N+1 não — e esse gap persiste além do timeout configurado.
@@ -20,15 +32,20 @@ import (
 type GapTracker struct {
 	sessionID string
 
-	// received marca quais globalSeqs já foram recebidos pelo assembler.
-	received map[uint32]bool
+	// completed marca quais globalSeqs já foram efetivamente concluídos no assembler.
+	completed map[uint32]bool
 
-	// maxSeenSeq é o maior globalSeq visto até agora.
-	maxSeenSeq uint32
+	// states rastreia chunks que já iniciaram leitura do payload, mas ainda não
+	// foram concluídos no assembler. Isso permite ignorar chunks em voo ou já
+	// bufferizados ao avaliar um gap.
+	states map[uint32]chunkState
 
-	// hasSeenSeq evita ambiguidade com o valor zero de maxSeenSeq.
+	// maxCompletedSeq é o maior globalSeq concluído no assembler até agora.
+	maxCompletedSeq uint32
+
+	// hasCompletedSeq evita ambiguidade com o valor zero de maxCompletedSeq.
 	// Sem isso, um primeiro chunk fora de ordem (ex: seq 1) não detectaria o gap seq 0.
-	hasSeenSeq bool
+	hasCompletedSeq bool
 
 	// firstSeen armazena quando cada gap foi detectado pela primeira vez.
 	// Usado para tolerância de gaps transientes (out-of-order).
@@ -41,6 +58,11 @@ type GapTracker struct {
 	// Default: 2x streamReadDeadline (60s) para tolerar reconexões normais.
 	gapTimeout time.Duration
 
+	// inFlightTimeout é o tempo máximo sem progresso de payload para considerar
+	// um chunk em voo como estagnado. Quando isso ocorre, ele volta a ser elegível
+	// para retransmissão caso exista um gap para o seq correspondente.
+	inFlightTimeout time.Duration
+
 	// maxNACKsPerCycle limita quantos gaps são reportados por chamada de CheckGaps,
 	// evitando flood de NACKs em degradação severa.
 	maxNACKsPerCycle int
@@ -50,31 +72,95 @@ type GapTracker struct {
 }
 
 // NewGapTracker cria um GapTracker para uma sessão paralela.
-func NewGapTracker(sessionID string, gapTimeout time.Duration, maxNACKsPerCycle int, logger *slog.Logger) *GapTracker {
+func NewGapTracker(sessionID string, gapTimeout, inFlightTimeout time.Duration, maxNACKsPerCycle int, logger *slog.Logger) *GapTracker {
 	if maxNACKsPerCycle <= 0 {
 		maxNACKsPerCycle = 5
 	}
+	if inFlightTimeout <= 0 {
+		inFlightTimeout = 30 * time.Second
+	}
 	return &GapTracker{
 		sessionID:        sessionID,
-		received:         make(map[uint32]bool),
+		completed:        make(map[uint32]bool),
+		states:           make(map[uint32]chunkState),
 		firstSeen:        make(map[uint32]time.Time),
 		notifiedGaps:     make(map[uint32]bool),
 		gapTimeout:       gapTimeout,
+		inFlightTimeout:  inFlightTimeout,
 		maxNACKsPerCycle: maxNACKsPerCycle,
 		logger:           logger,
 	}
 }
 
-// RecordChunk registra que o globalSeq foi recebido com sucesso.
-// Deve ser chamado pelo receiveParallelStream a cada chunk recebido.
-//
-// Se o seq cria um gap (ex: recebe seq 5 mas seq 3 e 4 não chegaram),
-// marca os seqs faltantes com timestamp de detecção.
-func (gt *GapTracker) RecordChunk(globalSeq uint32) {
+// StartChunk marca o início da leitura do payload de um chunk.
+// O chunk passa ao estado in-flight e ainda não é elegível como "completo".
+func (gt *GapTracker) StartChunk(globalSeq uint32) {
 	gt.mu.Lock()
 	defer gt.mu.Unlock()
 
-	gt.received[globalSeq] = true
+	if gt.completed[globalSeq] {
+		return
+	}
+	gt.states[globalSeq] = chunkState{
+		phase:        chunkPhaseInFlight,
+		lastProgress: time.Now(),
+	}
+}
+
+// AdvanceChunk registra progresso real de leitura no payload de um chunk em voo.
+func (gt *GapTracker) AdvanceChunk(globalSeq uint32) {
+	gt.mu.Lock()
+	defer gt.mu.Unlock()
+
+	if gt.completed[globalSeq] {
+		return
+	}
+	state, ok := gt.states[globalSeq]
+	if !ok {
+		state = chunkState{phase: chunkPhaseInFlight}
+	}
+	state.lastProgress = time.Now()
+	if state.phase == 0 {
+		state.phase = chunkPhaseInFlight
+	}
+	gt.states[globalSeq] = state
+}
+
+// MarkBuffered marca que o chunk já foi lido por completo da rede e está
+// preservado no chunk buffer, mas ainda não foi persistido pelo assembler.
+func (gt *GapTracker) MarkBuffered(globalSeq uint32) {
+	gt.mu.Lock()
+	defer gt.mu.Unlock()
+
+	if gt.completed[globalSeq] {
+		return
+	}
+	gt.states[globalSeq] = chunkState{
+		phase:        chunkPhaseBuffered,
+		lastProgress: time.Now(),
+	}
+}
+
+// AbandonChunk remove o estado temporário de um chunk que falhou antes de ser
+// aceito pelo assembler ou pelo chunk buffer.
+func (gt *GapTracker) AbandonChunk(globalSeq uint32) {
+	gt.mu.Lock()
+	defer gt.mu.Unlock()
+
+	if gt.completed[globalSeq] {
+		return
+	}
+	delete(gt.states, globalSeq)
+}
+
+// CompleteChunk registra que o globalSeq foi concluído com sucesso pelo assembler.
+// Apenas chunks completos avançam a janela de validação de gaps.
+func (gt *GapTracker) CompleteChunk(globalSeq uint32) {
+	gt.mu.Lock()
+	defer gt.mu.Unlock()
+
+	gt.completed[globalSeq] = true
+	delete(gt.states, globalSeq)
 
 	// Se este seq preenche um gap previamente detectado, remove das listas.
 	delete(gt.firstSeen, globalSeq)
@@ -83,30 +169,30 @@ func (gt *GapTracker) RecordChunk(globalSeq uint32) {
 	now := time.Now()
 
 	// Primeiro chunk da sessão: precisa tratar o caso em que seq 0 ainda não chegou.
-	if !gt.hasSeenSeq {
+	if !gt.hasCompletedSeq {
 		if globalSeq > 0 {
 			for seq := uint32(0); seq < globalSeq; seq++ {
-				if !gt.received[seq] {
+				if !gt.completed[seq] {
 					gt.firstSeen[seq] = now
 				}
 			}
 		}
-		gt.maxSeenSeq = globalSeq
-		gt.hasSeenSeq = true
+		gt.maxCompletedSeq = globalSeq
+		gt.hasCompletedSeq = true
 		return
 	}
 
-	// Atualiza maxSeenSeq e detecta novos gaps.
-	if globalSeq > gt.maxSeenSeq {
-		// Qualquer seq entre maxSeenSeq+1 e globalSeq-1 que não foi recebido é um gap potencial.
-		for seq := gt.maxSeenSeq + 1; seq < globalSeq; seq++ {
-			if !gt.received[seq] {
+	// Atualiza maxCompletedSeq e detecta novos gaps.
+	if globalSeq > gt.maxCompletedSeq {
+		// Qualquer seq entre maxCompletedSeq+1 e globalSeq-1 que não foi concluído é um gap potencial.
+		for seq := gt.maxCompletedSeq + 1; seq < globalSeq; seq++ {
+			if !gt.completed[seq] {
 				if _, exists := gt.firstSeen[seq]; !exists {
 					gt.firstSeen[seq] = now
 				}
 			}
 		}
-		gt.maxSeenSeq = globalSeq
+		gt.maxCompletedSeq = globalSeq
 	}
 }
 
@@ -136,10 +222,29 @@ func (gt *GapTracker) CheckGaps() []uint32 {
 			continue
 		}
 		// Pula gaps que chegaram enquanto isso.
-		if gt.received[seq] {
+		if gt.completed[seq] {
 			delete(gt.firstSeen, seq)
 			delete(gt.notifiedGaps, seq)
+			delete(gt.states, seq)
 			continue
+		}
+		// Pula chunks que já foram recebidos integralmente da rede e estão
+		// aguardando apenas a drenagem do chunk buffer.
+		if state, exists := gt.states[seq]; exists {
+			switch state.phase {
+			case chunkPhaseBuffered:
+				continue
+			case chunkPhaseInFlight:
+				if now.Sub(state.lastProgress) < gt.inFlightTimeout {
+					continue
+				}
+				// Chunk em voo estagnado: deixa o gap elegível imediatamente.
+				gaps = append(gaps, seq)
+				if len(gaps) >= gt.maxNACKsPerCycle {
+					break
+				}
+				continue
+			}
 		}
 		// Pula gaps transientes (ainda dentro do timeout).
 		if now.Sub(detected) < gt.gapTimeout {
@@ -160,9 +265,10 @@ func (gt *GapTracker) MarkNotified(globalSeq uint32) {
 	gt.mu.Lock()
 	defer gt.mu.Unlock()
 
-	if gt.received[globalSeq] {
+	if gt.completed[globalSeq] {
 		delete(gt.firstSeen, globalSeq)
 		delete(gt.notifiedGaps, globalSeq)
+		delete(gt.states, globalSeq)
 		return
 	}
 	if _, exists := gt.firstSeen[globalSeq]; exists {
@@ -177,26 +283,30 @@ func (gt *GapTracker) RearmGap(globalSeq uint32) {
 	gt.mu.Lock()
 	defer gt.mu.Unlock()
 
-	if gt.received[globalSeq] {
+	if gt.completed[globalSeq] {
 		delete(gt.firstSeen, globalSeq)
 		delete(gt.notifiedGaps, globalSeq)
+		delete(gt.states, globalSeq)
 		return
 	}
 
 	gt.firstSeen[globalSeq] = time.Now()
 	delete(gt.notifiedGaps, globalSeq)
+
+	if state, exists := gt.states[globalSeq]; exists {
+		state.lastProgress = time.Now()
+		if state.phase == 0 {
+			state.phase = chunkPhaseInFlight
+		}
+		gt.states[globalSeq] = state
+	}
 }
 
 // ResolveGap marca um gap como resolvido. Deve ser usado apenas quando o
 // servidor já recebeu de fato o chunk (ou equivalente), não apenas quando o
 // agent confirmou a tentativa de retransmissão.
 func (gt *GapTracker) ResolveGap(globalSeq uint32) {
-	gt.mu.Lock()
-	defer gt.mu.Unlock()
-
-	gt.received[globalSeq] = true
-	delete(gt.firstSeen, globalSeq)
-	delete(gt.notifiedGaps, globalSeq)
+	gt.CompleteChunk(globalSeq)
 }
 
 // PendingGaps retorna o número de gaps não resolvidos (detectados e ainda pendentes).
@@ -206,16 +316,16 @@ func (gt *GapTracker) PendingGaps() int {
 
 	count := 0
 	for seq := range gt.firstSeen {
-		if !gt.received[seq] {
+		if !gt.completed[seq] {
 			count++
 		}
 	}
 	return count
 }
 
-// MaxSeenSeq retorna o maior globalSeq visto até agora.
+// MaxSeenSeq retorna o maior globalSeq concluído até agora.
 func (gt *GapTracker) MaxSeenSeq() uint32 {
 	gt.mu.Lock()
 	defer gt.mu.Unlock()
-	return gt.maxSeenSeq
+	return gt.maxCompletedSeq
 }

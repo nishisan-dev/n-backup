@@ -6,6 +6,7 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -1438,6 +1439,7 @@ func (h *Handler) gapCheckLoop(ctx context.Context, ps *ParallelSession) {
 	logger.Info("gap check loop started",
 		"interval", interval,
 		"timeout", h.cfg.GapDetection.Timeout,
+		"inFlightTimeout", h.cfg.GapDetection.InFlightTimeout,
 		"maxNACKsPerCycle", h.cfg.GapDetection.MaxNACKsPerCycle,
 	)
 
@@ -2234,6 +2236,7 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		pSession.GapTracker = NewGapTracker(
 			sessionID,
 			h.cfg.GapDetection.Timeout,
+			h.cfg.GapDetection.InFlightTimeout,
 			h.cfg.GapDetection.MaxNACKsPerCycle,
 			logger,
 		)
@@ -2375,6 +2378,34 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	}
 }
 
+// readParallelChunkPayload lê o payload de um chunk paralelo atualizando o
+// gap tracker a cada progresso real de bytes para distinguir chunk em voo de chunk parado.
+//
+// O deadline TCP usa streamReadDeadline (mesma constante usada para o header),
+// independente de GapDetection.InFlightTimeout. São responsabilidades separadas:
+//   - streamReadDeadline: quanto tempo o TCP espera por dados da rede antes de encerrar o stream.
+//   - inFlightTimeout: quanto tempo o GapTracker tolera um chunk sem progresso antes de
+//     considerá-lo stale e elegível para NACK. Medido via timestamps do AdvanceChunk.
+func (h *Handler) readParallelChunkPayload(conn net.Conn, reader io.Reader, length uint32, globalSeq uint32, session *ParallelSession) ([]byte, error) {
+	buf := make([]byte, length)
+
+	for offset := 0; offset < len(buf); {
+		conn.SetReadDeadline(time.Now().Add(streamReadDeadline))
+		n, err := reader.Read(buf[offset:])
+		if n > 0 {
+			offset += n
+			if session.GapTracker != nil {
+				session.GapTracker.AdvanceChunk(globalSeq)
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading chunk seq %d payload: %w", globalSeq, err)
+		}
+	}
+
+	return buf, nil
+}
+
 // receiveParallelStream recebe dados de um stream paralelo usando ChunkHeader framing.
 // Cada chunk é precedido por um ChunkHeader (8B: GlobalSeq uint32 + Length uint32).
 // Os dados são escritos incrementalmente no assembler, que decide se escreve direto
@@ -2415,25 +2446,46 @@ func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, read
 			return bytesReceived, fmt.Errorf("reading chunk header from stream %d: %w", streamIndex, err)
 		}
 
+		if session.GapTracker != nil {
+			session.GapTracker.StartChunk(hdr.GlobalSeq)
+		}
+
+		chunkData, err := h.readParallelChunkPayload(conn, reader, hdr.Length, hdr.GlobalSeq, session)
+		if err != nil {
+			return bytesReceived, err
+		}
+
 		// Entrega o chunk ao assembler — diretamente ou via buffer de memória.
 		// Quando o buffer está habilitado, Push materializa os dados do reader TCP
 		// em memória e retorna imediatamente; o drainer fará a escrita de forma
 		// assíncrona, desacoplando a goroutine de rede do I/O de disco.
 		if h.chunkBuffer != nil {
-			// Lê os bytes do reader TCP antes do push (o buffer precisa de ownership).
-			chunkData := make([]byte, hdr.Length)
-			if _, err := io.ReadFull(reader, chunkData); err != nil {
-				return bytesReceived, fmt.Errorf("reading chunk seq %d for buffer: %w", hdr.GlobalSeq, err)
-			}
-			if err := h.chunkBuffer.Push(hdr.GlobalSeq, chunkData, session.Assembler); err != nil {
+			buffered, err := h.chunkBuffer.Push(hdr.GlobalSeq, chunkData, session.Assembler, func(seq uint32) {
+				if session.GapTracker != nil {
+					session.GapTracker.CompleteChunk(seq)
+				}
+			})
+			if err != nil {
+				if session.GapTracker != nil {
+					session.GapTracker.AbandonChunk(hdr.GlobalSeq)
+				}
 				// Backpressure: buffer cheio após timeout — falha a stream para forçar
 				// reconexão do agent e aliviar pressão.
-				return bytesReceived, fmt.Errorf("chunk buffer backpressure on seq %d: %w", hdr.GlobalSeq, err)
+				return bytesReceived, fmt.Errorf("chunk buffer push on seq %d: %w", hdr.GlobalSeq, err)
+			}
+			if buffered && session.GapTracker != nil {
+				session.GapTracker.MarkBuffered(hdr.GlobalSeq)
 			}
 		} else {
-			// Caminho direto (buffer desabilitado) — escreve via LimitReader TCP.
-			if err := session.Assembler.WriteChunk(hdr.GlobalSeq, io.LimitReader(reader, int64(hdr.Length)), int64(hdr.Length)); err != nil {
+			// Caminho direto (buffer desabilitado) — payload já foi materializado acima.
+			if err := session.Assembler.WriteChunk(hdr.GlobalSeq, bytes.NewReader(chunkData), int64(hdr.Length)); err != nil {
+				if session.GapTracker != nil {
+					session.GapTracker.AbandonChunk(hdr.GlobalSeq)
+				}
 				return bytesReceived, fmt.Errorf("writing chunk seq %d to assembler: %w", hdr.GlobalSeq, err)
+			}
+			if session.GapTracker != nil {
+				session.GapTracker.CompleteChunk(hdr.GlobalSeq)
 			}
 		}
 
@@ -2452,11 +2504,6 @@ func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, read
 			"length", hdr.Length,
 			"totalBytes", bytesReceived,
 		)
-
-		// Registra chunk no gap tracker para detecção de gaps
-		if session.GapTracker != nil {
-			session.GapTracker.RecordChunk(hdr.GlobalSeq)
-		}
 
 		// Per-stream stats: incrementa tráfego e atualiza last activity
 		if counter, ok := session.StreamTrafficIn.Load(streamIndex); ok {

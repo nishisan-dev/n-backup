@@ -99,6 +99,7 @@ type FlowRotationConfig struct {
 type GapDetectionConfig struct {
 	Enabled          bool          `yaml:"enabled"`             // default: true (habilitado por padrão)
 	Timeout          time.Duration `yaml:"timeout"`             // tempo para gap persistir antes de NACK (default: 60s)
+	InFlightTimeout  time.Duration `yaml:"in_flight_timeout"`   // tempo máximo sem progresso de payload de um chunk em voo (default: 30s)
 	CheckInterval    time.Duration `yaml:"check_interval"`      // intervalo entre checks de gap (default: 5s)
 	MaxNACKsPerCycle int           `yaml:"max_nacks_per_cycle"` // máximo de NACKs por check (default: 5)
 }
@@ -291,6 +292,9 @@ func (c *ServerConfig) validate() error {
 	if c.GapDetection.Enabled {
 		if c.GapDetection.Timeout <= 0 {
 			c.GapDetection.Timeout = 60 * time.Second
+		}
+		if c.GapDetection.InFlightTimeout <= 0 {
+			c.GapDetection.InFlightTimeout = 30 * time.Second
 		}
 		if c.GapDetection.CheckInterval <= 0 {
 			c.GapDetection.CheckInterval = 5 * time.Second
