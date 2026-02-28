@@ -32,8 +32,13 @@ type chunkState struct {
 type GapTracker struct {
 	sessionID string
 
-	// completed marca quais globalSeqs já foram efetivamente concluídos no assembler.
-	completed map[uint32]bool
+	// contiguousCompletedSeq é o menor globalSeq que AINDA NÃO foi concluído.
+	// Todos os seqs < contiguousCompletedSeq já foram recebidos com sucesso.
+	contiguousCompletedSeq uint32
+
+	// outOfOrderCompleted armazena seqs > contiguousCompletedSeq que já foram
+	// concluídos, aguardando que os gaps anteriores sejam preenchidos.
+	outOfOrderCompleted map[uint32]bool
 
 	// states rastreia chunks que já iniciaram leitura do payload, mas ainda não
 	// foram concluídos no assembler. Isso permite ignorar chunks em voo ou já
@@ -80,16 +85,24 @@ func NewGapTracker(sessionID string, gapTimeout, inFlightTimeout time.Duration, 
 		inFlightTimeout = 30 * time.Second
 	}
 	return &GapTracker{
-		sessionID:        sessionID,
-		completed:        make(map[uint32]bool),
-		states:           make(map[uint32]chunkState),
-		firstSeen:        make(map[uint32]time.Time),
-		notifiedGaps:     make(map[uint32]bool),
-		gapTimeout:       gapTimeout,
-		inFlightTimeout:  inFlightTimeout,
-		maxNACKsPerCycle: maxNACKsPerCycle,
-		logger:           logger,
+		sessionID:           sessionID,
+		outOfOrderCompleted: make(map[uint32]bool),
+		states:              make(map[uint32]chunkState),
+		firstSeen:           make(map[uint32]time.Time),
+		notifiedGaps:        make(map[uint32]bool),
+		gapTimeout:          gapTimeout,
+		inFlightTimeout:     inFlightTimeout,
+		maxNACKsPerCycle:    maxNACKsPerCycle,
+		logger:              logger,
 	}
+}
+
+// isCompleted retorna true se o chunk já foi persistido no assembler.
+func (gt *GapTracker) isCompleted(seq uint32) bool {
+	if seq < gt.contiguousCompletedSeq {
+		return true
+	}
+	return gt.outOfOrderCompleted[seq]
 }
 
 // StartChunk marca o início da leitura do payload de um chunk.
@@ -98,7 +111,7 @@ func (gt *GapTracker) StartChunk(globalSeq uint32) {
 	gt.mu.Lock()
 	defer gt.mu.Unlock()
 
-	if gt.completed[globalSeq] {
+	if gt.isCompleted(globalSeq) {
 		return
 	}
 	gt.states[globalSeq] = chunkState{
@@ -112,7 +125,7 @@ func (gt *GapTracker) AdvanceChunk(globalSeq uint32) {
 	gt.mu.Lock()
 	defer gt.mu.Unlock()
 
-	if gt.completed[globalSeq] {
+	if gt.isCompleted(globalSeq) {
 		return
 	}
 	state, ok := gt.states[globalSeq]
@@ -132,7 +145,7 @@ func (gt *GapTracker) MarkBuffered(globalSeq uint32) {
 	gt.mu.Lock()
 	defer gt.mu.Unlock()
 
-	if gt.completed[globalSeq] {
+	if gt.isCompleted(globalSeq) {
 		return
 	}
 	gt.states[globalSeq] = chunkState{
@@ -147,7 +160,7 @@ func (gt *GapTracker) AbandonChunk(globalSeq uint32) {
 	gt.mu.Lock()
 	defer gt.mu.Unlock()
 
-	if gt.completed[globalSeq] {
+	if gt.isCompleted(globalSeq) {
 		return
 	}
 	delete(gt.states, globalSeq)
@@ -159,7 +172,15 @@ func (gt *GapTracker) CompleteChunk(globalSeq uint32) {
 	gt.mu.Lock()
 	defer gt.mu.Unlock()
 
-	gt.completed[globalSeq] = true
+	if globalSeq == gt.contiguousCompletedSeq {
+		gt.contiguousCompletedSeq++
+		for gt.outOfOrderCompleted[gt.contiguousCompletedSeq] {
+			delete(gt.outOfOrderCompleted, gt.contiguousCompletedSeq)
+			gt.contiguousCompletedSeq++
+		}
+	} else if globalSeq > gt.contiguousCompletedSeq {
+		gt.outOfOrderCompleted[globalSeq] = true
+	}
 	delete(gt.states, globalSeq)
 
 	// Se este seq preenche um gap previamente detectado, remove das listas.
@@ -172,7 +193,7 @@ func (gt *GapTracker) CompleteChunk(globalSeq uint32) {
 	if !gt.hasCompletedSeq {
 		if globalSeq > 0 {
 			for seq := uint32(0); seq < globalSeq; seq++ {
-				if !gt.completed[seq] {
+				if !gt.isCompleted(seq) {
 					gt.firstSeen[seq] = now
 				}
 			}
@@ -186,7 +207,7 @@ func (gt *GapTracker) CompleteChunk(globalSeq uint32) {
 	if globalSeq > gt.maxCompletedSeq {
 		// Qualquer seq entre maxCompletedSeq+1 e globalSeq-1 que não foi concluído é um gap potencial.
 		for seq := gt.maxCompletedSeq + 1; seq < globalSeq; seq++ {
-			if !gt.completed[seq] {
+			if !gt.isCompleted(seq) {
 				if _, exists := gt.firstSeen[seq]; !exists {
 					gt.firstSeen[seq] = now
 				}
@@ -222,7 +243,7 @@ func (gt *GapTracker) CheckGaps() []uint32 {
 			continue
 		}
 		// Pula gaps que chegaram enquanto isso.
-		if gt.completed[seq] {
+		if gt.isCompleted(seq) {
 			delete(gt.firstSeen, seq)
 			delete(gt.notifiedGaps, seq)
 			delete(gt.states, seq)
@@ -265,7 +286,7 @@ func (gt *GapTracker) MarkNotified(globalSeq uint32) {
 	gt.mu.Lock()
 	defer gt.mu.Unlock()
 
-	if gt.completed[globalSeq] {
+	if gt.isCompleted(globalSeq) {
 		delete(gt.firstSeen, globalSeq)
 		delete(gt.notifiedGaps, globalSeq)
 		delete(gt.states, globalSeq)
@@ -283,7 +304,7 @@ func (gt *GapTracker) RearmGap(globalSeq uint32) {
 	gt.mu.Lock()
 	defer gt.mu.Unlock()
 
-	if gt.completed[globalSeq] {
+	if gt.isCompleted(globalSeq) {
 		delete(gt.firstSeen, globalSeq)
 		delete(gt.notifiedGaps, globalSeq)
 		delete(gt.states, globalSeq)
@@ -316,7 +337,7 @@ func (gt *GapTracker) PendingGaps() int {
 
 	count := 0
 	for seq := range gt.firstSeen {
-		if !gt.completed[seq] {
+		if !gt.isCompleted(seq) {
 			count++
 		}
 	}
