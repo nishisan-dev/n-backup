@@ -480,11 +480,13 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 	// Auto-scaler mantido apenas para scale-down em caso de subutilização
 	scalerCtx, scalerCancel := context.WithCancel(ctx)
 	defer scalerCancel()
+	scalerEnabled := entry.AutoScaler.IsEnabled()
 
 	scaler := NewAutoScaler(AutoScalerConfig{
 		Dispatcher: dispatcher,
 		Logger:     logger,
-		Mode:       entry.AutoScaler,
+		Mode:       entry.AutoScaler.Mode,
+		Enabled:    &scalerEnabled,
 	})
 	go scaler.Run(scalerCtx)
 

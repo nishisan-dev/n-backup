@@ -63,6 +63,12 @@ func TestLoadAgentConfig_ExampleFile(t *testing.T) {
 	if cfg.Backups[1].Parallels != 4 {
 		t.Errorf("expected backups[1].parallels 4, got %d", cfg.Backups[1].Parallels)
 	}
+	if !cfg.Backups[1].AutoScaler.IsEnabled() {
+		t.Error("expected backups[1].auto_scaler.enabled true in example config")
+	}
+	if cfg.Backups[1].AutoScaler.Mode != "efficiency" {
+		t.Errorf("expected backups[1].auto_scaler.mode 'efficiency', got %q", cfg.Backups[1].AutoScaler.Mode)
+	}
 	// backups[1] tem bandwidth_limit: "100mb" no example
 	expectedBW := int64(100 * 1024 * 1024)
 	if cfg.Backups[1].BandwidthLimitRaw != expectedBW {
@@ -298,6 +304,70 @@ backups:
 	}
 	if cfg.Backups[0].Parallels != 4 {
 		t.Errorf("expected parallels 4, got %d", cfg.Backups[0].Parallels)
+	}
+}
+
+func TestLoadAgentConfig_AutoScalerLegacyString(t *testing.T) {
+	content := `
+agent:
+  name: "test-agent"
+server:
+  address: "localhost:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  client_cert: /tmp/client.pem
+  client_key: /tmp/client-key.pem
+backups:
+  - name: "test"
+    storage: "default"
+    schedule: "0 2 * * *"
+    auto_scaler: adaptive
+    sources:
+      - path: /tmp
+`
+	cfgPath := writeTempConfig(t, content)
+	cfg, err := LoadAgentConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Backups[0].AutoScaler.Mode != "adaptive" {
+		t.Errorf("expected auto_scaler.mode adaptive, got %q", cfg.Backups[0].AutoScaler.Mode)
+	}
+	if !cfg.Backups[0].AutoScaler.IsEnabled() {
+		t.Error("expected legacy auto_scaler format to default enabled=true")
+	}
+}
+
+func TestLoadAgentConfig_AutoScalerStructuredDisabled(t *testing.T) {
+	content := `
+agent:
+  name: "test-agent"
+server:
+  address: "localhost:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  client_cert: /tmp/client.pem
+  client_key: /tmp/client-key.pem
+backups:
+  - name: "test"
+    storage: "default"
+    schedule: "0 2 * * *"
+    auto_scaler:
+      enabled: false
+      mode: adaptive
+    sources:
+      - path: /tmp
+`
+	cfgPath := writeTempConfig(t, content)
+	cfg, err := LoadAgentConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Backups[0].AutoScaler.Mode != "adaptive" {
+		t.Errorf("expected auto_scaler.mode adaptive, got %q", cfg.Backups[0].AutoScaler.Mode)
+	}
+	if cfg.Backups[0].AutoScaler.IsEnabled() {
+		t.Error("expected auto_scaler.enabled false")
 	}
 }
 

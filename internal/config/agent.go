@@ -65,9 +65,65 @@ type BackupEntry struct {
 	Exclude           []string       `yaml:"exclude"`
 	Parallels         int            `yaml:"parallels"`       // 0=desabilitado (single stream), 1-255=máx streams paralelos
 	DSCP              string         `yaml:"dscp"`            // DSCP marking (ex: "AF41", "EF"), vazio=desabilitado
-	AutoScaler        string         `yaml:"auto_scaler"`     // "efficiency" (default) | "adaptive"
+	AutoScaler        AutoScalerMode `yaml:"auto_scaler"`     // string legado ("efficiency"/"adaptive") ou map { enabled, mode }
 	BandwidthLimit    string         `yaml:"bandwidth_limit"` // Limite de upload em Bytes/seg (ex: "50mb", "1gb"), vazio=sem limite
 	BandwidthLimitRaw int64          `yaml:"-"`               // valor parseado em bytes/seg
+}
+
+// AutoScalerMode suporta compatibilidade retroativa com o formato legado:
+//   auto_scaler: efficiency
+// e o novo formato estruturado:
+//   auto_scaler:
+//     enabled: false
+//     mode: adaptive
+type AutoScalerMode struct {
+	Mode       string `yaml:"mode"`
+	Enabled    bool   `yaml:"enabled"`
+	enabledSet bool
+}
+
+// IsEnabled retorna true por padrão quando o campo enabled não foi informado.
+func (a AutoScalerMode) IsEnabled() bool {
+	if !a.enabledSet {
+		return true
+	}
+	return a.Enabled
+}
+
+// UnmarshalYAML aceita tanto string quanto map para manter compatibilidade.
+func (a *AutoScalerMode) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case 0:
+		return nil
+	case yaml.ScalarNode:
+		var mode string
+		if err := value.Decode(&mode); err != nil {
+			return err
+		}
+		a.Mode = mode
+		a.Enabled = false
+		a.enabledSet = false
+		return nil
+	case yaml.MappingNode:
+		var raw struct {
+			Mode    string `yaml:"mode"`
+			Enabled *bool  `yaml:"enabled"`
+		}
+		if err := value.Decode(&raw); err != nil {
+			return err
+		}
+		a.Mode = raw.Mode
+		if raw.Enabled != nil {
+			a.Enabled = *raw.Enabled
+			a.enabledSet = true
+		} else {
+			a.Enabled = false
+			a.enabledSet = false
+		}
+		return nil
+	default:
+		return fmt.Errorf("auto_scaler must be a string or mapping")
+	}
 }
 
 // BackupSource representa um diretório de origem para backup.
@@ -178,13 +234,17 @@ func (c *AgentConfig) validate() error {
 			}
 		}
 		// Auto-scaler mode validation
-		switch strings.ToLower(strings.TrimSpace(b.AutoScaler)) {
+		switch strings.ToLower(strings.TrimSpace(b.AutoScaler.Mode)) {
 		case "", "efficiency":
-			c.Backups[i].AutoScaler = "efficiency"
+			c.Backups[i].AutoScaler.Mode = "efficiency"
 		case "adaptive":
-			c.Backups[i].AutoScaler = "adaptive"
+			c.Backups[i].AutoScaler.Mode = "adaptive"
 		default:
-			return fmt.Errorf("backups[%d].auto_scaler: unknown value %q (valid: efficiency, adaptive)", i, b.AutoScaler)
+			return fmt.Errorf("backups[%d].auto_scaler.mode: unknown value %q (valid: efficiency, adaptive)", i, b.AutoScaler.Mode)
+		}
+		if !b.AutoScaler.enabledSet {
+			c.Backups[i].AutoScaler.Enabled = true
+			c.Backups[i].AutoScaler.enabledSet = true
 		}
 		// Bandwidth limit validation
 		if b.BandwidthLimit != "" {

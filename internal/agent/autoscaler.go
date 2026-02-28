@@ -35,6 +35,7 @@ type AutoScaler struct {
 	interval   time.Duration
 	logger     *slog.Logger
 	mode       string // "efficiency" | "adaptive"
+	enabled    bool
 
 	// Histerese: conta janelas consecutivas acima/abaixo do threshold
 	scaleUpCount   int
@@ -83,6 +84,7 @@ type AutoScalerConfig struct {
 	Hysteresis int           // janelas para ação (default 3)
 	Logger     *slog.Logger
 	Mode       string // "efficiency" | "adaptive"
+	Enabled    *bool
 }
 
 // NewAutoScaler cria um novo auto-scaler.
@@ -96,6 +98,10 @@ func NewAutoScaler(cfg AutoScalerConfig) *AutoScaler {
 	if cfg.Mode == "" {
 		cfg.Mode = "efficiency"
 	}
+	enabled := true
+	if cfg.Enabled != nil {
+		enabled = *cfg.Enabled
+	}
 
 	return &AutoScaler{
 		dispatcher:  cfg.Dispatcher,
@@ -103,6 +109,7 @@ func NewAutoScaler(cfg AutoScalerConfig) *AutoScaler {
 		hysteresis:  cfg.Hysteresis,
 		logger:      cfg.Logger,
 		mode:        cfg.Mode,
+		enabled:     enabled,
 		probeStream: -1,
 	}
 }
@@ -118,6 +125,7 @@ func (as *AutoScaler) Run(ctx context.Context) {
 	defer ticker.Stop()
 
 	as.logger.Info("auto-scaler started",
+		"enabled", as.enabled,
 		"mode", as.mode,
 		"interval", as.interval,
 		"hysteresis", as.hysteresis,
@@ -173,6 +181,7 @@ func (as *AutoScaler) evaluate() {
 	}
 
 	as.logger.Debug("auto-scaler evaluation",
+		"enabled", as.enabled,
 		"mode", as.mode,
 		"efficiency", efficiency,
 		"producerBps", rates.ProducerBps,
@@ -184,6 +193,18 @@ func (as *AutoScaler) evaluate() {
 		"senderIdleMs", rates.SenderIdleMs,
 		"bottleneck", bottleneck,
 	)
+
+	if !as.enabled {
+		as.scaleUpCount = 0
+		as.scaleDownCount = 0
+		as.probeState = probeIdle
+		as.probeBaseline = 0
+		as.probeStream = -1
+		as.probeWindows = 0
+		as.probeCooldown = 0
+		as.updateSnapshot(efficiency, rates, active, protocol.AutoScaleStateStable, false)
+		return
+	}
 
 	switch as.mode {
 	case "adaptive":

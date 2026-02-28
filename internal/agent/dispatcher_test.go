@@ -386,6 +386,69 @@ func TestAutoScaler_Hysteresis(t *testing.T) {
 	}
 }
 
+func TestAutoScaler_DisabledPreventsScaleChanges(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	d := NewDispatcher(DispatcherConfig{
+		MaxStreams:  4,
+		BufferSize:  1024 * 1024,
+		ChunkSize:   1024,
+		SessionID:   "test-disabled-scaler",
+		ServerAddr:  "localhost:9847",
+		AgentName:   "test-agent",
+		StorageName: "test-storage",
+		Logger:      logger,
+		PrimaryConn: nil,
+	})
+
+	activateStreamManually(d, 0, &mockConn{})
+
+	enabled := false
+	as := NewAutoScaler(AutoScalerConfig{
+		Dispatcher: d,
+		Hysteresis: 1,
+		Logger:     logger,
+		Enabled:    &enabled,
+	})
+
+	// Cenário que normalmente faria scale-up.
+	d.mu.Lock()
+	d.lastSampleAt = time.Now().Add(-1 * time.Second)
+	d.mu.Unlock()
+	atomic.StoreInt64(&d.producerBytes, 200*1024*1024)
+	atomic.StoreInt64(&d.streams[0].drainBytes, 100*1024*1024)
+
+	as.evaluate()
+
+	if d.ActiveStreams() != 1 {
+		t.Fatalf("expected no scale-up when auto-scaler is disabled, got %d active streams", d.ActiveStreams())
+	}
+	snap := as.Snapshot()
+	if snap.State != protocol.AutoScaleStateStable {
+		t.Fatalf("expected stable snapshot when disabled, got %d", snap.State)
+	}
+
+	activateStreamManually(d, 1, &mockConn{})
+
+	// Cenário que normalmente faria scale-down.
+	d.mu.Lock()
+	d.lastSampleAt = time.Now().Add(-1 * time.Second)
+	d.mu.Unlock()
+	atomic.StoreInt64(&d.producerBytes, 20*1024*1024)
+	atomic.StoreInt64(&d.streams[0].drainBytes, 50*1024*1024)
+	atomic.StoreInt64(&d.streams[1].drainBytes, 50*1024*1024)
+
+	as.evaluate()
+
+	if d.ActiveStreams() != 2 {
+		t.Fatalf("expected no scale-down when auto-scaler is disabled, got %d active streams", d.ActiveStreams())
+	}
+	snap = as.Snapshot()
+	if snap.State != protocol.AutoScaleStateStable {
+		t.Fatalf("expected stable snapshot after disabled scale-down check, got %d", snap.State)
+	}
+}
+
 func TestDispatcher_StartSenderWithRetry_Idempotent(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 

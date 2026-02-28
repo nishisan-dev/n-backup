@@ -345,11 +345,14 @@ backups:
   - name: "home"
     storage: "home-dirs"
     parallels: 4         # 4 streams paralelos
-    auto_scaler: adaptive # efficiency (padrão) ou adaptive
+    auto_scaler:
+      enabled: true
+      mode: adaptive      # efficiency (padrão) ou adaptive
 ```
 
 - **parallels**: `0` desabilita (single stream), `1-255` define o máximo de streams.
-- **auto_scaler**: `efficiency` (threshold-based, padrão) ou `adaptive` (probe-and-measure).
+- **auto_scaler.mode**: `efficiency` (threshold-based, padrão) ou `adaptive` (probe-and-measure).
+- **auto_scaler.enabled**: `true` por padrão. Com `false`, o AutoScaler continua reportando métricas, mas não faz scale-up, scale-down nem probes.
 - **bandwidth_limit**: limite de upload em Bytes/segundo (ex: `50mb`, `1gb`). Mínimo: `64kb`. Vazio = sem limite.
   - Para single-stream: aplicado sobre o buffer de escrita antes do hash inline.
   - Para parallel-stream: aplicado sobre o fluxo agregado antes da distribuição pelo Dispatcher.
@@ -584,7 +587,9 @@ backups:
     storage: "home-dirs"
     schedule: "0 */6 * * *"
     parallels: 4
-    auto_scaler: efficiency  # efficiency (padrão) ou adaptive
+    auto_scaler:
+      enabled: true
+      mode: efficiency       # efficiency (padrão) ou adaptive
     bandwidth_limit: "100mb"  # Limite de upload: 100 MB/s (opcional, vazio=sem limite)
     sources:
       - path: /home

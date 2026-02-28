@@ -368,8 +368,10 @@ Para aumentar o throughput de backups grandes, o agent pode usar **múltiplos st
 backups:
   - name: "data"
     storage: "main"
-    parallels: 4             # 0 = single stream, 1-255 = máximo de streams
-    auto_scaler: efficiency  # efficiency (padrão) ou adaptive
+    parallels: 4              # 0 = single stream, 1-255 = máximo de streams
+    auto_scaler:
+      enabled: true           # false = congela os streams atuais (sem scale up/down)
+      mode: efficiency        # efficiency (padrão) ou adaptive
     bandwidth_limit: "100mb"  # Limite de upload: 100 MB/s (opcional, vazio=sem limite)
     sources:
 ```
@@ -390,7 +392,8 @@ backups:
 | Parâmetro | Default | Descrição |
 |----------|---------|----------|
 | `parallels` | `0` | Número máximo de streams (0=desabilita) |
-| `auto_scaler` | `efficiency` | Modo do auto-scaler (`efficiency` ou `adaptive`) |
+| `auto_scaler.mode` | `efficiency` | Modo do auto-scaler (`efficiency` ou `adaptive`) |
+| `auto_scaler.enabled` | `true` | Se `false`, mantém os streams atuais sem scale-up/scale-down |
 | `resume.chunk_size` | `1mb` | Tamanho de cada chunk distribuído (64kb-16mb) |
 | Hysteresis window (fixo) | 3 | Janelas consecutivas para escalar |
 
@@ -402,7 +405,7 @@ backups:
 
 ### Modos do Auto-Scaler (v2.1.2+)
 
-O campo `auto_scaler` define a estratégia de ajuste dinâmico de streams:
+O campo `auto_scaler.mode` define a estratégia de ajuste dinâmico de streams:
 
 | Modo | Estratégia | Quando usar |
 |------|-----------|-------------|
@@ -415,10 +418,15 @@ backups:
   - name: "remote-db"
     storage: "database"
     parallels: 6
-    auto_scaler: adaptive
+    auto_scaler:
+      enabled: true
+      mode: adaptive
 ```
 
 As estatísticas do auto-scaler (efficiency, throughput, estado) são enviadas ao server via control channel e visíveis na WebUI.
+
+> [!TIP]
+> Para diagnosticar problemas de gap/reordenação sem sair do pipeline paralelo, use `auto_scaler.enabled: false`. Isso mantém os streams atuais, mas desabilita scale-up, scale-down e probes.
 
 ---
 
