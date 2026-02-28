@@ -89,6 +89,7 @@ type ParallelStream struct {
 	rb         *RingBuffer
 	conn       net.Conn
 	connMu     sync.Mutex // protege conn durante reconnect
+	writeMu    sync.Mutex // serializa frames no socket (sender + retransmit)
 	sendOffset int64
 	sendMu     sync.Mutex
 	drainBytes int64 // atomic — bytes drenados (ACK'd) por este stream
@@ -313,62 +314,102 @@ func (d *Dispatcher) RetransmitChunk(globalSeq uint32) (bool, error) {
 		return false, nil
 	}
 
-	// Encontra qualquer stream ativo para enviar a retransmissão
-	var targetStream *ParallelStream
+	// Encontra um stream ativo e tenta enviar a retransmissão
+	sent := false
+	var lastErr error
 	for _, s := range d.streams {
-		if s.active.Load() && !s.dead.Load() {
-			targetStream = s
-			break
+		if !s.active.Load() || s.dead.Load() {
+			continue
 		}
+
+		if err := d.writeFrame(s, buf); err != nil {
+			d.logger.Warn("retransmit: failed to write to stream, trying another",
+				"globalSeq", globalSeq, "stream", s.index, "error", err)
+			lastErr = err
+			continue // Tenta o próximo stream
+		}
+
+		d.logger.Info("retransmit: chunk sent successfully",
+			"globalSeq", globalSeq,
+			"stream", s.index,
+		)
+		sent = true
+		break
 	}
-	if targetStream == nil {
+
+	if !sent {
+		if lastErr != nil {
+			return false, fmt.Errorf("retransmitting chunk %d failed on all streams, last error: %w", globalSeq, lastErr)
+		}
 		return false, ErrAllStreamsDead
 	}
 
-	// Envia diretamente pela conexão do stream (com write deadline)
-	targetStream.connMu.Lock()
-	conn := targetStream.conn
-	targetStream.connMu.Unlock()
+	return true, nil
+}
+
+func (d *Dispatcher) readChunkFrame(stream *ParallelStream, offset int64) ([]byte, error) {
+	hdr := make([]byte, protocol.ChunkHeaderSize)
+	n, err := stream.rb.ReadFullAt(offset, hdr)
+	if err != nil {
+		return nil, err
+	}
+	if n < protocol.ChunkHeaderSize {
+		return nil, io.ErrUnexpectedEOF
+	}
+
+	length := binary.BigEndian.Uint32(hdr[4:8])
+	if length > uint32(d.chunkSize) {
+		return nil, fmt.Errorf("invalid chunk length %d at offset %d", length, offset)
+	}
+
+	frame := make([]byte, protocol.ChunkHeaderSize+int(length))
+	copy(frame, hdr)
+	if length == 0 {
+		return frame, nil
+	}
+
+	n, err = stream.rb.ReadFullAt(offset+protocol.ChunkHeaderSize, frame[protocol.ChunkHeaderSize:])
+	if err != nil {
+		return nil, err
+	}
+	if n < int(length) {
+		return nil, io.ErrUnexpectedEOF
+	}
+
+	return frame, nil
+}
+
+func (d *Dispatcher) writeFrame(stream *ParallelStream, frame []byte) error {
+	stream.writeMu.Lock()
+	defer stream.writeMu.Unlock()
+
+	stream.connMu.Lock()
+	conn := stream.conn
+	stream.connMu.Unlock()
 
 	if conn == nil {
-		return false, fmt.Errorf("retransmit: stream %d has no connection", targetStream.index)
+		return fmt.Errorf("stream %d has no connection", stream.index)
 	}
 
 	if netConn, ok := conn.(net.Conn); ok {
 		netConn.SetWriteDeadline(time.Now().Add(writeDeadline))
 	}
 
-	if _, err := io.Copy(conn, io.NewSectionReader(
-		&byteReaderAt{data: buf}, 0, int64(len(buf)),
-	)); err != nil {
-		d.logger.Error("retransmit: failed to write to stream",
-			"globalSeq", globalSeq, "stream", targetStream.index, "error", err)
-		return false, fmt.Errorf("retransmitting chunk %d: %w", globalSeq, err)
+	written := 0
+	for written < len(frame) {
+		n, err := conn.Write(frame[written:])
+		if n > 0 {
+			written += n
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrUnexpectedEOF
+		}
 	}
 
-	d.logger.Info("retransmit: chunk sent successfully",
-		"globalSeq", globalSeq,
-		"stream", targetStream.index,
-		"bytes", loc.length,
-	)
-
-	return true, nil
-}
-
-// byteReaderAt implements io.ReaderAt for a byte slice.
-type byteReaderAt struct {
-	data []byte
-}
-
-func (r *byteReaderAt) ReadAt(p []byte, off int64) (int, error) {
-	if off >= int64(len(r.data)) {
-		return 0, io.EOF
-	}
-	n := copy(p, r.data[off:])
-	if n < len(p) {
-		return n, io.EOF
-	}
-	return n, nil
+	return nil
 }
 
 // startSenderWithRetry inicia a goroutine sender para um stream com retry automático.
@@ -389,7 +430,6 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 			}
 			stream.connMu.Unlock()
 		}()
-		buf := make([]byte, streamIOBufferSize)
 		retries := 0
 
 		for {
@@ -397,9 +437,9 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 			offset := stream.sendOffset
 			stream.sendMu.Unlock()
 
-			// Diagnóstico: mede tempo bloqueado em rb.ReadAt (indica buffer vazio = producer lento)
+			// Diagnóstico: mede tempo bloqueado em rb.ReadFullAt (indica buffer vazio = producer lento)
 			readStart := time.Now()
-			n, err := stream.rb.ReadAt(offset, buf)
+			frame, err := d.readChunkFrame(stream, offset)
 			if elapsed := time.Since(readStart); elapsed > time.Millisecond {
 				atomic.AddInt64(&d.senderIdleNs, elapsed.Nanoseconds())
 			}
@@ -421,13 +461,9 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 				return
 			}
 
-			// Write com deadline para detectar conexões half-open
-			stream.connMu.Lock()
-			conn := stream.conn
-			stream.connMu.Unlock()
-
-			conn.SetWriteDeadline(time.Now().Add(writeDeadline))
-			_, writeErr := conn.Write(buf[:n])
+			// Escreve um frame completo por vez para não quebrar o framing quando
+			// uma retransmissão precisar injetar um chunk no mesmo stream.
+			writeErr := d.writeFrame(stream, frame)
 
 			if writeErr != nil {
 				d.logger.Warn("stream write failed, attempting reconnect",
@@ -524,7 +560,7 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 			// Write bem-sucedido — reset retries e avança offset
 			retries = 0
 			stream.sendMu.Lock()
-			stream.sendOffset += int64(n)
+			stream.sendOffset += int64(len(frame))
 			stream.sendMu.Unlock()
 		}
 	}()
