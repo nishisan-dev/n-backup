@@ -93,6 +93,12 @@ type ChunkBuffer struct {
 	// Consultado pelo handler antes de Finalize() via SessionFailed().
 	failedSessions sync.Map
 
+	// abortedSessions rastreia sessões abortadas via MarkSessionAborted.
+	// Mapeamento: *ChunkAssembler → true.
+	// Chunks dessas sessões são descartados no drain para evitar
+	// I/O errors em diretórios já removidos.
+	abortedSessions sync.Map
+
 	// Métricas atômicas
 	totalPushed        atomic.Int64
 	totalDrained       atomic.Int64
@@ -306,6 +312,15 @@ func (cb *ChunkBuffer) drainAll() {
 func (cb *ChunkBuffer) drainSlot(slot chunkSlot) {
 	dataLen := int64(len(slot.data))
 
+	// Guard: sessão abortada — descarta chunk silenciosamente.
+	// Evita cascade de I/O errors em diretórios já removidos.
+	if _, aborted := cb.abortedSessions.Load(slot.assembler); aborted {
+		cb.inFlightBytes.Add(-dataLen)
+		cb.getSessionCounter(slot.assembler).Add(-dataLen)
+		cb.totalDrained.Add(1)
+		return
+	}
+
 	var lastErr error
 	for attempt := 0; attempt < drainSlotMaxRetries; attempt++ {
 		if err := slot.assembler.WriteChunk(slot.globalSeq, bytes.NewReader(slot.data), dataLen); err != nil {
@@ -364,6 +379,17 @@ func (cb *ChunkBuffer) SessionFailed(assembler *ChunkAssembler) error {
 		return v.(error)
 	}
 	return nil
+}
+
+// MarkSessionAborted sinaliza que chunks desta sessão devem ser descartados
+// no drain em vez de escritos, evitando I/O errors em diretórios já removidos.
+// Deve ser chamado quando a sessão é abortada (ex: chunk irrecuperável).
+// Thread-safe: pode ser chamado de qualquer goroutine.
+func (cb *ChunkBuffer) MarkSessionAborted(assembler *ChunkAssembler) {
+	if cb == nil || assembler == nil {
+		return
+	}
+	cb.abortedSessions.Store(assembler, true)
 }
 
 // drainRateMBs calcula a taxa de drenagem em MB/s com janela deslizante de ~5s.

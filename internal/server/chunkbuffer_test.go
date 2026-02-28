@@ -702,3 +702,50 @@ func TestChunkBuffer_SessionFailed_HealthySession(t *testing.T) {
 		t.Fatalf("SessionFailed should be nil for healthy session, got: %v", err)
 	}
 }
+
+// --- MarkSessionAborted ---
+
+// TestChunkBuffer_DrainSlot_SkipsAbortedSession verifica que chunks de sessões
+// abortadas são descartados no drain sem tentar WriteChunk, evitando
+// cascade de I/O errors em diretórios já removidos.
+func TestChunkBuffer_DrainSlot_SkipsAbortedSession(t *testing.T) {
+	assembler := newBufAssembler(t, "aborted-session")
+	cb := NewChunkBuffer(newBufConfig(64*1024*1024, 0.0), newBufTestLogger())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cb.StartDrainer(ctx)
+
+	// Push chunk antes do abort.
+	if _, err := cb.Push(0, []byte("WILL_BE_ABORTED"), assembler, nil); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	// Marca sessão como abortada ANTES do drain completar.
+	cb.MarkSessionAborted(assembler)
+
+	// Aguarda o drain processar o slot (deve descartar silenciosamente).
+	if !bufWaitDrained(cb, 1, 3*time.Second) {
+		t.Fatalf("slot not drained after abort: drained=%d", cb.totalDrained.Load())
+	}
+
+	// INVARIANTE: inFlightBytes deve ser 0 após descarte.
+	if got := cb.inFlightBytes.Load(); got != 0 {
+		t.Errorf("expected inFlightBytes=0 after abort drain, got %d", got)
+	}
+
+	// Sessão NÃO deve estar marcada como falhada — foi descartada, não falhou.
+	if err := cb.SessionFailed(assembler); err != nil {
+		t.Errorf("SessionFailed should be nil after abort discard, got: %v", err)
+	}
+}
+
+// TestChunkBuffer_MarkSessionAborted_NilSafe verifica que MarkSessionAborted
+// é no-op seguro em ChunkBuffer nil e com assembler nil.
+func TestChunkBuffer_MarkSessionAborted_NilSafe(t *testing.T) {
+	var cb *ChunkBuffer
+	cb.MarkSessionAborted(nil) // não deve panic
+
+	cb2 := NewChunkBuffer(newBufConfig(64*1024*1024, 0.0), newBufTestLogger())
+	cb2.MarkSessionAborted(nil) // não deve panic
+}
