@@ -274,7 +274,9 @@ func (d *Dispatcher) emitChunk(data []byte) error {
 
 // RetransmitChunk tenta retransmitir um chunk perdido identificado pelo globalSeq.
 // Consulta o chunkMap para localizar o chunk no ring buffer do stream original.
-// Se o chunk ainda está no buffer, lê os dados e envia por qualquer stream ativo.
+// Se o chunk ainda está no buffer, lê os dados e reenvia pelo MESMO stream que
+// contém o chunk no ring buffer. O offset de ChunkSACK é relativo ao byte stream
+// daquela conexão; enviar por outro stream corrompe a contabilidade de ACKs.
 // Retorna (true, nil) se retransmitido com sucesso, (false, nil) se irrecuperável.
 func (d *Dispatcher) RetransmitChunk(globalSeq uint32) (bool, error) {
 	// Lookup no chunkMap
@@ -314,35 +316,21 @@ func (d *Dispatcher) RetransmitChunk(globalSeq uint32) (bool, error) {
 		return false, nil
 	}
 
-	// Encontra um stream ativo e tenta enviar a retransmissão
-	sent := false
-	var lastErr error
-	for _, s := range d.streams {
-		if !s.active.Load() || s.dead.Load() {
-			continue
-		}
-
-		if err := d.writeFrame(s, buf); err != nil {
-			d.logger.Warn("retransmit: failed to write to stream, trying another",
-				"globalSeq", globalSeq, "stream", s.index, "error", err)
-			lastErr = err
-			continue // Tenta o próximo stream
-		}
-
-		d.logger.Info("retransmit: chunk sent successfully",
-			"globalSeq", globalSeq,
-			"stream", s.index,
-		)
-		sent = true
-		break
+	// Reenvia pelo stream original do chunk para manter a semântica de offsets.
+	if stream.dead.Load() {
+		return false, fmt.Errorf("retransmit: original stream %d is permanently dead", stream.index)
+	}
+	if err := d.writeFrame(stream, buf); err != nil {
+		d.logger.Warn("retransmit: failed to write to original stream",
+			"globalSeq", globalSeq, "stream", stream.index, "error", err)
+		return false, fmt.Errorf("retransmitting chunk %d on original stream %d: %w",
+			globalSeq, stream.index, err)
 	}
 
-	if !sent {
-		if lastErr != nil {
-			return false, fmt.Errorf("retransmitting chunk %d failed on all streams, last error: %w", globalSeq, lastErr)
-		}
-		return false, ErrAllStreamsDead
-	}
+	d.logger.Info("retransmit: chunk sent successfully",
+		"globalSeq", globalSeq,
+		"stream", stream.index,
+	)
 
 	return true, nil
 }

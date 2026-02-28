@@ -239,6 +239,50 @@ func TestDispatcher_SkipDeadStream(t *testing.T) {
 	}
 }
 
+func TestDispatcher_RetransmitChunk_UsesOriginalStream(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	conn0 := &mockConn{}
+	conn1 := &mockConn{}
+
+	d := NewDispatcher(DispatcherConfig{
+		MaxStreams:  2,
+		BufferSize:  1024 * 1024,
+		ChunkSize:   512,
+		SessionID:   "test-retransmit-original-stream",
+		ServerAddr:  "localhost:9847",
+		AgentName:   "test-agent",
+		StorageName: "test-storage",
+		Logger:      logger,
+		PrimaryConn: nil,
+	})
+
+	activateStreamManually(d, 0, conn0)
+	activateStreamManually(d, 1, conn1)
+
+	// Força o próximo chunk a ser emitido para o stream 1.
+	d.nextStream = 1
+
+	data := make([]byte, 512)
+	if _, err := d.Write(data); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	ok, err := d.RetransmitChunk(0)
+	if err != nil {
+		t.Fatalf("RetransmitChunk: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected retransmit to succeed")
+	}
+
+	if got := atomic.LoadInt64(&conn0.written); got != 0 {
+		t.Fatalf("expected stream 0 conn to remain untouched, got %d bytes", got)
+	}
+	if got := atomic.LoadInt64(&conn1.written); got == 0 {
+		t.Fatal("expected retransmit to be written to original stream 1")
+	}
+}
+
 func TestDispatcher_WaitAllSendersContext(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
