@@ -331,6 +331,13 @@ func (cb *ChunkBuffer) drainSlot(slot chunkSlot) {
 				"error", err,
 			)
 			time.Sleep(drainSlotBaseBackoff * time.Duration(1<<attempt))
+			// Sessão pode ter sido abortada durante o backoff — não insiste.
+			if _, aborted := cb.abortedSessions.Load(slot.assembler); aborted {
+				cb.inFlightBytes.Add(-dataLen)
+				cb.getSessionCounter(slot.assembler).Add(-dataLen)
+				cb.totalDrained.Add(1)
+				return
+			}
 			continue
 		}
 		lastErr = nil
