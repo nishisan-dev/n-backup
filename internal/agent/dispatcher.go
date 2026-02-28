@@ -332,13 +332,29 @@ func (d *Dispatcher) RetransmitChunk(globalSeq uint32) (bool, error) {
 	}
 
 	// Reenvia pelo stream original do chunk para manter a semântica de offsets.
+	// Se o stream original está morto, tenta streams alternativos ativos para
+	// evitar abort desnecessário da sessão inteira.
 	if stream.dead.Load() {
-		return false, fmt.Errorf("retransmit: original stream %d is permanently dead", stream.index)
+		var altStream *ParallelStream
+		for _, s := range d.streams {
+			if s.active.Load() && !s.dead.Load() {
+				altStream = s
+				break
+			}
+		}
+		if altStream == nil {
+			return false, fmt.Errorf("retransmit: all streams dead, cannot retransmit seq %d", globalSeq)
+		}
+		d.logger.Info("retransmit: original stream dead, using alternative",
+			"globalSeq", globalSeq,
+			"originalStream", stream.index,
+			"altStream", altStream.index)
+		stream = altStream
 	}
 	if err := d.writeFrame(stream, buf); err != nil {
-		d.logger.Warn("retransmit: failed to write to original stream",
+		d.logger.Warn("retransmit: failed to write to stream",
 			"globalSeq", globalSeq, "stream", stream.index, "error", err)
-		return false, fmt.Errorf("retransmitting chunk %d on original stream %d: %w",
+		return false, fmt.Errorf("retransmitting chunk %d on stream %d: %w",
 			globalSeq, stream.index, err)
 	}
 	stream.sendMu.Lock()
