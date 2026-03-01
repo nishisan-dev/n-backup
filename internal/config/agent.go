@@ -58,24 +58,36 @@ type TLSClient struct {
 
 // BackupEntry representa um bloco de backup nomeado com storage de destino.
 type BackupEntry struct {
-	Name              string         `yaml:"name"`     // Identificador local do backup
-	Storage           string         `yaml:"storage"`  // Nome do storage no server
-	Schedule          string         `yaml:"schedule"` // Cron expression individual deste backup
-	Sources           []BackupSource `yaml:"sources"`
-	Exclude           []string       `yaml:"exclude"`
-	Parallels         int            `yaml:"parallels"`       // 0=desabilitado (single stream), 1-255=máx streams paralelos
-	DSCP              string         `yaml:"dscp"`            // DSCP marking (ex: "AF41", "EF"), vazio=desabilitado
-	AutoScaler        AutoScalerMode `yaml:"auto_scaler"`     // string legado ("efficiency"/"adaptive") ou map { enabled, mode }
-	BandwidthLimit    string         `yaml:"bandwidth_limit"` // Limite de upload em Bytes/seg (ex: "50mb", "1gb"), vazio=sem limite
-	BandwidthLimitRaw int64          `yaml:"-"`               // valor parseado em bytes/seg
+	Name              string             `yaml:"name"`     // Identificador local do backup
+	Storage           string             `yaml:"storage"`  // Nome do storage no server
+	Schedule          string             `yaml:"schedule"` // Cron expression individual deste backup
+	Sources           []BackupSource     `yaml:"sources"`
+	Exclude           []string           `yaml:"exclude"`
+	Parallels         int                `yaml:"parallels"`       // 0=desabilitado (single stream), 1-255=máx streams paralelos
+	DSCP              string             `yaml:"dscp"`            // DSCP marking (ex: "AF41", "EF"), vazio=desabilitado
+	AutoScaler        AutoScalerMode     `yaml:"auto_scaler"`     // string legado ("efficiency"/"adaptive") ou map { enabled, mode }
+	BandwidthLimit    string             `yaml:"bandwidth_limit"` // Limite de upload em Bytes/seg (ex: "50mb", "1gb"), vazio=sem limite
+	BandwidthLimitRaw int64              `yaml:"-"`               // valor parseado em bytes/seg
+	PortRotation      PortRotationConfig `yaml:"port_rotation"`   // rotação de source port por N chunks
+}
+
+// PortRotationConfig controla a rotação intencional de source port TCP por stream.
+// Quando habilitada (mode: "per-n-chunks"), o agent desconecta e reconecta cada stream
+// após enviar N chunks, mudando o source port TCP para evitar throttling por flow.
+type PortRotationConfig struct {
+	Mode           string `yaml:"mode"`             // "off"|"per-n-chunks" (default: "off")
+	ChunksPerCycle int    `yaml:"chunks_per_cycle"` // chunks por ciclo de rotação (default: 0 = desabilitado)
 }
 
 // AutoScalerMode suporta compatibilidade retroativa com o formato legado:
-//   auto_scaler: efficiency
+//
+//	auto_scaler: efficiency
+//
 // e o novo formato estruturado:
-//   auto_scaler:
-//     enabled: false
-//     mode: adaptive
+//
+//	auto_scaler:
+//	  enabled: false
+//	  mode: adaptive
 type AutoScalerMode struct {
 	Mode       string `yaml:"mode"`
 	Enabled    bool   `yaml:"enabled"`

@@ -457,6 +457,7 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 		Logger:         logger,
 		PrimaryConn:    conn,
 		OnStreamChange: onStreamChange,
+		ChunksPerCycle: entry.PortRotation.ChunksPerCycle,
 	})
 	defer dispatcher.Close()
 

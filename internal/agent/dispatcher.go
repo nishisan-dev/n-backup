@@ -79,8 +79,9 @@ type Dispatcher struct {
 
 	// chunkMap mapeia globalSeq → localização no ring buffer para retransmissão via NACK.
 	// Consultado apenas no caminho de retransmissão (raro), não impacta performance normal.
-	chunkMap   map[uint32]chunkLocation
-	chunkMapMu sync.RWMutex
+	chunkMap       map[uint32]chunkLocation
+	chunkMapMu     sync.RWMutex
+	chunksPerCycle int // per-N-chunk rotation (0=desabilitado)
 }
 
 // ParallelStream representa um stream individual com seu ring buffer e conexão.
@@ -108,6 +109,10 @@ type ParallelStream struct {
 	dead          atomic.Bool // permanentemente morto (esgotou retries)
 	senderDone    chan struct{}
 	senderErr     chan error
+
+	// Per-N-chunk rotation: contador de chunks enviados com sucesso desde
+	// a última rotação. Protegido pelo sender goroutine (single-writer).
+	chunksSinceRotation int32
 }
 
 type retransmitSpan struct {
@@ -137,6 +142,7 @@ type DispatcherConfig struct {
 	PrimaryConn    net.Conn              // conexão primária (control-only, usada apenas para Trailer+FinalACK)
 	OnStreamChange func(active, max int) // callback para notificar mudanças de streams
 	DSCPValue      int                   // DSCP code point (0=desabilitado)
+	ChunksPerCycle int                   // per-N-chunk rotation (0=desabilitado)
 }
 
 // NewDispatcher cria um novo Dispatcher.
@@ -154,6 +160,7 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 		logger:         cfg.Logger,
 		onStreamChange: cfg.OnStreamChange,
 		dscpValue:      cfg.DSCPValue,
+		chunksPerCycle: cfg.ChunksPerCycle,
 		lastSampleAt:   time.Now(),
 		pending:        make([]byte, cfg.ChunkSize),
 		pendingLen:     0,
@@ -662,6 +669,35 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 			stream.sendMu.Lock()
 			stream.advanceNormalLocked(int64(len(frame)))
 			stream.sendMu.Unlock()
+
+			// Per-N-chunk rotation: após enviar N chunks com sucesso,
+			// desconecta e reconecta para mudar o source port TCP.
+			if d.chunksPerCycle > 0 {
+				stream.chunksSinceRotation++
+				if int(stream.chunksSinceRotation) >= d.chunksPerCycle {
+					stream.chunksSinceRotation = 0
+					d.logger.Info("port rotation triggered",
+						"stream", streamIdx,
+						"chunksPerCycle", d.chunksPerCycle)
+
+					resumeOffset, reconnErr := d.reconnectStream(streamIdx)
+					if reconnErr != nil {
+						d.logger.Warn("port rotation reconnect failed, continuing on current conn",
+							"stream", streamIdx, "error", reconnErr)
+						// Não é fatal — continua enviando pela conn atual
+						continue
+					}
+
+					stream.sendMu.Lock()
+					stream.resumeFromWireOffsetLocked(resumeOffset)
+					stream.sendMu.Unlock()
+
+					d.logger.Info("port rotation completed",
+						"stream", streamIdx,
+						"resumeOffset", resumeOffset)
+					continue
+				}
+			}
 		}
 	}()
 }
