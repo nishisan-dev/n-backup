@@ -388,6 +388,38 @@ backups:
 
 ---
 
+## Per-N-Chunk Port Rotation (v3.0.0+)
+
+Em ambientes com middleboxes (load balancers, firewalls stateful, NAT), conexões TCP de longa duração podem sofrer throttling por flow. O port rotation resolve isso rotacionando o source port TCP periodicamente:
+
+```yaml
+backups:
+  - name: "data"
+    storage: "main"
+    parallels: 4
+    port_rotation:
+      mode: "per-n-chunks"     # "off" (padrão) ou "per-n-chunks"
+      chunks_per_cycle: 500    # Chunks por stream antes de rotacionar
+```
+
+### Como Funciona
+
+1. O agent conta os chunks enviados por cada stream
+2. Após `chunks_per_cycle` chunks: o stream é desconectado e reconectado (novo source port TCP)
+3. O server trata isso como um `ParallelJoin` normal com resume do último offset
+4. A transferência continua sem perda de dados
+
+| Parâmetro | Default | Descrição |
+|----------|---------|----------|
+| `port_rotation.mode` | `off` | `off` = desabilitado, `per-n-chunks` = rotaciona após N chunks |
+| `port_rotation.chunks_per_cycle` | `0` | Número de chunks por ciclo de rotação |
+
+> **Quando usar:** Links WAN com middleboxes que aplicam per-flow rate limiting, ou conexões que passam por load balancers que distribuem por source port.
+
+> **Nota:** A rotação opera de forma transparente. O server não precisa de configuração adicional.
+
+---
+
 ## Control Channel
 
 O agent mantém uma conexão TLS persistente com o server para keep-alive, medição de RTT e orquestração:
