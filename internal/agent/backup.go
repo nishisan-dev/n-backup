@@ -457,7 +457,7 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 		Logger:         logger,
 		PrimaryConn:    conn,
 		OnStreamChange: onStreamChange,
-		ChunksPerCycle: entry.PortRotation.ChunksPerCycle,
+		ChunksPerCycle: entry.PortRotation.EffectiveChunksPerCycle(),
 		SACKTimeoutFn: func() time.Duration {
 			rtt := controlCh.RTT()
 			timeout := rtt * 3

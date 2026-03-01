@@ -79,6 +79,15 @@ type PortRotationConfig struct {
 	ChunksPerCycle int    `yaml:"chunks_per_cycle"` // chunks por ciclo de rotação (default: 0 = desabilitado)
 }
 
+// EffectiveChunksPerCycle retorna ChunksPerCycle apenas quando Mode é "per-n-chunks".
+// Para qualquer outro mode (incluindo "" e "off"), retorna 0 (desabilitado).
+func (p PortRotationConfig) EffectiveChunksPerCycle() int {
+	if p.Mode == "per-n-chunks" && p.ChunksPerCycle > 0 {
+		return p.ChunksPerCycle
+	}
+	return 0
+}
+
 // AutoScalerMode suporta compatibilidade retroativa com o formato legado:
 //
 //	auto_scaler: efficiency
@@ -268,6 +277,15 @@ func (c *AgentConfig) validate() error {
 				return fmt.Errorf("backups[%d].bandwidth_limit must be at least 64kb, got %s", i, b.BandwidthLimit)
 			}
 			c.Backups[i].BandwidthLimitRaw = bwParsed
+		}
+		// Port rotation mode validation
+		switch strings.ToLower(strings.TrimSpace(b.PortRotation.Mode)) {
+		case "", "off":
+			c.Backups[i].PortRotation.Mode = "off"
+		case "per-n-chunks":
+			c.Backups[i].PortRotation.Mode = "per-n-chunks"
+		default:
+			return fmt.Errorf("backups[%d].port_rotation.mode: unknown value %q (valid: off, per-n-chunks)", i, b.PortRotation.Mode)
 		}
 	}
 	if c.Retry.MaxAttempts <= 0 {

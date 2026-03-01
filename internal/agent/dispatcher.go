@@ -682,6 +682,11 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 			stream.advanceNormalLocked(int64(len(frame)))
 			stream.sendMu.Unlock()
 
+			// Reseta SACK timer após envio real de dados.
+			// Evita falso-positivo durante startup quando o producer
+			// ainda não gerou dados e nenhum SACK é esperado.
+			stream.lastSACKAt.Store(time.Now().UnixNano())
+
 			// SACK timeout: se o agent enviou chunks mas nenhum SACK chegou no período,
 			// a conn está morta. Fecha a conn para que o próximo writeFrame falhe e
 			// entre no retry loop.
@@ -910,7 +915,6 @@ func (d *Dispatcher) ActivateStream(streamIdx int) error {
 	stream.connMu.Unlock()
 
 	stream.active.Store(true)
-	stream.lastSACKAt.Store(time.Now().UnixNano()) // inicia SACK timer
 	atomic.AddInt32(&d.activeCount, 1)
 
 	// Inicia sender com retry e ACK reader
