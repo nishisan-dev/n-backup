@@ -1343,54 +1343,6 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 				h.Events.PushEvent("info", "ingestion_done_signal", agentName, fmt.Sprintf("agent confirmed all data sent (session %s)", cidnSessionID), 0)
 			}
 
-		case protocol.MagicControlRetransmitResult:
-			// Agent informou resultado de tentativa de retransmissão após NACK
-			result, err := protocol.ReadControlRetransmitResultPayload(conn)
-			if err != nil {
-				logger.Warn("control channel: reading retransmit result payload", "error", err)
-				return
-			}
-
-			logger.Info("control channel: received ControlRetransmitResult",
-				"session", result.SessionID,
-				"missingSeq", result.MissingSeq,
-				"success", result.Success)
-
-			val, ok := h.sessions.Load(result.SessionID)
-			if !ok {
-				logger.Warn("control channel: retransmit result for unknown session",
-					"session", result.SessionID,
-					"missingSeq", result.MissingSeq)
-				continue
-			}
-			ps, ok := val.(*ParallelSession)
-			if !ok || ps.AgentName != agentName {
-				logger.Warn("control channel: retransmit result session mismatch",
-					"session", result.SessionID,
-					"missingSeq", result.MissingSeq,
-					"agent", agentName)
-				continue
-			}
-
-			if result.Success {
-				// Chunk retransmitido pelo agent. Rearma o timer do gap e aguarda a
-				// chegada real do chunk via stream antes de considerá-lo resolvido.
-				if ps.GapTracker != nil {
-					ps.GapTracker.RearmGap(result.MissingSeq)
-					logger.Info("gap retransmission accepted", "seq", result.MissingSeq)
-				}
-			} else {
-				// Chunk irrecuperável (ring buffer sobrescrito) — aborta sessão.
-				abortErr := fmt.Errorf("chunk seq %d irrecoverable (buffer overwritten)", result.MissingSeq)
-				logger.Error("chunk irrecoverable, aborting session",
-					"session", result.SessionID,
-					"missingSeq", result.MissingSeq)
-				if h.Events != nil {
-					h.Events.PushEvent("error", "chunk_lost", agentName, abortErr.Error(), 0)
-				}
-				ps.abort(abortErr)
-			}
-
 		case protocol.MagicControlSlotPark:
 			// Agent desativou um slot (scale-down via auto-scaler)
 			slotID, err := protocol.ReadControlSlotParkPayload(conn)
@@ -1458,83 +1410,6 @@ func (h *Handler) extractAgentName(conn net.Conn, logger *slog.Logger) string {
 	// Fallback: usa o remote address agrupado por IP (sem porta)
 	host, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	return host
-}
-
-// gapCheckLoop roda como goroutine por sessão paralela, verificando periodicamente
-// se há chunks faltantes persistentes (gaps) e enviando ControlNACK ao agent via control channel.
-//
-// A goroutine termina quando:
-// - O contexto é cancelado (sessão finalizada ou server shutdown)
-func (h *Handler) gapCheckLoop(ctx context.Context, ps *ParallelSession) {
-	interval := h.cfg.GapDetection.CheckInterval
-	if interval <= 0 {
-		interval = 5 * time.Second
-	}
-
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	logger := ps.Logger.With("component", "gap_check")
-	logger.Info("gap check loop started",
-		"interval", interval,
-		"timeout", h.cfg.GapDetection.Timeout,
-		"inFlightTimeout", h.cfg.GapDetection.InFlightTimeout,
-		"maxNACKsPerCycle", h.cfg.GapDetection.MaxNACKsPerCycle,
-	)
-
-	for {
-		select {
-		case <-ctx.Done():
-			logger.Info("gap check loop stopped (context cancelled)")
-			return
-		case <-ticker.C:
-		}
-
-		// Sessão pode ter sido abortada entre ticks — não envia NACKs desnecessários.
-		if _, aborted := ps.aborted(); aborted {
-			logger.Info("gap check loop stopping (session aborted)")
-			return
-		}
-
-		gaps := ps.GapTracker.CheckGaps()
-		if len(gaps) == 0 {
-			continue
-		}
-
-		// Obtém control conn do agent para enviar NACKs
-		ctrlRaw, hasCtrl := h.controlConns.Load(ps.AgentName)
-		if !hasCtrl {
-			logger.Warn("gap detected but no control channel available",
-				"gaps", gaps, "agent", ps.AgentName)
-			continue
-		}
-		cci := ctrlRaw.(*ControlConnInfo)
-
-		muRaw, hasMu := h.controlConnsMu.Load(ps.AgentName)
-		if !hasMu {
-			continue
-		}
-		mu := muRaw.(*sync.Mutex)
-
-		for _, seq := range gaps {
-			mu.Lock()
-			err := protocol.WriteControlNACK(cci.Conn, seq, ps.SessionID)
-			mu.Unlock()
-
-			if err != nil {
-				logger.Warn("failed to send ControlNACK",
-					"missingSeq", seq, "error", err)
-				break // conn provavelmente morreu, não insiste
-			}
-
-			ps.GapTracker.MarkNotified(seq)
-			logger.Info("nack_sent",
-				"missingSeq", seq,
-				"session", ps.SessionID,
-				"pendingGaps", ps.GapTracker.PendingGaps(),
-			)
-		}
-	}
 }
 
 // handleBackup processa uma sessão de backup completa.
@@ -2198,8 +2073,8 @@ type ParallelSession struct {
 	Aborted         chan struct{} // fechado quando a sessão é abortada antes do finalize
 	abortOnce       sync.Once     // garante close único do Aborted
 	AbortErr        atomic.Value  // error do aborto (quando houver)
-	GapTracker      *GapTracker   // detector proativo de chunks faltantes (nil quando gap_detection desabilitado)
-	Logger          *slog.Logger  // Session logger (enriquecido com session_log_dir quando habilitado)
+
+	Logger *slog.Logger // Session logger (enriquecido com session_log_dir quando habilitado)
 }
 
 func (ps *ParallelSession) abort(err error) {
@@ -2310,16 +2185,6 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		Aborted:       make(chan struct{}),
 	}
 
-	// Inicializa gap tracker se habilitado na config
-	if h.cfg.GapDetection.Enabled {
-		pSession.GapTracker = NewGapTracker(
-			sessionID,
-			h.cfg.GapDetection.Timeout,
-			h.cfg.GapDetection.InFlightTimeout,
-			h.cfg.GapDetection.MaxNACKsPerCycle,
-			logger,
-		)
-	}
 	pSession.Logger = logger // session logger (com fan-out para arquivo quando habilitado)
 	pSession.LastActivity.Store(now.UnixNano())
 	h.sessions.Store(sessionID, pSession)
@@ -2348,14 +2213,6 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		h.sessions.Delete(sessionID)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
 		return
-	}
-
-	// Inicia gap check loop se gap detection está habilitado.
-	// A goroutine roda até o contexto ser cancelado no encerramento real da sessão.
-	if pSession.GapTracker != nil {
-		gapCtx, gapCancel := context.WithCancel(ctx)
-		defer gapCancel()
-		go h.gapCheckLoop(gapCtx, pSession)
 	}
 
 	// Espera sinal explícito do agent (ControlIngestionDone) ou timeout.
@@ -2486,14 +2343,8 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	}
 }
 
-// readParallelChunkPayload lê o payload de um chunk paralelo atualizando o
-// gap tracker a cada progresso real de bytes para distinguir chunk em voo de chunk parado.
-//
-// O deadline TCP usa streamReadDeadline (mesma constante usada para o header),
-// independente de GapDetection.InFlightTimeout. São responsabilidades separadas:
-//   - streamReadDeadline: quanto tempo o TCP espera por dados da rede antes de encerrar o stream.
-//   - inFlightTimeout: quanto tempo o GapTracker tolera um chunk sem progresso antes de
-//     considerá-lo stale e elegível para NACK. Medido via timestamps do AdvanceChunk.
+// readParallelChunkPayload lê o payload de um chunk paralelo.
+// O deadline TCP usa streamReadDeadline (mesma constante usada para o header).
 func (h *Handler) readParallelChunkPayload(conn net.Conn, reader io.Reader, length uint32, globalSeq uint32, session *ParallelSession) ([]byte, error) {
 	buf := make([]byte, length)
 
@@ -2502,9 +2353,7 @@ func (h *Handler) readParallelChunkPayload(conn net.Conn, reader io.Reader, leng
 		n, err := reader.Read(buf[offset:])
 		if n > 0 {
 			offset += n
-			if session.GapTracker != nil {
-				session.GapTracker.AdvanceChunk(globalSeq)
-			}
+
 		}
 		if err != nil {
 			return nil, fmt.Errorf("reading chunk seq %d payload: %w", globalSeq, err)
@@ -2563,10 +2412,6 @@ func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, read
 			"offsetBefore", bytesReceived,
 		)
 
-		if session.GapTracker != nil {
-			session.GapTracker.StartChunk(hdr.GlobalSeq)
-		}
-
 		chunkData, err := h.readParallelChunkPayload(conn, reader, hdr.Length, hdr.GlobalSeq, session)
 		if err != nil {
 			return bytesReceived, err
@@ -2577,32 +2422,32 @@ func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, read
 		// em memória e retorna imediatamente; o drainer fará a escrita de forma
 		// assíncrona, desacoplando a goroutine de rede do I/O de disco.
 		if h.chunkBuffer != nil {
-			buffered, err := h.chunkBuffer.Push(hdr.GlobalSeq, chunkData, session.Assembler, func(seq uint32) {
-				if session.GapTracker != nil {
-					session.GapTracker.CompleteChunk(seq)
-				}
-			})
+			buffered, err := h.chunkBuffer.Push(hdr.GlobalSeq, chunkData, session.Assembler, nil)
 			if err != nil {
-				if session.GapTracker != nil {
-					session.GapTracker.AbandonChunk(hdr.GlobalSeq)
-				}
+				logger.Warn("chunk_receive_failed",
+					"stream", streamIndex,
+					"globalSeq", hdr.GlobalSeq,
+					"error", err,
+				)
 				// Backpressure: buffer cheio após timeout — falha a stream para forçar
 				// reconexão do agent e aliviar pressão.
 				return bytesReceived, fmt.Errorf("chunk buffer push on seq %d: %w", hdr.GlobalSeq, err)
 			}
-			if buffered && session.GapTracker != nil {
-				session.GapTracker.MarkBuffered(hdr.GlobalSeq)
+			if buffered {
+				logger.Debug("chunk_buffered",
+					"stream", streamIndex,
+					"globalSeq", hdr.GlobalSeq,
+				)
 			}
 		} else {
 			// Caminho direto (buffer desabilitado) — payload já foi materializado acima.
 			if err := session.Assembler.WriteChunk(hdr.GlobalSeq, bytes.NewReader(chunkData), int64(hdr.Length)); err != nil {
-				if session.GapTracker != nil {
-					session.GapTracker.AbandonChunk(hdr.GlobalSeq)
-				}
+				logger.Warn("chunk_receive_failed",
+					"stream", streamIndex,
+					"globalSeq", hdr.GlobalSeq,
+					"error", err,
+				)
 				return bytesReceived, fmt.Errorf("writing chunk seq %d to assembler: %w", hdr.GlobalSeq, err)
-			}
-			if session.GapTracker != nil {
-				session.GapTracker.CompleteChunk(hdr.GlobalSeq)
 			}
 		}
 

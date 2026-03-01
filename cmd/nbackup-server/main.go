@@ -30,6 +30,8 @@ func main() {
 	logger, logCloser := logging.NewLogger(cfg.Logging.Level, cfg.Logging.Format, cfg.Logging.File)
 	defer logCloser.Close()
 
+	cfg.WarnDeprecated(logger)
+
 	// Context com cancelamento via signal
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

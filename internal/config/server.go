@@ -94,15 +94,23 @@ type FlowRotationConfig struct {
 	Cooldown   time.Duration `yaml:"cooldown"`    // cooldown entre rotações (default: 15m)
 }
 
-// GapDetectionConfig configura a detecção proativa de chunks faltantes
-// e o envio de NACKs para retransmissão pelo agent.
+// GapDetectionConfig is DEPRECATED since v3.0.0.
+// ChunkSACK per-chunk acknowledgment replaces gap detection.
+// Struct is kept for YAML backward compatibility; all fields are ignored at runtime.
 type GapDetectionConfig struct {
-	Enabled          bool          `yaml:"enabled"`             // default: true (habilitado por padrão)
-	Timeout          time.Duration `yaml:"timeout"`             // tempo para gap persistir antes de NACK (default: 60s)
-	InFlightTimeout  time.Duration `yaml:"in_flight_timeout"`   // tempo máximo sem progresso de payload de um chunk em voo (default: 30s)
-	CheckInterval    time.Duration `yaml:"check_interval"`      // intervalo entre checks de gap (default: 5s)
-	MaxNACKsPerCycle int           `yaml:"max_nacks_per_cycle"` // máximo de NACKs por check (default: 5)
+	Enabled          bool          `yaml:"enabled"`
+	Timeout          time.Duration `yaml:"timeout"`
+	InFlightTimeout  time.Duration `yaml:"in_flight_timeout"`
+	CheckInterval    time.Duration `yaml:"check_interval"`
+	MaxNACKsPerCycle int           `yaml:"max_nacks_per_cycle"`
 	enabledSet       bool          `yaml:"-"`
+}
+
+// WarnDeprecated emits a warning log if the user explicitly configured gap_detection.
+func (c *ServerConfig) WarnDeprecated(logger interface{ Warn(msg string, args ...any) }) {
+	if c.GapDetection.enabledSet {
+		logger.Warn("gap_detection configuration is deprecated and will be ignored — ChunkSACK per-chunk acknowledgment replaces gap detection since v3.0.0")
+	}
 }
 
 // UnmarshalYAML preserva a diferença entre campo ausente e enabled: false
@@ -310,24 +318,8 @@ func (c *ServerConfig) validate() error {
 		}
 	}
 
-	// Gap Detection defaults (habilitado por padrão quando o campo é omitido).
-	if !c.GapDetection.enabledSet {
-		c.GapDetection.Enabled = true
-	}
-	if c.GapDetection.Enabled {
-		if c.GapDetection.Timeout <= 0 {
-			c.GapDetection.Timeout = 60 * time.Second
-		}
-		if c.GapDetection.InFlightTimeout <= 0 {
-			c.GapDetection.InFlightTimeout = 30 * time.Second
-		}
-		if c.GapDetection.CheckInterval <= 0 {
-			c.GapDetection.CheckInterval = 5 * time.Second
-		}
-		if c.GapDetection.MaxNACKsPerCycle <= 0 {
-			c.GapDetection.MaxNACKsPerCycle = 5
-		}
-	}
+	// Gap Detection: deprecated in v3.0.0 — kept for YAML backward compat.
+	// Ignored at runtime; WarnDeprecated() emits a log warning at startup.
 
 	// Web UI defaults e validação
 	if c.WebUI.Enabled {

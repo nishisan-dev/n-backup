@@ -444,42 +444,7 @@ storages:
 	}
 }
 
-func TestLoadServerConfig_GapDetectionDefaultsEnabled(t *testing.T) {
-	content := `
-server:
-  listen: "0.0.0.0:9847"
-tls:
-  ca_cert: /tmp/ca.pem
-  server_cert: /tmp/server.pem
-  server_key: /tmp/server-key.pem
-storages:
-  default:
-    base_dir: /tmp/backups
-    max_backups: 3
-`
-	cfgPath := writeTempConfig(t, content)
-	cfg, err := LoadServerConfig(cfgPath)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !cfg.GapDetection.Enabled {
-		t.Fatal("expected gap_detection to be enabled by default when omitted")
-	}
-	if cfg.GapDetection.Timeout != 60*time.Second {
-		t.Fatalf("expected default gap_detection.timeout 60s, got %s", cfg.GapDetection.Timeout)
-	}
-	if cfg.GapDetection.InFlightTimeout != 30*time.Second {
-		t.Fatalf("expected default gap_detection.in_flight_timeout 30s, got %s", cfg.GapDetection.InFlightTimeout)
-	}
-	if cfg.GapDetection.CheckInterval != 5*time.Second {
-		t.Fatalf("expected default gap_detection.check_interval 5s, got %s", cfg.GapDetection.CheckInterval)
-	}
-	if cfg.GapDetection.MaxNACKsPerCycle != 5 {
-		t.Fatalf("expected default gap_detection.max_nacks_per_cycle 5, got %d", cfg.GapDetection.MaxNACKsPerCycle)
-	}
-}
-
-func TestLoadServerConfig_GapDetectionExplicitlyDisabled(t *testing.T) {
+func TestLoadServerConfig_GapDetectionDeprecatedIgnored(t *testing.T) {
 	content := `
 server:
   listen: "0.0.0.0:9847"
@@ -492,22 +457,18 @@ storages:
     base_dir: /tmp/backups
     max_backups: 3
 gap_detection:
-  enabled: false
+  enabled: true
+  timeout: 120s
+  check_interval: 10s
 `
 	cfgPath := writeTempConfig(t, content)
 	cfg, err := LoadServerConfig(cfgPath)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("deprecated gap_detection should not cause errors, got: %v", err)
 	}
-	if cfg.GapDetection.Enabled {
-		t.Fatal("expected gap_detection.enabled false to be respected")
-	}
-	if cfg.GapDetection.Timeout != 0 {
-		t.Fatalf("expected disabled gap_detection.timeout to remain zero, got %s", cfg.GapDetection.Timeout)
-	}
-	if cfg.GapDetection.CheckInterval != 0 {
-		t.Fatalf("expected disabled gap_detection.check_interval to remain zero, got %s", cfg.GapDetection.CheckInterval)
-	}
+	// Values are parsed but no defaults are applied — they will be ignored at runtime.
+	// The presence of the section should not break loading.
+	_ = cfg
 }
 
 func TestLoadServerConfig_InvalidAssemblerMode(t *testing.T) {

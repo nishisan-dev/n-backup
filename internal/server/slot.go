@@ -85,7 +85,7 @@ type Slot struct {
 
 	// --- Chunk metrics (v5) ---
 	ChunksReceived      atomic.Uint32 // total de chunks recebidos por este slot
-	ChunksLost          atomic.Uint32 // chunks reportados como perdidos (correlação com GapTracker)
+	ChunksLost          atomic.Uint32 // chunks reportados como perdidos
 	ChunksRetransmitted atomic.Uint32 // chunks retransmitidos para este slot
 	LastChunkSeq        atomic.Uint32 // GlobalSeq do último chunk recebido
 }
