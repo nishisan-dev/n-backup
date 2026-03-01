@@ -11,7 +11,21 @@ e o versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ---
 
-## [v3.0.0] — Unreleased
+## [v3.0.1] — 2026-03-01
+
+Bugfix de SACK timeout false-positive no startup e correção da rotação de portas.
+
+### Corrigido
+- **SACK timeout false-positive no startup**: o timer `lastSACKAt` era inicializado em `ActivateStream()`, mas o producer só começa a gerar dados após todos os N streams serem ativados sequencialmente (~1.7s para 12 streams). Os primeiros streams excediam o timeout de 5s antes de qualquer dado ser enviado. O timer agora é inicializado no primeiro `writeFrame` bem-sucedido do sender.
+- **`port_rotation.mode: "off"` ignorado**: o dispatcher lia `ChunksPerCycle` diretamente sem verificar o `Mode`. Método `EffectiveChunksPerCycle()` adicionado para retornar o ciclo apenas quando `mode: "per-n-chunks"`.
+
+### Adicionado
+- **Validação de `port_rotation.mode`**: valores aceitos são `"off"` e `"per-n-chunks"`. Valores desconhecidos retornam erro na validação do config.
+
+---
+
+
+## [v3.0.0] — 2026-03-01
 
 Reescrita do subsistema de sessões paralelas com protocolo v5, Slot-based session management e remoção do GapTracker.
 

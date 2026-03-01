@@ -868,6 +868,163 @@ web_ui:
 	}
 }
 
+// --- PortRotation Config Tests ---
+
+func TestPortRotationConfig_EffectiveChunksPerCycle(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      PortRotationConfig
+		expected int
+	}{
+		{
+			name:     "per-n-chunks with valid cycle",
+			cfg:      PortRotationConfig{Mode: "per-n-chunks", ChunksPerCycle: 100},
+			expected: 100,
+		},
+		{
+			name:     "per-n-chunks with zero cycle returns disabled",
+			cfg:      PortRotationConfig{Mode: "per-n-chunks", ChunksPerCycle: 0},
+			expected: 0,
+		},
+		{
+			name:     "mode off with cycle set returns disabled",
+			cfg:      PortRotationConfig{Mode: "off", ChunksPerCycle: 100},
+			expected: 0,
+		},
+		{
+			name:     "mode off without cycle returns disabled",
+			cfg:      PortRotationConfig{Mode: "off", ChunksPerCycle: 0},
+			expected: 0,
+		},
+		{
+			name:     "empty mode with cycle set returns disabled",
+			cfg:      PortRotationConfig{Mode: "", ChunksPerCycle: 50},
+			expected: 0,
+		},
+		{
+			name:     "empty mode without cycle returns disabled",
+			cfg:      PortRotationConfig{Mode: "", ChunksPerCycle: 0},
+			expected: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.cfg.EffectiveChunksPerCycle()
+			if got != tt.expected {
+				t.Errorf("EffectiveChunksPerCycle() = %d, want %d", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestLoadAgentConfig_PortRotationPerNChunks(t *testing.T) {
+	content := `
+agent:
+  name: "test-agent"
+server:
+  address: "localhost:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  client_cert: /tmp/client.pem
+  client_key: /tmp/client-key.pem
+backups:
+  - name: "test"
+    storage: "default"
+    schedule: "0 2 * * *"
+    port_rotation:
+      mode: "per-n-chunks"
+      chunks_per_cycle: 200
+    sources:
+      - path: /tmp
+`
+	cfgPath := writeTempConfig(t, content)
+	cfg, err := LoadAgentConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Backups[0].PortRotation.Mode != "per-n-chunks" {
+		t.Errorf("expected port_rotation.mode 'per-n-chunks', got %q", cfg.Backups[0].PortRotation.Mode)
+	}
+	if cfg.Backups[0].PortRotation.EffectiveChunksPerCycle() != 200 {
+		t.Errorf("expected EffectiveChunksPerCycle() 200, got %d", cfg.Backups[0].PortRotation.EffectiveChunksPerCycle())
+	}
+}
+
+func TestLoadAgentConfig_PortRotationOff(t *testing.T) {
+	content := `
+agent:
+  name: "test-agent"
+server:
+  address: "localhost:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  client_cert: /tmp/client.pem
+  client_key: /tmp/client-key.pem
+backups:
+  - name: "test"
+    storage: "default"
+    schedule: "0 2 * * *"
+    port_rotation:
+      mode: "off"
+      chunks_per_cycle: 100
+    sources:
+      - path: /tmp
+`
+	cfgPath := writeTempConfig(t, content)
+	cfg, err := LoadAgentConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Backups[0].PortRotation.Mode != "off" {
+		t.Errorf("expected port_rotation.mode 'off', got %q", cfg.Backups[0].PortRotation.Mode)
+	}
+	if cfg.Backups[0].PortRotation.EffectiveChunksPerCycle() != 0 {
+		t.Errorf("expected EffectiveChunksPerCycle() 0 when mode=off, got %d", cfg.Backups[0].PortRotation.EffectiveChunksPerCycle())
+	}
+}
+
+func TestLoadAgentConfig_PortRotationDefault(t *testing.T) {
+	cfgPath := writeTempConfig(t, validAgentYAML)
+	cfg, err := LoadAgentConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Sem port_rotation configurado, mode deve ser normalizado para "off"
+	if cfg.Backups[0].PortRotation.Mode != "off" {
+		t.Errorf("expected default port_rotation.mode 'off', got %q", cfg.Backups[0].PortRotation.Mode)
+	}
+	if cfg.Backups[0].PortRotation.EffectiveChunksPerCycle() != 0 {
+		t.Errorf("expected EffectiveChunksPerCycle() 0 by default, got %d", cfg.Backups[0].PortRotation.EffectiveChunksPerCycle())
+	}
+}
+
+func TestLoadAgentConfig_PortRotationInvalidMode(t *testing.T) {
+	content := `
+agent:
+  name: "test-agent"
+server:
+  address: "localhost:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  client_cert: /tmp/client.pem
+  client_key: /tmp/client-key.pem
+backups:
+  - name: "test"
+    storage: "default"
+    schedule: "0 2 * * *"
+    port_rotation:
+      mode: "random"
+    sources:
+      - path: /tmp
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadAgentConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for invalid port_rotation.mode")
+	}
+}
+
 func writeTempConfig(t *testing.T, content string) string {
 	t.Helper()
 	dir := t.TempDir()
