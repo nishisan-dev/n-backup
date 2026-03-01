@@ -36,7 +36,10 @@ Sistema de backup **high-performance** client-server escrito em Go. Streaming di
 | **WebUI de Observabilidade** | SPA embarcada no server com sessões ativas, sparklines de throughput, histórico e eventos em tempo real. |
 | **Control Channel** | Conexão TLS persistente para keep-alive (PING/PONG), medição de RTT e orquestração server-side. |
 | **Graceful Flow Rotation** | Server solicita drenagem de streams via ControlRotate — zero data loss em reconexões. |
+| **Slot-Based Sessions** | Sessões paralelas com slots pré-alocados e estatísticas tipadas por slot (Idle/Receiving/Disconnected/Disabled). Protocolo v5. |
+| **Per-N-Chunk Port Rotation** | Rotação intencional de source port TCP por stream após N chunks, evitando throttling por flow em middleboxes. |
 | **RTT Metrics** | RTT EWMA contínuo via control channel, com status do server (carga, disco). |
+| **Prometheus Metrics** | Endpoint `/metrics` compatível com Prometheus para bytes recebidos e sessões. |
 | **Rotação Automática** | Server mantém os N backups mais recentes por agent/storage. |
 | **Retry Exponential** | Reconexão automática com backoff exponencial configurável. |
 | **Named Storages** | Múltiplos storages no server com políticas de rotação independentes. |

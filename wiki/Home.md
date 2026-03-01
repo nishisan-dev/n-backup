@@ -21,6 +21,8 @@ Sistema de backup **high-performance** client-server escrito em Go. Streaming di
 | **Compressão Paralela** | `pgzip` (klauspost) com goroutines paralelas — até 3x mais rápido que gzip stdlib. |
 | **Control Channel** | Conexão TLS persistente para keep-alive (PING/PONG), medição de RTT e orquestração server-side. |
 | **Graceful Flow Rotation** | Server solicita drenagem de streams via ControlRotate — zero data loss em reconexões. |
+| **Slot-Based Sessions** | Sessões paralelas com slots pré-alocados e estatísticas tipadas por slot (protocolo v5, v3.0.0+). |
+| **Per-N-Chunk Port Rotation** | Rotação intencional de source port TCP por stream após N chunks, evitando throttling por flow. |
 | **RTT Metrics** | RTT EWMA contínuo via control channel, com status do server (carga, disco). |
 | **Rotação Automática** | Server mantém os N backups mais recentes por agent/storage. Rotações emitem evento e log. |
 | **Retry Exponencial** | Reconexão automática com backoff exponencial configurável. Contador resetado após reconexão bem-sucedida. |
@@ -28,7 +30,8 @@ Sistema de backup **high-performance** client-server escrito em Go. Streaming di
 | **Bandwidth Throttling** | Limite de upload configurável por backup entry (Token Bucket). |
 | **AutoScaler** | Escala dinâmica de streams com modos `efficiency` e `adaptive`. |
 | **Chunk Sharding** | Staging de chunks em 1 ou 2 níveis de subdiretórios (`chunk_shard_levels`). Reduz pressão no filesystem em sessões paralelas intensas. |
-| **WebUI** | SPA embarcada de observabilidade com sessões, sparklines, events e gauges. Dados persistidos em JSONL (sobrevivem a reinicios). |
+| **WebUI** | SPA embarcada de observabilidade com sessões, sparklines, events, gauges e slot status. Dados persistidos em JSONL. |
+| **Prometheus Metrics** | Endpoint `/metrics` compatível com Prometheus para bytes recebidos e sessões (v3.0.0+). |
 | **Schedule por Backup** | Cada backup entry possui sua própria cron expression. |
 | **Hot Reload (SIGHUP)** | Recarrega configuração sem downtime via `systemctl reload`. |
 
