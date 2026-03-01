@@ -47,6 +47,9 @@ backups:
       - ".cache/**"
       - "node_modules/**"
       - ".git/**"
+    port_rotation:                   # Rotação de source port TCP (v3.0.0+)
+      mode: "off"                    # "off" (padrão) ou "per-n-chunks"
+      # chunks_per_cycle: 500       # Chunks por ciclo antes de rotacionar
 
 retry:
   max_attempts: 5                # Máximo de tentativas
@@ -85,6 +88,8 @@ daemon:
 | `backups[].dscp` | ❌ | Marcação DSCP para QoS de rede (ex: `AF41`, `EF`, `CS4`). Vazio = sem marcação |
 | `backups[].auto_scaler` | ❌ | `efficiency` (padrão) ou `adaptive` |
 | `backups[].bandwidth_limit` | ❌ | Limite de upload em Bytes/s (ex: `50mb`, `1gb`, `256kb`). Mínimo: `64kb`. |
+| `backups[].port_rotation.mode` | ❌ | `off` (padrão) ou `per-n-chunks` — rotação de source port TCP por N chunks (v3.0.0+) |
+| `backups[].port_rotation.chunks_per_cycle` | ❌ | Chunks por ciclo de rotação (usado quando `mode: "per-n-chunks"`) |
 | `retry.*` | ❌ | Configuração de retry (defaults sensatos se omitido) |
 | `resume.buffer_size` | ❌ | Default: `256mb`. Aceita: `kb`, `mb`, `gb` |
 | `resume.chunk_size` | ❌ | Default: `1mb`. Range: `64kb` a `16mb` |

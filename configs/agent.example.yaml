@@ -30,6 +30,9 @@ backups:
       enabled: true                # false = mantém os streams atuais, sem scale up/down
       mode: efficiency             # efficiency (padrão) ou adaptive (probe-and-measure)
     bandwidth_limit: "100mb"       # Limite de upload: 100 MB/s (opcional, vazio=sem limite, mínimo: 64kb)
+    port_rotation:                   # Rotação de source port TCP por N chunks (v3.0.0+)
+      mode: "off"                    # "off" (padrão) ou "per-n-chunks"
+      # chunks_per_cycle: 500       # Chunks por ciclo antes de rotacionar o source port
     sources:
       - path: /home
       - path: /etc
