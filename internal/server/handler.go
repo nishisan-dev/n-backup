@@ -1384,6 +1384,48 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 				ps.abort(abortErr)
 			}
 
+		case protocol.MagicControlSlotPark:
+			// Agent desativou um slot (scale-down via auto-scaler)
+			slotID, err := protocol.ReadControlSlotParkPayload(conn)
+			if err != nil {
+				logger.Warn("control channel: reading ControlSlotPark payload", "error", err)
+				return
+			}
+
+			logger.Info("control channel: received ControlSlotPark", "slot", slotID)
+
+			h.sessions.Range(func(_, value any) bool {
+				ps, ok := value.(*ParallelSession)
+				if !ok || ps.AgentName != agentName {
+					return true
+				}
+				if int(slotID) < len(ps.Slots) {
+					ps.Slots[slotID].SetStatus(SlotDisabled)
+				}
+				return false
+			})
+
+		case protocol.MagicControlSlotResume:
+			// Agent reativou um slot (scale-up via auto-scaler)
+			slotID, err := protocol.ReadControlSlotResumePayload(conn)
+			if err != nil {
+				logger.Warn("control channel: reading ControlSlotResume payload", "error", err)
+				return
+			}
+
+			logger.Info("control channel: received ControlSlotResume", "slot", slotID)
+
+			h.sessions.Range(func(_, value any) bool {
+				ps, ok := value.(*ParallelSession)
+				if !ok || ps.AgentName != agentName {
+					return true
+				}
+				if int(slotID) < len(ps.Slots) {
+					ps.Slots[slotID].SetStatus(SlotIdle)
+				}
+				return false
+			})
+
 		default:
 			logger.Warn("control channel: unknown magic", "magic", string(magic[:]))
 			return

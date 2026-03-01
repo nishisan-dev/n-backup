@@ -31,11 +31,12 @@ type AutoScaleSnapshot struct {
 //   - "efficiency": algoritmo original baseado em efficiency = producerRate / drainRate
 //   - "adaptive": probe-and-measure que testa +1 stream e mede throughput
 type AutoScaler struct {
-	dispatcher *Dispatcher
-	interval   time.Duration
-	logger     *slog.Logger
-	mode       string // "efficiency" | "adaptive"
-	enabled    bool
+	dispatcher     *Dispatcher
+	controlChannel *ControlChannel // para SendSlotPark/Resume
+	interval       time.Duration
+	logger         *slog.Logger
+	mode           string // "efficiency" | "adaptive"
+	enabled        bool
 
 	// Histerese: conta janelas consecutivas acima/abaixo do threshold
 	scaleUpCount   int
@@ -79,12 +80,13 @@ const (
 
 // AutoScalerConfig contém parâmetros do auto-scaler.
 type AutoScalerConfig struct {
-	Dispatcher *Dispatcher
-	Interval   time.Duration // default 15s
-	Hysteresis int           // janelas para ação (default 3)
-	Logger     *slog.Logger
-	Mode       string // "efficiency" | "adaptive"
-	Enabled    *bool
+	Dispatcher     *Dispatcher
+	ControlChannel *ControlChannel // para enviar ControlSlotPark/Resume ao server
+	Interval       time.Duration   // default 15s
+	Hysteresis     int             // janelas para ação (default 3)
+	Logger         *slog.Logger
+	Mode           string // "efficiency" | "adaptive"
+	Enabled        *bool
 }
 
 // NewAutoScaler cria um novo auto-scaler.
@@ -104,13 +106,14 @@ func NewAutoScaler(cfg AutoScalerConfig) *AutoScaler {
 	}
 
 	return &AutoScaler{
-		dispatcher:  cfg.Dispatcher,
-		interval:    cfg.Interval,
-		hysteresis:  cfg.Hysteresis,
-		logger:      cfg.Logger,
-		mode:        cfg.Mode,
-		enabled:     enabled,
-		probeStream: -1,
+		dispatcher:     cfg.Dispatcher,
+		controlChannel: cfg.ControlChannel,
+		interval:       cfg.Interval,
+		hysteresis:     cfg.Hysteresis,
+		logger:         cfg.Logger,
+		mode:           cfg.Mode,
+		enabled:        enabled,
+		probeStream:    -1,
 	}
 }
 
@@ -389,6 +392,11 @@ func (as *AutoScaler) scaleUp(reason string) {
 		return
 	}
 
+	// Notifica server que o slot foi reativado
+	if as.controlChannel != nil && as.controlChannel.IsConnected() {
+		as.controlChannel.SendSlotResume(uint8(nextIdx))
+	}
+
 	as.logger.Info("auto-scaler: scale-up",
 		"reason", reason,
 		"efficiency", as.lastEfficiency,
@@ -413,6 +421,11 @@ func (as *AutoScaler) scaleDown(reason string) {
 		return
 	}
 	as.dispatcher.DeactivateStream(lastIdx)
+
+	// Notifica server que o slot foi desativado
+	if as.controlChannel != nil && as.controlChannel.IsConnected() {
+		as.controlChannel.SendSlotPark(uint8(lastIdx))
+	}
 
 	as.logger.Info("auto-scaler: scale-down",
 		"reason", reason,

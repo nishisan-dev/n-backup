@@ -236,6 +236,48 @@ func (cc *ControlChannel) SendRetransmitResult(sessionID string, missingSeq uint
 	return err
 }
 
+// SendSlotPark envia ControlSlotPark ao server para indicar que um slot foi desativado.
+// Thread-safe via writeMu.
+func (cc *ControlChannel) SendSlotPark(slotID uint8) error {
+	cc.connMu.Lock()
+	conn := cc.conn
+	cc.connMu.Unlock()
+
+	if conn == nil {
+		return nil
+	}
+
+	cc.writeMu.Lock()
+	err := protocol.WriteControlSlotPark(conn, slotID)
+	cc.writeMu.Unlock()
+
+	if err != nil {
+		cc.logger.Warn("failed to send ControlSlotPark", "error", err, "slot", slotID)
+	}
+	return err
+}
+
+// SendSlotResume envia ControlSlotResume ao server para indicar que um slot foi reativado.
+// Thread-safe via writeMu.
+func (cc *ControlChannel) SendSlotResume(slotID uint8) error {
+	cc.connMu.Lock()
+	conn := cc.conn
+	cc.connMu.Unlock()
+
+	if conn == nil {
+		return nil
+	}
+
+	cc.writeMu.Lock()
+	err := protocol.WriteControlSlotResume(conn, slotID)
+	cc.writeMu.Unlock()
+
+	if err != nil {
+		cc.logger.Warn("failed to send ControlSlotResume", "error", err, "slot", slotID)
+	}
+	return err
+}
+
 // Start inicia a goroutine de manutenção do canal de controle.
 func (cc *ControlChannel) Start() {
 	cc.wg.Add(1)
