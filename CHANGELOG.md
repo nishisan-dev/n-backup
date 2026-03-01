@@ -11,6 +11,32 @@ e o versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v3.0.0] — Unreleased
+
+Reescrita do subsistema de sessões paralelas com protocolo v5, Slot-based session management e remoção do GapTracker.
+
+### Breaking Changes
+- **Protocolo v5**: `ChunkHeader` agora é `[GlobalSeq uint32 4B] [Length uint32 4B] [SlotID uint8 1B]` (9 bytes). O campo `StreamIndex` foi substituído por `GlobalSeq` (sequência global do chunk) e adicionado `SlotID` (slot de origem). Clients v4 e anteriores **não são compatíveis** com servers v3.0.0.
+- **Remoção do GapTracker**: `ControlNACK` e `ControlRetransmitResult` foram completamente removidos do protocolo. O `ChunkSACK` per-chunk acknowledgment oferece confiabilidade equivalente ou superior.
+- **`gap_detection` deprecated**: a seção `gap_detection` no `server.yaml` é **ignorada** em runtime. Se presente, um `WARN` é emitido no startup.
+
+### Adicionado
+- **Slot-Based Session Management**: `ParallelSession` agora usa `[]*Slot` pré-alocados em vez de 12 `sync.Map`. Cada `Slot` possui estado tipado (`Idle`, `Receiving`, `Disconnected`, `Disabled`), métricas de chunks recebidos/perdidos/retransmitidos e controle de flow rotation por slot. Struct em `internal/server/slot.go`.
+- **ControlSlotPark (CSLP)** e **ControlSlotResume (CSLR)**: novos frames de controle que permitem ao agent sinalizar scale-down (park) e scale-up (resume) de slots individuais.
+- **Per-N-Chunk Port Rotation**: nova configuração `port_rotation` por backup entry. Quando `mode: "per-n-chunks"`, o agent desconecta e reconecta cada stream após enviar `chunks_per_cycle` chunks, rotacionando o source port TCP para evitar throttling por flow em middleboxes.
+- **WebUI: Slot Status e Chunk Metrics**: a session detail view agora exibe o estado de cada slot (idle/receiving/disconnected/disabled) com métricas de chunks recebidos, perdidos e retransmitidos.
+- **Prometheus-compatible metrics endpoint**: endpoint `/metrics` com métricas de bytes recebidos e sessões em formato Prometheus.
+- **Auto-scaler freeze mode configurável**: modo de congelamento para desabilitar escalonamento automático durante operações críticas.
+
+### Removido
+- **GapTracker** (`gap_tracker.go`, `gap_tracker_test.go`): detectação proativa de gaps e chain NACK/RetransmitResult.
+- **`ControlNACK`** e **`ControlRetransmitResult`**: frames de protocolo removidos.
+
+### Motivação
+> O GapTracker introduzia complexidade e overhead desnecessários. O ChunkSACK per-chunk acknowledgment, combinado com o Per-N-Chunk Port Rotation, oferece garantias de entrega equivalentes ou superiores com menor complexidade. A migração para `[]*Slot` elimina o overhead de type-assertion e sync.Map, melhora a legibilidade e permite métricas tipadas por slot.
+
+---
+
 ## [v2.8.4] — 2026-02-26
 
 Session logging por arquivo dedicado e diagnóstico aprimorado de assembly.
