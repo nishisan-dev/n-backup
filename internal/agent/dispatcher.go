@@ -39,6 +39,10 @@ const (
 	// sackTimeoutMin é o timeout mínimo entre ChunkSACKs antes de considerar a conn morta.
 	// O timeout efetivo é max(controlChannelRTT × 3, sackTimeoutMin).
 	sackTimeoutMin = 5 * time.Second
+
+	// finalDrainPollInterval é a cadência de polling durante a espera pelo
+	// ChunkSACK final após o producer fechar os ring buffers.
+	finalDrainPollInterval = 100 * time.Millisecond
 )
 
 // ErrAllStreamsDead indica que todos os streams paralelos morreram permanentemente.
@@ -87,6 +91,7 @@ type Dispatcher struct {
 	chunkMapMu     sync.RWMutex
 	chunksPerCycle int                  // per-N-chunk rotation (0=desabilitado)
 	sackTimeoutFn  func() time.Duration // retorna timeout efetivo para SACK (injeta RTT externo)
+	abortSenders   atomic.Bool          // sinaliza abort para waits/retries pendentes
 }
 
 // ParallelStream representa um stream individual com seu ring buffer e conexão.
@@ -464,6 +469,189 @@ func minInt64(a, b int64) int64 {
 	return b
 }
 
+// HasUnackedData retorna true quando ainda existem bytes escritos no stream que
+// não foram confirmados pelo server via ChunkSACK/ParallelACK.
+func (s *ParallelStream) HasUnackedData() bool {
+	return s.rb.Tail() < s.rb.Head()
+}
+
+func (d *Dispatcher) effectiveSACKTimeout() time.Duration {
+	if d.sackTimeoutFn == nil {
+		return sackTimeoutMin
+	}
+	timeout := d.sackTimeoutFn()
+	if timeout < sackTimeoutMin {
+		return sackTimeoutMin
+	}
+	return timeout
+}
+
+func (d *Dispatcher) waitWithAbort(duration time.Duration) bool {
+	if duration <= 0 {
+		return !d.abortSenders.Load()
+	}
+
+	deadline := time.Now().Add(duration)
+	for {
+		if d.abortSenders.Load() {
+			return false
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return true
+		}
+
+		sleepFor := finalDrainPollInterval
+		if remaining < sleepFor {
+			sleepFor = remaining
+		}
+		time.Sleep(sleepFor)
+	}
+}
+
+func (d *Dispatcher) syncStreamAfterReconnect(stream *ParallelStream, streamIdx int, resumeOffset int64) error {
+	// Resume: ajusta sendOffset para o lastOffset do server
+	// Valida que o RingBuffer ainda contém os dados no resumeOffset
+	if resumeOffset > 0 && !stream.rb.ContainsRange(resumeOffset, protocol.ChunkHeaderSize) {
+		// Se resumeOffset == head, todos os dados até aqui já foram ACK'd
+		// pelo server. O stream está sincronizado e pode continuar
+		// enviando novos dados a partir do head — não é irrecuperável.
+		if resumeOffset == stream.rb.Head() {
+			d.logger.Info("resume offset equals head — all data ACK'd, continuing from head",
+				"stream", streamIdx, "resumeOffset", resumeOffset)
+		} else {
+			d.logger.Error("resume offset no longer in ring buffer — stream irrecoverable",
+				"stream", streamIdx, "resumeOffset", resumeOffset,
+				"rbTail", stream.rb.Tail(), "rbHead", stream.rb.Head())
+			stream.dead.Store(true)
+			d.DeactivateStream(streamIdx)
+			return fmt.Errorf("stream %d: resume offset %d expired from ring buffer", streamIdx, resumeOffset)
+		}
+	}
+
+	// Valida alinhamento: os primeiros bytes no resumeOffset devem
+	// formar um ChunkHeader válido (GlobalSeq + Length <= chunkSize).
+	// Se não, houve dessincronização — dados corrompidos.
+	// Pula validação quando resumeOffset == head (buffer vazio nessa posição).
+	if resumeOffset > 0 && resumeOffset < stream.rb.Head() {
+		hdrBuf := make([]byte, protocol.ChunkHeaderSize)
+		n, readErr := stream.rb.ReadAt(resumeOffset, hdrBuf)
+		if readErr != nil || n < protocol.ChunkHeaderSize {
+			d.logger.Error("failed to read chunk header at resume offset",
+				"stream", streamIdx, "offset", resumeOffset, "error", readErr)
+			stream.dead.Store(true)
+			d.DeactivateStream(streamIdx)
+			return fmt.Errorf("stream %d: cannot read header at resume offset %d", streamIdx, resumeOffset)
+		}
+		hdrLength := binary.BigEndian.Uint32(hdrBuf[4:8])
+		if hdrLength > uint32(d.chunkSize) {
+			d.logger.Error("chunk header at resume offset has invalid length — desync detected",
+				"stream", streamIdx, "offset", resumeOffset,
+				"hdrLength", hdrLength, "maxChunkSize", d.chunkSize)
+			stream.dead.Store(true)
+			d.DeactivateStream(streamIdx)
+			return fmt.Errorf("stream %d: desync at resume offset %d (invalid chunk length %d)",
+				streamIdx, resumeOffset, hdrLength)
+		}
+	}
+
+	stream.sendMu.Lock()
+	resumeSendOffset := stream.resumeFromWireOffsetLocked(resumeOffset)
+	stream.sendMu.Unlock()
+	// ParallelACK também confirma bytes já persistidos no server, então pode
+	// liberar o ring buffer imediatamente até o offset informado.
+	stream.rb.Advance(resumeSendOffset)
+	stream.lastSACKAt.Store(time.Now().UnixNano()) // reset após reconexão bem-sucedida
+
+	d.logger.Info("stream reconnected, resuming from offset",
+		"stream", streamIdx, "offset", resumeOffset,
+		"resumeSendOffset", resumeSendOffset,
+		"rbTail", stream.rb.Tail(), "rbHead", stream.rb.Head())
+
+	return nil
+}
+
+func (d *Dispatcher) waitForFinalDrain(stream *ParallelStream, streamIdx int, retries *int) (bool, error) {
+	if !stream.HasUnackedData() {
+		return true, nil
+	}
+	if d.abortSenders.Load() {
+		return false, context.Canceled
+	}
+
+	timeout := d.effectiveSACKTimeout()
+	d.logger.Info("waiting for final ChunkSACK drain",
+		"stream", streamIdx,
+		"pendingBytes", stream.rb.Head()-stream.rb.Tail(),
+		"timeout", timeout,
+	)
+
+	deadline := time.Now().Add(timeout)
+	for {
+		if !stream.HasUnackedData() {
+			return true, nil
+		}
+		if d.abortSenders.Load() {
+			return false, context.Canceled
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+
+		sleepFor := finalDrainPollInterval
+		if remaining < sleepFor {
+			sleepFor = remaining
+		}
+		time.Sleep(sleepFor)
+	}
+
+	if !stream.HasUnackedData() {
+		return true, nil
+	}
+
+	d.logger.Warn("final drain timeout exceeded, attempting reconnect",
+		"stream", streamIdx,
+		"pendingBytes", stream.rb.Head()-stream.rb.Tail(),
+		"timeout", timeout,
+	)
+
+	if *retries >= maxRetriesPerStream {
+		d.logger.Error("stream permanently dead, max retries exceeded during final drain",
+			"stream", streamIdx, "retries", *retries)
+		stream.dead.Store(true)
+		d.DeactivateStream(streamIdx)
+		return false, fmt.Errorf("stream %d: max retries (%d) exceeded during final drain", streamIdx, maxRetriesPerStream)
+	}
+
+	*retries++
+	backoff := time.Duration(math.Min(
+		float64(baseBackoff)*math.Pow(2, float64(*retries-1)),
+		float64(maxBackoff),
+	))
+	d.logger.Info("backing off before reconnect",
+		"stream", streamIdx, "backoff", backoff, "retry", *retries)
+	if !d.waitWithAbort(backoff) {
+		return false, context.Canceled
+	}
+
+	resumeOffset, reconnErr := d.reconnectStream(streamIdx, protocol.JoinReasonNone)
+	if reconnErr != nil {
+		d.logger.Error("reconnect failed",
+			"stream", streamIdx, "error", reconnErr)
+		return false, nil
+	}
+
+	if err := d.syncStreamAfterReconnect(stream, streamIdx, resumeOffset); err != nil {
+		return false, err
+	}
+
+	*retries = 0
+	return !stream.HasUnackedData(), nil
+}
+
 func (d *Dispatcher) readChunkFrame(stream *ParallelStream, offset int64) ([]byte, error) {
 	hdr := make([]byte, protocol.ChunkHeaderSize)
 	n, err := stream.rb.ReadFullAt(offset, hdr)
@@ -562,8 +750,16 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 			}
 			if err != nil {
 				if err == ErrBufferClosed {
-					stream.senderErr <- nil
-					return
+					drained, drainErr := d.waitForFinalDrain(stream, streamIdx, &retries)
+					if drainErr != nil {
+						stream.senderErr <- drainErr
+						return
+					}
+					if drained {
+						stream.senderErr <- nil
+						return
+					}
+					continue
 				}
 				if err == ErrOffsetExpired {
 					d.logger.Error("ring buffer offset expired, data already freed — stream irrecoverable",
@@ -604,7 +800,10 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 				))
 				d.logger.Info("backing off before reconnect",
 					"stream", streamIdx, "backoff", backoff, "retry", retries)
-				time.Sleep(backoff)
+				if !d.waitWithAbort(backoff) {
+					stream.senderErr <- context.Canceled
+					return
+				}
 
 				// Reconnect via ParallelJoin
 				resumeOffset, reconnErr := d.reconnectStream(streamIdx, protocol.JoinReasonNone)
@@ -615,63 +814,10 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 					continue
 				}
 
-				// Resume: ajusta sendOffset para o lastOffset do server
-				// Valida que o RingBuffer ainda contém os dados no resumeOffset
-				if resumeOffset > 0 && !stream.rb.ContainsRange(resumeOffset, protocol.ChunkHeaderSize) {
-					// Se resumeOffset == head, todos os dados até aqui já foram ACK'd
-					// pelo server. O stream está sincronizado e pode continuar
-					// enviando novos dados a partir do head — não é irrecuperável.
-					if resumeOffset == stream.rb.Head() {
-						d.logger.Info("resume offset equals head — all data ACK'd, continuing from head",
-							"stream", streamIdx, "resumeOffset", resumeOffset)
-					} else {
-						d.logger.Error("resume offset no longer in ring buffer — stream irrecoverable",
-							"stream", streamIdx, "resumeOffset", resumeOffset,
-							"rbTail", stream.rb.Tail(), "rbHead", stream.rb.Head())
-						stream.dead.Store(true)
-						d.DeactivateStream(streamIdx)
-						stream.senderErr <- fmt.Errorf("stream %d: resume offset %d expired from ring buffer", streamIdx, resumeOffset)
-						return
-					}
+				if err := d.syncStreamAfterReconnect(stream, streamIdx, resumeOffset); err != nil {
+					stream.senderErr <- err
+					return
 				}
-
-				// Valida alinhamento: os primeiros bytes no resumeOffset devem
-				// formar um ChunkHeader válido (GlobalSeq + Length <= chunkSize).
-				// Se não, houve dessincronização — dados corrompidos.
-				// Pula validação quando resumeOffset == head (buffer vazio nessa posição).
-				if resumeOffset > 0 && resumeOffset < stream.rb.Head() {
-					hdrBuf := make([]byte, protocol.ChunkHeaderSize)
-					n, readErr := stream.rb.ReadAt(resumeOffset, hdrBuf)
-					if readErr != nil || n < protocol.ChunkHeaderSize {
-						d.logger.Error("failed to read chunk header at resume offset",
-							"stream", streamIdx, "offset", resumeOffset, "error", readErr)
-						stream.dead.Store(true)
-						d.DeactivateStream(streamIdx)
-						stream.senderErr <- fmt.Errorf("stream %d: cannot read header at resume offset %d", streamIdx, resumeOffset)
-						return
-					}
-					hdrLength := binary.BigEndian.Uint32(hdrBuf[4:8])
-					if hdrLength > uint32(d.chunkSize) {
-						d.logger.Error("chunk header at resume offset has invalid length — desync detected",
-							"stream", streamIdx, "offset", resumeOffset,
-							"hdrLength", hdrLength, "maxChunkSize", d.chunkSize)
-						stream.dead.Store(true)
-						d.DeactivateStream(streamIdx)
-						stream.senderErr <- fmt.Errorf("stream %d: desync at resume offset %d (invalid chunk length %d)",
-							streamIdx, resumeOffset, hdrLength)
-						return
-					}
-				}
-
-				stream.sendMu.Lock()
-				stream.resumeFromWireOffsetLocked(resumeOffset)
-				stream.sendMu.Unlock()
-				stream.lastSACKAt.Store(time.Now().UnixNano()) // reset SACK timer após reconexão
-
-				d.logger.Info("stream reconnected, resuming from offset",
-					"stream", streamIdx, "offset", resumeOffset,
-					"resumeSendOffset", stream.sendOffset,
-					"rbTail", stream.rb.Tail(), "rbHead", stream.rb.Head())
 				retries = 0 // reset após reconexão bem-sucedida — evita morte permanente por acúmulo
 				continue
 			}
@@ -729,9 +875,10 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 						continue
 					}
 
-					stream.sendMu.Lock()
-					stream.resumeFromWireOffsetLocked(resumeOffset)
-					stream.sendMu.Unlock()
+					if err := d.syncStreamAfterReconnect(stream, streamIdx, resumeOffset); err != nil {
+						stream.senderErr <- err
+						return
+					}
 
 					d.logger.Info("port rotation completed",
 						"stream", streamIdx,
@@ -1049,7 +1196,8 @@ func (d *Dispatcher) Close() {
 	for i := 0; i < d.maxStreams; i++ {
 		d.streams[i].rb.Close()
 		// A conexão não é fechada aqui para permitir que as sender goroutines
-		// drenem o restante do buffer para a rede. A goroutine fechará a conexão via defer.
+		// drenem o restante do buffer e aguardem o ChunkSACK final. A goroutine
+		// fechará a conexão via defer apenas após concluir o drain final.
 	}
 }
 
@@ -1101,6 +1249,7 @@ func (d *Dispatcher) WaitAllSenders(ctx context.Context) error {
 	case <-ctx.Done():
 		// Timeout: fecha todos os ring buffers para desbloquear senders
 		d.logger.Warn("WaitAllSenders context expired, closing all ring buffers")
+		d.abortSenders.Store(true)
 		for i := 0; i < d.maxStreams; i++ {
 			d.streams[i].rb.Close()
 		}

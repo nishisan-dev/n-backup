@@ -574,6 +574,8 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 	}()
 
 	// WaitAllSenders e produtor rodam em paralelo.
+	// O retorno bem-sucedido de WaitAllSenders agora significa que todos os
+	// streams terminaram e não há bytes pendentes de ChunkSACK.
 	// Context com timeout previne deadlock eterno.
 	sendersCtx, sendersCancel := context.WithTimeout(ctx, MaxBackupDuration)
 	defer sendersCancel()
@@ -604,6 +606,7 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 	}
 
 	// Sinaliza ao server que toda a ingestão foi completada com sucesso.
+	// Neste ponto, todos os streams já drenaram o buffer até o último ACK.
 	// O server espera este frame antes de prosseguir com Finalize().
 	if controlCh != nil {
 		if err := controlCh.SendIngestionDone(sessionID); err != nil {

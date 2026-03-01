@@ -46,6 +46,20 @@ func activateStreamManually(d *Dispatcher, idx int, conn net.Conn) {
 	atomic.AddInt32(&d.activeCount, 1)
 }
 
+func waitForWrittenBytes(t *testing.T, conn *mockConn, want int64) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt64(&conn.written) >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for %d written bytes (got %d)", want, atomic.LoadInt64(&conn.written))
+}
+
 func TestDispatcher_RoundRobin(t *testing.T) {
 	// Cria dispatcher com 3 streams
 	conns := make([]*mockConn, 3)
@@ -344,6 +358,62 @@ func TestDispatcher_WaitAllSendersContext(t *testing.T) {
 	}
 	if err != context.DeadlineExceeded {
 		t.Errorf("expected DeadlineExceeded, got %v", err)
+	}
+}
+
+func TestSender_FinalDrainWaitsForOutstandingACK(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	conn := &mockConn{}
+
+	d := NewDispatcher(DispatcherConfig{
+		MaxStreams:    1,
+		BufferSize:    1024 * 1024,
+		ChunkSize:     256,
+		SessionID:     "test-final-drain",
+		ServerAddr:    "localhost:9847",
+		AgentName:     "test-agent",
+		StorageName:   "test-storage",
+		Logger:        logger,
+		PrimaryConn:   nil,
+		SACKTimeoutFn: func() time.Duration { return time.Second },
+	})
+
+	activateStreamManually(d, 0, conn)
+
+	data := make([]byte, 256)
+	if _, err := d.Write(data); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	stream := d.streams[0]
+	expectedFrameLen := int64(protocol.ChunkHeaderSize + len(data))
+
+	d.startSenderWithRetry(0)
+	waitForWrittenBytes(t, conn, expectedFrameLen)
+
+	d.Close()
+
+	select {
+	case <-stream.senderDone:
+		t.Fatal("sender exited before final ACK drain")
+	case <-time.After(200 * time.Millisecond):
+		// expected: sender should still be waiting for the final drain
+	}
+
+	if !stream.HasUnackedData() {
+		t.Fatal("expected stream to have unacked data before final drain completes")
+	}
+
+	stream.rb.Advance(stream.rb.Head())
+
+	select {
+	case <-stream.senderDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sender did not finish after final ACK drain")
+	}
+
+	if err := d.WaitSender(0); err != nil {
+		t.Fatalf("WaitSender returned error after final drain: %v", err)
 	}
 }
 
