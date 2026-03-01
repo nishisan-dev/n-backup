@@ -183,13 +183,13 @@ daemon:
 
 ### A WebUI não carrega
 
-1. Verifique se `webui.enabled: true` no `server.yaml`
-2. Verifique se a porta está acessível (default `:8080`)
-3. Verifique se seu IP está nos `allowed_cidrs`
+1. Verifique se `web_ui.enabled: true` no `server.yaml`
+2. Verifique se a porta está acessível (default `127.0.0.1:9848`)
+3. Verifique se seu IP está nos `allow_origins`
 
 ### A WebUI mostra "No sessions"
 
-Normal se não houver backups em andamento. Os dados são mantidos em memória — ao reiniciar o server, o histórico é perdido.
+Normal se não houver backups em andamento. Se você configurou `session_history_file` no `server.yaml`, o histórico de sessões anteriores é persistido e recuperado após reiniciar o server.
 
 ### As métricas do agent (CPU, memória, disco) não aparecem
 

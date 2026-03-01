@@ -70,7 +70,10 @@ Ao clicar em uma sessão, visualize:
 |---------|-----------|
 | **Transfer Speed** | Sparkline interativo com histórico de velocidade |
 | **Disk I/O** | Sparkline de I/O de escrita no server |
+| **Buffer Usage** | Sparkline de uso do chunk buffer (quando habilitado no server) |
 | **Streams** | Tabela detalhada de streams paralelos (index, status, bytes, uptime, reconexões) |
+| **Slot Status** | Estado de cada slot: `Idle`, `Receiving`, `Disconnected`, `Disabled` (v3.0.0+) |
+| **Chunk Metrics** | Métricas por slot: chunks recebidos, perdidos e retransmitidos (v3.0.0+) |
 | **Progress** | Objetos enviados/total, ETA, barra de progresso |
 | **SHA-256** | Hash calculado até o momento |
 | **AutoScaler Stats** | Eficiência, modo, streams ativos/máx, throughput (apenas para backups paralelos) |
@@ -133,12 +136,17 @@ A WebUI consome uma API REST interna. Os endpoints disponíveis:
 
 | Endpoint | Método | Descrição |
 |----------|--------|-----------|
-| `/api/sessions` | GET | Lista sessões ativas |
-| `/api/sessions/:id` | GET | Detalhe de uma sessão |
-| `/api/sessions/history` | GET | Sessões completadas |
-| `/api/agents` | GET | Agents conectados via control channel |
-| `/api/overview` | GET | Visão geral (server info, stats) |
-| `/api/events` | GET | Eventos recentes |
+| `/api/v1/sessions` | GET | Lista sessões ativas |
+| `/api/v1/sessions/:id` | GET | Detalhe de uma sessão (inclui slot status e chunk metrics) |
+| `/api/v1/sessions/history` | GET | Sessões completadas |
+| `/api/v1/sessions/active-history` | GET | Snapshots periódicos de sessões ativas |
+| `/api/v1/agents` | GET | Agents conectados via control channel |
+| `/api/v1/health` | GET | Status do server |
+| `/api/v1/metrics` | GET | Bytes recebidos, sessões |
+| `/api/v1/storages` | GET | Storages com uso de disco |
+| `/api/v1/events` | GET | Eventos recentes |
+| `/api/v1/config/effective` | GET | Configuração efetiva do server |
+| `/metrics` | GET | Métricas Prometheus-compatíveis (v3.0.0+) |
 
 > **Nota:** A API é interna e pode mudar entre versões. Não há garantia de estabilidade.
 
