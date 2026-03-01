@@ -81,7 +81,8 @@ type Slot struct {
 
 	// --- Uptime ---
 	ConnectedAt atomic.Value // time.Time — timestamp do último connect/re-join
-	Reconnects  atomic.Int32 // reconexões acumuladas
+	Reconnects  atomic.Int32 // reconexões por erro acumuladas
+	Rotations   atomic.Int32 // reconexões intencionais por port rotation
 
 	// --- Chunk metrics (v5) ---
 	ChunksReceived      atomic.Uint32 // total de chunks recebidos por este slot

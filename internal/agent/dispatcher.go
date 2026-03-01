@@ -607,7 +607,7 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 				time.Sleep(backoff)
 
 				// Reconnect via ParallelJoin
-				resumeOffset, reconnErr := d.reconnectStream(streamIdx)
+				resumeOffset, reconnErr := d.reconnectStream(streamIdx, protocol.JoinReasonNone)
 				if reconnErr != nil {
 					d.logger.Error("reconnect failed",
 						"stream", streamIdx, "error", reconnErr)
@@ -721,7 +721,7 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 						"stream", streamIdx,
 						"chunksPerCycle", d.chunksPerCycle)
 
-					resumeOffset, reconnErr := d.reconnectStream(streamIdx)
+					resumeOffset, reconnErr := d.reconnectStream(streamIdx, protocol.JoinReasonRotation)
 					if reconnErr != nil {
 						d.logger.Warn("port rotation reconnect failed, continuing on current conn",
 							"stream", streamIdx, "error", reconnErr)
@@ -745,7 +745,7 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 
 // reconnectStream reconecta um stream ao server via ParallelJoin.
 // Retorna o lastOffset reportado pelo server (para resume).
-func (d *Dispatcher) reconnectStream(streamIdx int) (int64, error) {
+func (d *Dispatcher) reconnectStream(streamIdx int, flags byte) (int64, error) {
 	stream := d.streams[streamIdx]
 
 	// Fecha a conexão anterior
@@ -777,7 +777,7 @@ func (d *Dispatcher) reconnectStream(streamIdx int) (int64, error) {
 
 	// Envia ParallelJoin com medição de RTT
 	joinStart := time.Now()
-	if err := protocol.WriteParallelJoin(tlsConn, d.sessionID, uint8(streamIdx)); err != nil {
+	if err := protocol.WriteParallelJoin(tlsConn, d.sessionID, uint8(streamIdx), flags); err != nil {
 		tlsConn.Close()
 		return 0, fmt.Errorf("writing ParallelJoin stream %d: %w", streamIdx, err)
 	}
@@ -890,7 +890,7 @@ func (d *Dispatcher) ActivateStream(streamIdx int) error {
 
 	// Envia ParallelJoin com medição de RTT
 	joinStart := time.Now()
-	if err := protocol.WriteParallelJoin(tlsConn, d.sessionID, uint8(streamIdx)); err != nil {
+	if err := protocol.WriteParallelJoin(tlsConn, d.sessionID, uint8(streamIdx), protocol.JoinReasonNone); err != nil {
 		tlsConn.Close()
 		return fmt.Errorf("writing ParallelJoin stream %d: %w", streamIdx, err)
 	}

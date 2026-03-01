@@ -387,7 +387,7 @@ func TestParallelJoin_RoundTrip(t *testing.T) {
 	sessionID := "abc-123-def-456"
 	streamIndex := uint8(2)
 
-	if err := WriteParallelJoin(&buf, sessionID, streamIndex); err != nil {
+	if err := WriteParallelJoin(&buf, sessionID, streamIndex, JoinReasonNone); err != nil {
 		t.Fatalf("WriteParallelJoin: %v", err)
 	}
 
@@ -410,6 +410,62 @@ func TestParallelJoin_RoundTrip(t *testing.T) {
 	}
 	if pj.StreamIndex != streamIndex {
 		t.Errorf("expected streamIndex %d, got %d", streamIndex, pj.StreamIndex)
+	}
+	if pj.Flags != JoinReasonNone {
+		t.Errorf("expected flags %d, got %d", JoinReasonNone, pj.Flags)
+	}
+}
+
+func TestParallelJoin_RoundTrip_WithRotationFlag(t *testing.T) {
+	var buf bytes.Buffer
+
+	sessionID := "rot-session-123"
+	streamIndex := uint8(1)
+
+	if err := WriteParallelJoin(&buf, sessionID, streamIndex, JoinReasonRotation); err != nil {
+		t.Fatalf("WriteParallelJoin: %v", err)
+	}
+
+	var magic [4]byte
+	buf.Read(magic[:])
+
+	pj, err := ReadParallelJoin(&buf)
+	if err != nil {
+		t.Fatalf("ReadParallelJoin: %v", err)
+	}
+
+	if pj.SessionID != sessionID {
+		t.Errorf("expected sessionID %q, got %q", sessionID, pj.SessionID)
+	}
+	if pj.StreamIndex != streamIndex {
+		t.Errorf("expected streamIndex %d, got %d", streamIndex, pj.StreamIndex)
+	}
+	if pj.Flags != JoinReasonRotation {
+		t.Errorf("expected flags JoinReasonRotation (%d), got %d", JoinReasonRotation, pj.Flags)
+	}
+}
+
+func TestParallelJoin_BackwardCompat_NoFlags(t *testing.T) {
+	// Simula um agent antigo que não envia o byte de Flags
+	var buf bytes.Buffer
+	buf.Write([]byte{ProtocolVersion})     // version
+	buf.Write([]byte("old-session-123\n")) // sessionID
+	buf.Write([]byte{3})                   // streamIndex
+	// Sem byte de Flags — ReadParallelJoin deve retornar Flags=0x00
+
+	pj, err := ReadParallelJoin(&buf)
+	if err != nil {
+		t.Fatalf("ReadParallelJoin backward compat: %v", err)
+	}
+
+	if pj.SessionID != "old-session-123" {
+		t.Errorf("expected sessionID 'old-session-123', got %q", pj.SessionID)
+	}
+	if pj.StreamIndex != 3 {
+		t.Errorf("expected streamIndex 3, got %d", pj.StreamIndex)
+	}
+	if pj.Flags != JoinReasonNone {
+		t.Errorf("expected default flags 0x00 (JoinReasonNone), got %d", pj.Flags)
 	}
 }
 

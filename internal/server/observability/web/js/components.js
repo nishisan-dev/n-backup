@@ -422,6 +422,9 @@ const Components = {
                 const retxBadge = st.chunks_retransmitted > 0
                     ? `<span class="badge badge-warn">${st.chunks_retransmitted}</span>`
                     : '0';
+                const rotBadge = st.rotations > 0
+                    ? `<span class="badge badge-info">${st.rotations}</span>`
+                    : '0';
 
                 return `
                     <tr${rowClass}>
@@ -431,6 +434,7 @@ const Components = {
                         <td>${st.idle_secs}s</td>
                         <td>${this.formatUptime(st.connected_for)}</td>
                         <td>${st.reconnects > 0 ? '<span class="badge badge-warn">' + st.reconnects + '</span>' : '0'}</td>
+                        <td>${rotBadge}</td>
                         <td>${st.chunks_received || 0}</td>
                         <td>${lostBadge}</td>
                         <td>${retxBadge}</td>
@@ -440,7 +444,7 @@ const Components = {
                 `;
             };
 
-            const cols = 11;
+            const cols = 12;
             let rows = active.map(st => renderRow(st, '')).join('');
             if (disabled.length > 0) {
                 rows += `<tr class="stream-separator"><td colspan="${cols}">${disabled.length} slot${disabled.length > 1 ? 's' : ''} disabled (parked)</td></tr>`;

@@ -26,6 +26,14 @@ const (
 	ParallelStatusNotFound byte = 0x02 // SessionID não encontrado
 )
 
+// JoinReason flags para ParallelJoin.Flags.
+// Indica o motivo da reconexão para que o server possa distinguir
+// reconexões intencionais (port rotation) de reconexões por erro.
+const (
+	JoinReasonNone     byte = 0x00 // primeira conexão ou reconexão por erro
+	JoinReasonRotation byte = 0x01 // reconexão intencional por port rotation
+)
+
 // ParallelACK representa a resposta do server ao ParallelJoin.
 // Formato: [Status 1B] [LastOffset uint64 8B]
 // LastOffset indica quantos bytes o server já recebeu neste stream (0 para novo, >0 para resume).
@@ -152,10 +160,12 @@ type ParallelInitACK struct {
 }
 
 // ParallelJoin é enviado por conexões secundárias para se juntar a uma sessão existente.
-// Formato: Magic "PJIN" [4B] [Version 1B] [SessionID UTF-8 '\n'] [StreamIndex uint8 1B]
+// Formato: Magic "PJIN" [4B] [Version 1B] [SessionID UTF-8 '\n'] [StreamIndex uint8 1B] [Flags uint8 1B]
+// Flags é opcional para retrocompatibilidade: agents antigos (sem Flags) são lidos como 0x00.
 type ParallelJoin struct {
 	SessionID   string
 	StreamIndex uint8
+	Flags       byte // JoinReasonNone | JoinReasonRotation
 }
 
 // ChunkSACK é o selective acknowledgment por stream (Server → Client).

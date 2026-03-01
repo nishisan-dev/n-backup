@@ -439,7 +439,7 @@ func TestHandleParallelJoin_RejectsClosingSessionBeforeAckOK(t *testing.T) {
 		handler.handleParallelJoin(context.Background(), serverConn, logger)
 	}()
 
-	if err := protocol.WriteParallelJoin(clientConn, ps.SessionID, 1); err != nil {
+	if err := protocol.WriteParallelJoin(clientConn, ps.SessionID, 1, protocol.JoinReasonNone); err != nil {
 		t.Fatalf("WriteParallelJoin: %v", err)
 	}
 

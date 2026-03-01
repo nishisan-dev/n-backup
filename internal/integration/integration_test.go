@@ -543,7 +543,7 @@ func TestEndToEnd_ParallelBackupSession(t *testing.T) {
 			t.Fatalf("TLS dial stream 0: %v", err)
 		}
 
-		if err := protocol.WriteParallelJoin(sc, sessionID, 0); err != nil {
+		if err := protocol.WriteParallelJoin(sc, sessionID, 0, protocol.JoinReasonNone); err != nil {
 			sc.Close()
 			t.Fatalf("WriteParallelJoin stream 0: %v", err)
 		}

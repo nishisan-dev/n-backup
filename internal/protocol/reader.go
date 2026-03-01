@@ -330,7 +330,8 @@ func ReadParallelInitAfterMaxStreams(r io.Reader, maxStreams uint8) (*ParallelIn
 }
 
 // ReadParallelJoin lê o frame ParallelJoin (Client → Server).
-// O magic "PJIN" já foi lido pelo dispatcher; lê version + sessionID + streamIndex.
+// O magic "PJIN" já foi lido pelo dispatcher; lê version + sessionID + streamIndex + flags.
+// Flags é opcional para retrocompatibilidade: se EOF após streamIndex, assume 0x00.
 func ReadParallelJoin(r io.Reader) (*ParallelJoin, error) {
 	// Lê version
 	var version [1]byte
@@ -354,9 +355,18 @@ func ReadParallelJoin(r io.Reader) (*ParallelJoin, error) {
 		return nil, fmt.Errorf("reading parallel join stream index: %w", err)
 	}
 
+	// Lê flags (opcional — agents antigos podem não enviar este byte)
+	var flags byte
+	var flagsBuf [1]byte
+	if _, err := io.ReadFull(br, flagsBuf[:]); err == nil {
+		flags = flagsBuf[0]
+	}
+	// Se EOF ou erro, flags permanece 0x00 (JoinReasonNone)
+
 	return &ParallelJoin{
 		SessionID:   sessionID,
 		StreamIndex: streamIndex[0],
+		Flags:       flags,
 	}, nil
 }
 

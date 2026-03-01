@@ -590,6 +590,7 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 				Status:              streamStatus(active, idleSecs, slowSince, h.cfg.FlowRotation.EvalWindow, status),
 				ConnectedFor:        connectedFor,
 				Reconnects:          reconnects,
+				Rotations:           slot.Rotations.Load(),
 				ChunksReceived:      slot.ChunksReceived.Load(),
 				ChunksLost:          slot.ChunksLost.Load(),
 				ChunksRetransmitted: slot.ChunksRetransmitted.Load(),
@@ -2579,13 +2580,19 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 	slot.ConnMu.Unlock()
 	slot.SetStatus(SlotReceiving)
 
-	// Atualiza uptime e reconnects do slot
+	// Atualiza uptime e reconnects/rotations do slot
 	var reconnectCount int32
 	if slot.GetConnectedAt().IsZero() {
 		// Primeira conexão
 		reconnectCount = 0
+	} else if pj.Flags == protocol.JoinReasonRotation {
+		// Port rotation intencional — não conta como reconnect
+		rotationCount := slot.Rotations.Add(1)
+		if h.Events != nil {
+			h.Events.PushEvent("info", "port_rotation", pSession.AgentName, fmt.Sprintf("stream %d port rotation (session %s, rotation #%d)", pj.StreamIndex, pj.SessionID, rotationCount), int(pj.StreamIndex))
+		}
 	} else {
-		// Re-join
+		// Re-join por erro de rede
 		reconnectCount = slot.Reconnects.Add(1)
 		if h.Events != nil {
 			h.Events.PushEvent("warn", "stream_reconnect", pSession.AgentName, fmt.Sprintf("stream %d re-joined (session %s)", pj.StreamIndex, pj.SessionID), int(pj.StreamIndex))

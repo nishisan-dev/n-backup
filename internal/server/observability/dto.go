@@ -85,7 +85,8 @@ type StreamDetail struct {
 	Active       bool    `json:"active"`
 	Status       string  `json:"status"`                  // running | idle | slow | degraded | disconnected | disabled
 	ConnectedFor string  `json:"connected_for,omitempty"` // ex: "2m30s", reseta na reconexão
-	Reconnects   int32   `json:"reconnects"`              // 0 = primeira conexão, N = N reconexões
+	Reconnects   int32   `json:"reconnects"`              // 0 = primeira conexão, N = N reconexões por erro
+	Rotations    int32   `json:"rotations"`               // reconexões intencionais por port rotation
 
 	// Chunk metrics (v5)
 	ChunksReceived      uint32 `json:"chunks_received"`

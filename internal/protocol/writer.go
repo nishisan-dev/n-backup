@@ -211,8 +211,8 @@ func WriteParallelInitACK(w io.Writer, status byte) error {
 }
 
 // WriteParallelJoin escreve o frame ParallelJoin (Client → Server, conexão secundária).
-// Formato: [Magic "PJIN" 4B] [Version 1B] [SessionID UTF-8 '\n'] [StreamIndex uint8 1B]
-func WriteParallelJoin(w io.Writer, sessionID string, streamIndex uint8) error {
+// Formato: [Magic "PJIN" 4B] [Version 1B] [SessionID UTF-8 '\n'] [StreamIndex uint8 1B] [Flags uint8 1B]
+func WriteParallelJoin(w io.Writer, sessionID string, streamIndex uint8, flags byte) error {
 	if _, err := w.Write(MagicParallelJoin[:]); err != nil {
 		return fmt.Errorf("writing parallel join magic: %w", err)
 	}
@@ -227,6 +227,9 @@ func WriteParallelJoin(w io.Writer, sessionID string, streamIndex uint8) error {
 	}
 	if _, err := w.Write([]byte{streamIndex}); err != nil {
 		return fmt.Errorf("writing parallel join stream index: %w", err)
+	}
+	if _, err := w.Write([]byte{flags}); err != nil {
+		return fmt.Errorf("writing parallel join flags: %w", err)
 	}
 	return nil
 }
