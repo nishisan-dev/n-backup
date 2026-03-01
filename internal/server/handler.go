@@ -581,15 +581,19 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 			reconnects := slot.Reconnects.Load()
 
 			streams = append(streams, observability.StreamDetail{
-				Index:        slot.Index,
-				OffsetBytes:  offset,
-				MBps:         mbps,
-				IdleSecs:     idleSecs,
-				SlowSince:    slowSince,
-				Active:       active,
-				Status:       streamStatus(active, idleSecs, slowSince, h.cfg.FlowRotation.EvalWindow),
-				ConnectedFor: connectedFor,
-				Reconnects:   reconnects,
+				Index:               slot.Index,
+				OffsetBytes:         offset,
+				MBps:                mbps,
+				IdleSecs:            idleSecs,
+				SlowSince:           slowSince,
+				Active:              active,
+				Status:              streamStatus(active, idleSecs, slowSince, h.cfg.FlowRotation.EvalWindow, status),
+				ConnectedFor:        connectedFor,
+				Reconnects:          reconnects,
+				ChunksReceived:      slot.ChunksReceived.Load(),
+				ChunksLost:          slot.ChunksLost.Load(),
+				ChunksRetransmitted: slot.ChunksRetransmitted.Load(),
+				LastChunkSeq:        slot.LastChunkSeq.Load(),
 			})
 		}
 
@@ -716,8 +720,11 @@ func sessionStatus(lastActivity time.Time) string {
 	}
 }
 
-func streamStatus(active bool, idleSecs int64, slowSince string, evalWindow time.Duration) string {
+func streamStatus(active bool, idleSecs int64, slowSince string, evalWindow time.Duration, slotStatus SlotStatus) string {
 	if !active {
+		if slotStatus == SlotDisabled {
+			return "disabled"
+		}
 		return "disconnected"
 	}
 	if slowSince != "" {

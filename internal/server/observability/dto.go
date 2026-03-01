@@ -83,9 +83,15 @@ type StreamDetail struct {
 	IdleSecs     int64   `json:"idle_secs"`
 	SlowSince    string  `json:"slow_since,omitempty"`
 	Active       bool    `json:"active"`
-	Status       string  `json:"status"`                  // running | idle | slow | degraded | disconnected
+	Status       string  `json:"status"`                  // running | idle | slow | degraded | disconnected | disabled
 	ConnectedFor string  `json:"connected_for,omitempty"` // ex: "2m30s", reseta na reconexão
 	Reconnects   int32   `json:"reconnects"`              // 0 = primeira conexão, N = N reconexões
+
+	// Chunk metrics (v5)
+	ChunksReceived      uint32 `json:"chunks_received"`
+	ChunksLost          uint32 `json:"chunks_lost"`
+	ChunksRetransmitted uint32 `json:"chunks_retransmitted"`
+	LastChunkSeq        uint32 `json:"last_chunk_seq"`
 }
 
 // EventEntry representa um evento operacional no ring buffer.

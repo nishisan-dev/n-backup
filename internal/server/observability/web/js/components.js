@@ -363,7 +363,7 @@ const Components = {
             ${detail.bytes_received > 0 && detail.disk_write_bytes > 0 ? `<div class="info-item"><span class="info-label">Compression Ratio</span><span class="info-value">${(detail.disk_write_bytes / detail.bytes_received * 100).toFixed(1)}%</span></div>` : ''}
             ${detail.started_at ? `<div class="info-item"><span class="info-label">Duração</span><span class="info-value">${this.formatElapsed(detail.started_at)}</span></div>` : ''}
             ${detail.assembler ? this.renderAssemblerProgress(detail.assembler, detail.assembly_eta) : ''}
-            ${detail.auto_scale ? this.renderAutoScaleInfo(detail.auto_scale) : ''}
+            ${detail.auto_scale ? this.renderAutoScaleInfo(detail.auto_scale, detail) : ''}
             ${detail.buffer_enabled ? this.renderBufferMemoryBlock(detail) : ''}
             ${progressHtml}
         `;
@@ -408,13 +408,20 @@ const Components = {
             streamsTitle.style.display = '';
             streamsWrap.style.display = '';
 
-            // Agrupa: ativos primeiro, disconnected abaixo
-            const active = detail.streams.filter(st => st.status !== 'disconnected');
+            // Agrupa: ativos primeiro, disabled no meio, disconnected abaixo
+            const active = detail.streams.filter(st => st.status !== 'disconnected' && st.status !== 'disabled');
+            const disabled = detail.streams.filter(st => st.status === 'disabled');
             const disconnected = detail.streams.filter(st => st.status === 'disconnected');
 
-            const renderRow = (st, dimmed) => {
+            const renderRow = (st, dimmedClass) => {
                 const streamStatus = st.status || (st.active ? 'running' : 'disconnected');
-                const rowClass = dimmed ? ' class="stream-disconnected"' : '';
+                const rowClass = dimmedClass ? ` class="${dimmedClass}"` : '';
+                const lostBadge = st.chunks_lost > 0
+                    ? `<span class="badge badge-error">${st.chunks_lost}</span>`
+                    : '0';
+                const retxBadge = st.chunks_retransmitted > 0
+                    ? `<span class="badge badge-warn">${st.chunks_retransmitted}</span>`
+                    : '0';
 
                 return `
                     <tr${rowClass}>
@@ -424,16 +431,24 @@ const Components = {
                         <td>${st.idle_secs}s</td>
                         <td>${this.formatUptime(st.connected_for)}</td>
                         <td>${st.reconnects > 0 ? '<span class="badge badge-warn">' + st.reconnects + '</span>' : '0'}</td>
+                        <td>${st.chunks_received || 0}</td>
+                        <td>${lostBadge}</td>
+                        <td>${retxBadge}</td>
+                        <td>${st.last_chunk_seq || 0}</td>
                         <td>${this.statusBadge(streamStatus)}</td>
                     </tr>
                 `;
             };
 
-            let rows = active.map(st => renderRow(st, false)).join('');
+            const cols = 11;
+            let rows = active.map(st => renderRow(st, '')).join('');
+            if (disabled.length > 0) {
+                rows += `<tr class="stream-separator"><td colspan="${cols}">${disabled.length} slot${disabled.length > 1 ? 's' : ''} disabled (parked)</td></tr>`;
+                rows += disabled.map(st => renderRow(st, 'stream-disabled')).join('');
+            }
             if (disconnected.length > 0) {
-                const cols = 7;
                 rows += `<tr class="stream-separator"><td colspan="${cols}">${disconnected.length} stream${disconnected.length > 1 ? 's' : ''} disconnected</td></tr>`;
-                rows += disconnected.map(st => renderRow(st, true)).join('');
+                rows += disconnected.map(st => renderRow(st, 'stream-disconnected')).join('');
             }
             streamsBody.innerHTML = rows;
         } else {
@@ -501,7 +516,7 @@ const Components = {
     },
 
     // Renderiza seção de auto-scaler stats no detalhe da sessão
-    renderAutoScaleInfo(as) {
+    renderAutoScaleInfo(as, detail = null) {
         if (!as) return '';
 
         // Se já está no máximo de streams, scaling_up não faz sentido — mostra stable
@@ -525,6 +540,34 @@ const Components = {
         if (as.efficiency >= 1.0) effColor = 'low';       // ≥ 1.0 = verde (saudável)
         else if (as.efficiency >= 0.6) effColor = 'med';   // 0.6-1.0 = âmbar (degradando)
 
+        const producerMBs = Number(as.producer_mbs || 0);
+        const drainMBs = Number(as.drain_mbs || 0);
+        const bufferFill = Number(detail?.buffer_fill_percent || 0);
+        const drainBaseline = drainMBs > 0 ? drainMBs : 1;
+        const skewPct = ((producerMBs - drainMBs) / drainBaseline) * 100;
+
+        let flowHint = 'Balanced';
+        let flowHintClass = 'badge-running';
+        let flowHintReason = 'Producer e drain estao proximos, sem sinal forte de backpressure.';
+        if (producerMBs < drainMBs * 0.92 && bufferFill < 10) {
+            flowHint = 'Producer-Limited';
+            flowHintClass = 'badge-warn';
+            flowHintReason = 'O agent esta produzindo menos do que os senders conseguem drenar.';
+        } else if (drainMBs < producerMBs * 0.92 || bufferFill >= 10) {
+            flowHint = 'Transport/Drain-Limited';
+            flowHintClass = 'badge-info';
+            flowHintReason = 'A drenagem sustentada esta abaixo da producao atual.';
+        }
+
+        let streamHint = '';
+        if (detail && Array.isArray(detail.streams)) {
+            const activeStreams = detail.streams.filter((stream) => stream.active);
+            const slowStreams = activeStreams.filter((stream) => stream.status === 'slow');
+            if (slowStreams.length > 0 && slowStreams.every((stream) => (stream.idle_secs || 0) < 10)) {
+                streamHint = `${slowStreams.length}/${activeStreams.length} streams estao "slow", mas com I/O recente. Isso sugere threshold de vazao, nao idle real.`;
+            }
+        }
+
         const probeIndicator = as.probe_active
             ? '<span class="badge badge-probing" style="margin-left: 0.5rem;">probe active</span>'
             : '';
@@ -536,6 +579,7 @@ const Components = {
                     <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
                         <span class="badge ${st.badge}">${st.label}</span>
                         ${probeIndicator}
+                        <span class="badge ${flowHintClass}">${flowHint}</span>
                         <span class="text-xs font-mono">
                             ${as.active_streams}/${as.max_streams} streams
                         </span>
@@ -556,6 +600,14 @@ const Components = {
                             <span class="autoscale-metric-label">Drain</span>
                             <span class="autoscale-metric-value">${as.drain_mbs.toFixed(2)} MB/s</span>
                         </div>
+                        <div class="autoscale-metric">
+                            <span class="autoscale-metric-label">Skew</span>
+                            <span class="autoscale-metric-value">${skewPct >= 0 ? '+' : ''}${skewPct.toFixed(1)}%</span>
+                        </div>
+                    </div>
+                    <div class="text-xs" style="color: var(--text-muted); line-height: 1.45;">
+                        ${this.escapeHtml(flowHintReason)}
+                        ${streamHint ? `<br>${this.escapeHtml(streamHint)}` : ''}
                     </div>
                 </div>
             </div>`;

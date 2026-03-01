@@ -298,28 +298,36 @@ func TestControlChannelReconnectDoesNotDropNewConn(t *testing.T) {
 
 func TestStreamStatus_Disconnected(t *testing.T) {
 	// Stream inativo (sem conexão) → "disconnected"
-	got := streamStatus(false, 0, "", time.Minute)
+	got := streamStatus(false, 0, "", time.Minute, SlotIdle)
 	if got != "disconnected" {
 		t.Fatalf("expected 'disconnected', got %q", got)
 	}
 }
 
+func TestStreamStatus_Disabled(t *testing.T) {
+	// Slot desativado pelo agent (scale-down) → "disabled"
+	got := streamStatus(false, 0, "", time.Minute, SlotDisabled)
+	if got != "disabled" {
+		t.Fatalf("expected 'disabled', got %q", got)
+	}
+}
+
 func TestStreamStatus_Running(t *testing.T) {
-	got := streamStatus(true, 5, "", time.Minute)
+	got := streamStatus(true, 5, "", time.Minute, SlotReceiving)
 	if got != "running" {
 		t.Fatalf("expected 'running', got %q", got)
 	}
 }
 
 func TestStreamStatus_Idle(t *testing.T) {
-	got := streamStatus(true, 30, "", time.Minute)
+	got := streamStatus(true, 30, "", time.Minute, SlotReceiving)
 	if got != "idle" {
 		t.Fatalf("expected 'idle', got %q", got)
 	}
 }
 
 func TestStreamStatus_Degraded(t *testing.T) {
-	got := streamStatus(true, 120, "", time.Minute)
+	got := streamStatus(true, 120, "", time.Minute, SlotReceiving)
 	if got != "degraded" {
 		t.Fatalf("expected 'degraded', got %q", got)
 	}
@@ -328,7 +336,7 @@ func TestStreamStatus_Degraded(t *testing.T) {
 func TestStreamStatus_Slow(t *testing.T) {
 	// Slow since recente (dentro da eval window)
 	slowSince := time.Now().Add(-10 * time.Second).Format(time.RFC3339)
-	got := streamStatus(true, 5, slowSince, time.Minute)
+	got := streamStatus(true, 5, slowSince, time.Minute, SlotReceiving)
 	if got != "slow" {
 		t.Fatalf("expected 'slow', got %q", got)
 	}
@@ -337,7 +345,7 @@ func TestStreamStatus_Slow(t *testing.T) {
 func TestStreamStatus_DegradedFromSlow(t *testing.T) {
 	// Slow since ultrapassou eval window → degraded
 	slowSince := time.Now().Add(-2 * time.Minute).Format(time.RFC3339)
-	got := streamStatus(true, 5, slowSince, time.Minute)
+	got := streamStatus(true, 5, slowSince, time.Minute, SlotReceiving)
 	if got != "degraded" {
 		t.Fatalf("expected 'degraded', got %q", got)
 	}
