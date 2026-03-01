@@ -136,7 +136,8 @@ O **n-backup** é um sistema de backup client-server de alta performance escrito
 | **Server** | `internal/server/server.go` | Listener TLS, aceita conexões, despacha para Handler |
 | **Handler** | `internal/server/handler.go` | Protocolo: handshake, resume, health check, data stream, trailer, final ACK. Emite eventos (início/fim de sessão, rotações, reconexões) para a WebUI |
 | **Storage** | `internal/server/storage.go` | Escrita atômica (`.tmp` → rename), rotação por `max_backups`, organização por agent. Rotação emite log e evento com lista de backups removidos |
-| **Assembler** | `internal/server/assembler.go` | Reassembla chunks de streams paralelos na ordem correta. Staging de chunks suporta 1 ou 2 níveis de sharding (`chunk_shard_levels`) para reduzir entradas por diretório |
+| **Assembler** | `internal/server/assembler.go` | Reassembla chunks de streams paralelos na ordem correta via `GlobalSeq`. Staging de chunks suporta 1 ou 2 níveis de sharding (`chunk_shard_levels`) para reduzir entradas por diretório |
+| **Slot** | `internal/server/slot.go` | Struct tipada por slot paralelo: estado (`Idle`, `Receiving`, `Disconnected`, `Disabled`), offsets, métricas de chunks (recebidos/perdidos/retransmitidos) e flow rotation. Substitui os `sync.Map` anteriores |
 
 ### 3.3. Módulos Compartilhados
 
@@ -222,6 +223,7 @@ Agent                                      Server
 | ParallelInit | — | C→S | 5 bytes |
 | ParallelJoin | `PJIN` | C→S | variável |
 | ParallelACK | — | S→C | 9 bytes |
+| ChunkHeader (v5) | — | C→S | 9 bytes |
 | ChunkSACK | `CSAK` | S→C | 17 bytes |
 | Health (PING) | `PING` | C→S | 4 bytes |
 | Health (PONG) | — | S→C | 10 bytes |
@@ -232,6 +234,8 @@ Agent                                      Server
 | ControlAdmit | `CADM` | S→C | 5 bytes |
 | ControlDefer | `CDFE` | S→C | 8 bytes |
 | ControlAbort | `CABT` | S→C | 8 bytes |
+| ControlSlotPark | `CSLP` | C→S | 5 bytes |
+| ControlSlotResume | `CSLR` | C→S | 5 bytes |
 
 Para detalhes completos dos frames, veja a [[Especificação Técnica|Especificacao-Tecnica]].
 
@@ -301,11 +305,11 @@ Tentativa N → falha → aguarda min(2^N × initial_delay, max_delay)
 
 #### Parallel Streams (v1.2.3+)
 
-1. Server rastreia `StreamOffsets` por stream via `sync.Map` + `atomic`
+1. Server rastreia offsets por slot via struct `Slot` tipada (pré-alocada com `PreallocateSlots`)
 2. Se stream cai: agent faz `ParallelJoin` novamente com mesmo `StreamIndex`
 3. Server responde `ParallelACK(OK, lastOffset=N)` — resume do offset
 4. Até 3 tentativas por stream; stream morto após esgotar
-5. `StreamReady` channel garante que `StreamWg.Wait()` não retorna antes do primeiro stream conectar
+5. Cada slot possui estado (`Idle`, `Receiving`, `Disconnected`, `Disabled`) e métricas atômicas
 
 ### Job Timeout (v1.2.3+)
 
@@ -324,8 +328,9 @@ O agent mantém uma conexão TLS persistente com o server (magic `CTRL`) para:
 1. **Keep-alive**: PINGs periódicos configuráveis (`keepalive_interval`, default 30s)
 2. **RTT EWMA**: Medição contínua de latência (Exponentially Weighted Moving Average)
 3. **Status do server**: Carga (CPU) e espaço livre em disco no ControlPong
-4. **Graceful Flow Rotation**: Server envia `ControlRotate(streamIndex)` → Agent drena o stream e responde `ControlRotateACK` — zero data loss
-5. **Orquestração futura**: Frames `ControlAdmit`, `ControlDefer`, `ControlAbort` já definidos no protocolo
+4. **Slot management**: Agent envia `ControlSlotPark(slotID)` para scale-down e `ControlSlotResume(slotID)` para scale-up de slots individuais
+5. **Graceful Flow Rotation**: Server envia `ControlRotate(streamIndex)` → Agent drena o stream e responde `ControlRotateACK` — zero data loss
+6. **Orquestração futura**: Frames `ControlAdmit`, `ControlDefer`, `ControlAbort` já definidos no protocolo
 
 O canal reconecta automaticamente com exponential backoff (`reconnect_delay` até `max_reconnect_delay`).
 
@@ -413,6 +418,7 @@ n-backup/
 │   ├── pki/                          # Configuração TLS client/server
 │   ├── protocol/                     # Frames binários, reader, writer
 │   └── server/                       # Receiver, handler, storage, assembler
+│       ├── slot.go                  #   Slot struct (estado tipado, métricas atômicas, flow rotation)
 │       └── observability/           #   WebUI + APIs REST + persistência JSONL
 ├── configs/                          # Exemplos de configuração
 ├── docs/                             # Documentação + diagramas PlantUML
@@ -442,6 +448,7 @@ n-backup/
 | 9 | **SPA embarcado** (`go:embed`) | Grafana, Prometheus UI | Zero dependências externas. Single binary deployment. |
 | 10 | **Chunk shard levels configurável** (1 ou 2) | Estrutura flat única | 1 nível é suficiente para a maioria. 2 níveis reduz contagem de entradas por diretório em sessões com muitos chunks paralelos, melhorando performance do filesystem. |
 | 11 | **Persistência JSONL da WebUI** | SQLite, banco em memória | JSONL é append-only, zero dependências, rotação por `max_lines`. Sobrevive a crashes sem corrupção. |
+| 12 | **Slot struct pré-alocado** (v3.0.0) | 12× `sync.Map` | Elimina overhead de type-assertion, permite métricas atômicas tipadas por slot e estado de vida explícito. |
 
 ---
 

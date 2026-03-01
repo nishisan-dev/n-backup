@@ -134,9 +134,10 @@ O **n-backup** é um sistema de backup client-server de alta performance escrito
 | Componente | Arquivo | Responsabilidade |
 |-----------|---------|-----------------|
 | **Server** | `internal/server/server.go` | Listener TLS, aceita conexões, despacha para Handler |
-| **Handler** | `internal/server/handler.go` | Protocolo: handshake, resume, health check, data stream, trailer, final ACK |
+| **Handler** | `internal/server/handler.go` | Protocolo: handshake, resume, health check, data stream, trailer, final ACK. Emite eventos (início/fim de sessão, rotações, reconexões) para a WebUI |
 | **Storage** | `internal/server/storage.go` | Escrita atômica (`.tmp` → rename), rotação por `max_backups`, organização por agent |
-| **Assembler** | `internal/server/assembler.go` | Reassembla chunks de streams paralelos na ordem correta |
+| **Assembler** | `internal/server/assembler.go` | Reassembla chunks de streams paralelos na ordem correta via `GlobalSeq` |
+| **Slot** | `internal/server/slot.go` | Struct tipada por slot paralelo: estado (`Idle`, `Receiving`, `Disconnected`, `Disabled`), offsets, métricas de chunks e flow rotation. Substitui os 12 `sync.Map` anteriores. |
 
 ### 3.3. Módulos Compartilhados
 
@@ -222,6 +223,7 @@ Agent                                      Server
 | ParallelInit | — | C→S | 5 bytes |
 | ParallelJoin | `PJIN` | C→S | variável |
 | ParallelACK | — | S→C | 9 bytes |
+| ChunkHeader (v5) | — | C→S | 9 bytes |
 | ChunkSACK | `CSAK` | S→C | 17 bytes |
 | Health (PING) | `PING` | C→S | 4 bytes |
 | Health (PONG) | — | S→C | 10 bytes |
@@ -232,6 +234,8 @@ Agent                                      Server
 | ControlAdmit | `CADM` | S→C | 5 bytes |
 | ControlDefer | `CDFE` | S→C | 8 bytes |
 | ControlAbort | `CABT` | S→C | 8 bytes |
+| ControlSlotPark | `CSLP` | C→S | 5 bytes |
+| ControlSlotResume | `CSLR` | C→S | 5 bytes |
 
 Para detalhes completos dos frames, veja a [Especificação Técnica](specification.md).
 
@@ -299,11 +303,11 @@ Tentativa N → falha → aguarda min(2^N × initial_delay, max_delay)
 
 #### Parallel Streams (v1.2.3+)
 
-1. Server rastreia `StreamOffsets` por stream via `sync.Map` + `atomic`
+1. Server rastreia offsets por slot via struct `Slot` tipada (pré-alocada com `PreallocateSlots`)
 2. Se stream cai: agent faz `ParallelJoin` novamente com mesmo `StreamIndex`
 3. Server responde `ParallelACK(OK, lastOffset=N)` — resume do offset
 4. Até 3 tentativas por stream; stream morto após esgotar
-5. `StreamReady` channel garante que `StreamWg.Wait()` não retorna antes do primeiro stream conectar
+5. Cada slot possui estado (`Idle`, `Receiving`, `Disconnected`, `Disabled`) e métricas atômicas
 
 ### Job Timeout (v1.2.3+)
 
@@ -429,8 +433,9 @@ n-backup/
 │       ├── assembler.go             #   Reassembly de chunks paralelos
 │       ├── handler.go               #   Protocolo handler + handleControlChannel
 │       ├── server.go                #   TLS listener
+│       ├── slot.go                  #   Slot struct (estado tipado, métricas atômicas, flow rotation)
 │       ├── storage.go               #   Escrita atômica + rotação
-│       └── observability/           #   WebUI + APIs REST
+│       └── observability/           #   WebUI + APIs REST + persistência JSONL de chunks paralelos
 │           ├── http.go              #     Router e handlers
 │           ├── dto.go               #     DTOs de serialização
 │           ├── event_store.go       #     Persistência JSONL de eventos
