@@ -112,7 +112,7 @@ Client                                     Server
 ```
 
 - **Magic**: `0x4E 0x42 0x4B 0x50` ("NBKP")
-- **Ver**: Versão do protocolo (`0x03` — v3 com ClientVersion)
+- **Ver**: Versão do protocolo (`0x05` — v5 com SlotID no ChunkHeader e ControlSlotPark/Resume)
 - **AgentName**: Identificador UTF-8 do agent, delimitado por `\n`
 - **StorageName**: Nome do storage de destino no server, delimitado por `\n`
 - **BackupName**: Nome do backup entry, delimitado por `\n`
@@ -264,18 +264,24 @@ Client                                     Server
 
 O agent faz até **3 tentativas** de reconnect por stream com backoff exponencial (1s, 2s, 4s). Se todas falharem, o stream é marcado como **permanentemente morto**. O backup continua nos streams restantes. Se todos os streams morrerem, o backup falha com `ErrAllStreamsDead`.
 
-#### ChunkHeader Framing
+#### ChunkHeader Framing (v5)
 
 Nos streams paralelos, cada chunk é precedido por um header:
 
 ```
-┌────────────┬──────────┬──────────┐
-│ StreamIndex │ ChunkSeq  │ DataLen   │
-│ 1 byte      │ 4B uint32 │ 4B uint32 │
-└────────────┴──────────┴──────────┘
+┌──────────┬──────────┬────────┐
+│ GlobalSeq │ Length    │ SlotID  │
+│ 4B uint32 │ 4B uint32 │ 1 byte  │
+└──────────┴──────────┴────────┘
 ```
 
-Seguido por `DataLen` bytes de payload. O server usa `StreamIndex` e `ChunkSeq` para reassemblar na ordem correta.
+Total: **9 bytes**.
+
+- **GlobalSeq**: sequência global do chunk (0, 1, 2, ...) — usada pelo server para reassemblar na ordem correta
+- **Length**: tamanho dos dados que seguem (payload)
+- **SlotID**: identifica o slot (stream) que originou o chunk — permite ao server rastrear métricas por slot
+
+Seguido por `Length` bytes de payload.
 
 #### ParallelInit (Client → Server)
 
@@ -359,6 +365,19 @@ storages:
 - **parallels**: `0` desabilita (single stream), `1-255` define o máximo de streams.
 - **auto_scaler**: `efficiency` (threshold-based, padrão) ou `adaptive` (probe-and-measure).
 - **bandwidth_limit**: limite de upload em Bytes/segundo (ex: `50mb`, `1gb`). Mínimo: `64kb`. Vazio = sem limite.
+- **port_rotation** (v3.0.0+): rotação intencional de source port TCP por stream.
+
+  ```yaml
+  backups:
+    - name: "home"
+      parallels: 4
+      port_rotation:
+        mode: "per-n-chunks"    # "off" (padrão) ou "per-n-chunks"
+        chunks_per_cycle: 500   # chunks antes de rotacionar o source port
+  ```
+
+  Quando `mode: "per-n-chunks"`, o agent desconecta e reconecta cada stream após enviar `chunks_per_cycle` chunks, mudando o source port TCP. Útil para evitar throttling por flow em middleboxes.
+
 - **chunk_shard_levels**: `1` (padrão, flat) ou `2` (2 níveis de subdiretórios) — controla a organização dos chunks no staging do assembler.
 - **chunk_fsync**: `false` (padrão). Quando `true`, executa `fsync` a cada write de chunk em staging (lazy e spill), com maior durabilidade e menor throughput.
 
@@ -517,6 +536,34 @@ Sinaliza **explicitamente** ao server que o agent terminou de enviar todos os ch
 
 Enviado pelo agent via canal de controle **imediatamente após o Trailer ser entregue** na sessão paralela.
 
+##### ControlSlotPark (Agent → Server) (v3.0.0+)
+
+```
+┌──────────┬────────┐
+│ "CSLP"   │ SlotID  │
+│ 4 bytes  │ 1 byte  │
+└──────────┴────────┘
+```
+
+- **Magic**: `0x43 0x53 0x4C 0x50` ("CSLP")
+- **SlotID**: índice do slot que está sendo estacionado (scale-down)
+
+Sinaliza ao server que o agent vai parar de enviar chunks por este slot. O server atualiza o estado do slot para `Disabled`.
+
+##### ControlSlotResume (Agent → Server) (v3.0.0+)
+
+```
+┌──────────┬────────┐
+│ "CSLR"   │ SlotID  │
+│ 4 bytes  │ 1 byte  │
+└──────────┴────────┘
+```
+
+- **Magic**: `0x43 0x53 0x4C 0x52` ("CSLR")
+- **SlotID**: índice do slot que está sendo retomado (scale-up)
+
+Sinaliza ao server que o agent vai retomar envio por este slot. O server atualiza o estado do slot de `Disabled` para `Receiving`.
+
 #### RTT EWMA
 
 O RTT é calculado via Exponentially Weighted Moving Average (α = 0.25):
@@ -610,3 +657,5 @@ Veja detalhes completos na seção 3.6 (Control Channel Protocol).
 - Backup incremental / diferencial
 - Deduplicação
 - PKI integrada (certificados gerenciados externamente na v1)
+
+> **Nota (v2.0+):** Interface web/API REST e compressão Zstd já foram implementados.

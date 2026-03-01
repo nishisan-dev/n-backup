@@ -112,7 +112,7 @@ Client                                     Server
 ```
 
 - **Magic**: `0x4E 0x42 0x4B 0x50` ("NBKP")
-- **Ver**: Versão do protocolo (`0x03` — v3 com ClientVersion)
+- **Ver**: Versão do protocolo (`0x05` — v5 com SlotID no ChunkHeader e ControlSlotPark/Resume)
 - **AgentName**: Identificador UTF-8 do agent, delimitado por `\n`
 - **StorageName**: Nome do storage de destino no server, delimitado por `\n`
 - **BackupName**: Nome do backup entry, delimitado por `\n`
@@ -264,18 +264,24 @@ Client                                     Server
 
 O agent faz até **3 tentativas** de reconnect por stream com backoff exponencial (1s, 2s, 4s). Se todas falharem, o stream é marcado como **permanentemente morto**. O backup continua nos streams restantes. Se todos os streams morrerem, o backup falha com `ErrAllStreamsDead`.
 
-#### ChunkHeader Framing
+#### ChunkHeader Framing (v5)
 
 Nos streams paralelos, cada chunk é precedido por um header:
 
 ```
-┌────────────┬──────────┬──────────┐
-│ StreamIndex │ ChunkSeq  │ DataLen   │
-│ 1 byte      │ 4B uint32 │ 4B uint32 │
-└────────────┴──────────┴──────────┘
+┌──────────┬──────────┬────────┐
+│ GlobalSeq │ Length    │ SlotID  │
+│ 4B uint32 │ 4B uint32 │ 1 byte  │
+└──────────┴──────────┴────────┘
 ```
 
-Seguido por `DataLen` bytes de payload. O server usa `StreamIndex` e `ChunkSeq` para reassemblar na ordem correta.
+Total: **9 bytes**.
+
+- **GlobalSeq**: sequência global do chunk (0, 1, 2, ...) — usada pelo server para reassemblar na ordem correta
+- **Length**: tamanho dos dados que seguem (payload)
+- **SlotID**: identifica o slot (stream) que originou o chunk — permite ao server rastrear métricas por slot
+
+Seguido por `Length` bytes de payload.
 
 #### ParallelInit (Client → Server)
 
@@ -357,6 +363,19 @@ backups:
   - Para single-stream: aplicado sobre o buffer de escrita antes do hash inline.
   - Para parallel-stream: aplicado sobre o fluxo agregado antes da distribuição pelo Dispatcher.
   - Implementado via Token Bucket (`golang.org/x/time/rate`).
+- **port_rotation** (v3.0.0+): rotação intencional de source port TCP por stream.
+
+  ```yaml
+  backups:
+    - name: "home"
+      parallels: 4
+      port_rotation:
+        mode: "per-n-chunks"    # "off" (padrão) ou "per-n-chunks"
+        chunks_per_cycle: 500   # chunks antes de rotacionar o source port
+  ```
+
+  Quando `mode: "per-n-chunks"`, o agent desconecta e reconecta cada stream após enviar `chunks_per_cycle` chunks, mudando o source port TCP. Útil para evitar throttling por flow em middleboxes e balanceadores de carga.
+
 - **chunk_shard_levels** (server-side): controla a organização dos chunks no staging do assembler.
 
   ```yaml
@@ -535,6 +554,34 @@ Enviado periodicamente junto com ControlPing. O server armazena as métricas na 
 Sinaliza **explicitamente** ao server que o agent terminou de enviar todos os chunks com sucesso na sessão paralela. Permite que o server acione commit e rotação sem aguardar EOF/timeout.
 
 Enviado pelo agent via canal de controle **imediatamente após o Trailer ser entregue** na sessão paralela.
+
+##### ControlSlotPark (Agent → Server) (v3.0.0+)
+
+```
+┌──────────┬────────┐
+│ "CSLP"   │ SlotID  │
+│ 4 bytes  │ 1 byte  │
+└──────────┴────────┘
+```
+
+- **Magic**: `0x43 0x53 0x4C 0x50` ("CSLP")
+- **SlotID**: índice do slot que está sendo estacionado (scale-down)
+
+Sinaliza ao server que o agent vai parar de enviar chunks por este slot. O server atualiza o estado do slot para `Disabled`.
+
+##### ControlSlotResume (Agent → Server) (v3.0.0+)
+
+```
+┌──────────┬────────┐
+│ "CSLR"   │ SlotID  │
+│ 4 bytes  │ 1 byte  │
+└──────────┴────────┘
+```
+
+- **Magic**: `0x43 0x53 0x4C 0x52` ("CSLR")
+- **SlotID**: índice do slot que está sendo retomado (scale-up)
+
+Sinaliza ao server que o agent vai retomar envio por este slot. O server atualiza o estado do slot de `Disabled` para `Receiving`.
 
 #### RTT EWMA
 
@@ -826,6 +873,6 @@ nbackup-agent cert gen-host --name web-server-01
 - Restore via CLI (extrair manualmente com `tar xzf`)
 - Backup incremental / diferencial
 - Deduplicação
-- Interface web / API REST
 - PKI integrada (certificados gerenciados externamente na v1)
-- Compressão Zstd (gzip na v1 para compatibilidade)
+
+> **Nota (v2.0+):** Interface web/API REST e compressão Zstd já foram implementados.
