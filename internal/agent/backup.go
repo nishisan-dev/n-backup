@@ -458,6 +458,14 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 		PrimaryConn:    conn,
 		OnStreamChange: onStreamChange,
 		ChunksPerCycle: entry.PortRotation.ChunksPerCycle,
+		SACKTimeoutFn: func() time.Duration {
+			rtt := controlCh.RTT()
+			timeout := rtt * 3
+			if timeout < sackTimeoutMin {
+				timeout = sackTimeoutMin
+			}
+			return timeout
+		},
 	})
 	defer dispatcher.Close()
 

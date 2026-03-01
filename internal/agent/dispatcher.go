@@ -35,6 +35,10 @@ const (
 
 	// maxBackoff é o teto do backoff exponencial.
 	maxBackoff = 30 * time.Second
+
+	// sackTimeoutMin é o timeout mínimo entre ChunkSACKs antes de considerar a conn morta.
+	// O timeout efetivo é max(controlChannelRTT × 3, sackTimeoutMin).
+	sackTimeoutMin = 5 * time.Second
 )
 
 // ErrAllStreamsDead indica que todos os streams paralelos morreram permanentemente.
@@ -81,7 +85,8 @@ type Dispatcher struct {
 	// Consultado apenas no caminho de retransmissão (raro), não impacta performance normal.
 	chunkMap       map[uint32]chunkLocation
 	chunkMapMu     sync.RWMutex
-	chunksPerCycle int // per-N-chunk rotation (0=desabilitado)
+	chunksPerCycle int                  // per-N-chunk rotation (0=desabilitado)
+	sackTimeoutFn  func() time.Duration // retorna timeout efetivo para SACK (injeta RTT externo)
 }
 
 // ParallelStream representa um stream individual com seu ring buffer e conexão.
@@ -113,6 +118,10 @@ type ParallelStream struct {
 	// Per-N-chunk rotation: contador de chunks enviados com sucesso desde
 	// a última rotação. Protegido pelo sender goroutine (single-writer).
 	chunksSinceRotation int32
+
+	// lastSACKAt armazena o unix nanos do último ChunkSACK recebido neste stream.
+	// Usado para detectar conexões mortas (SACK timeout). Valor 0 = nenhum SACK ainda.
+	lastSACKAt atomic.Int64
 }
 
 type retransmitSpan struct {
@@ -143,6 +152,7 @@ type DispatcherConfig struct {
 	OnStreamChange func(active, max int) // callback para notificar mudanças de streams
 	DSCPValue      int                   // DSCP code point (0=desabilitado)
 	ChunksPerCycle int                   // per-N-chunk rotation (0=desabilitado)
+	SACKTimeoutFn  func() time.Duration  // fornece timeout dinâmico (ex: max(rtt*3, 5s))
 }
 
 // NewDispatcher cria um novo Dispatcher.
@@ -161,6 +171,7 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 		onStreamChange: cfg.OnStreamChange,
 		dscpValue:      cfg.DSCPValue,
 		chunksPerCycle: cfg.ChunksPerCycle,
+		sackTimeoutFn:  cfg.SACKTimeoutFn,
 		lastSampleAt:   time.Now(),
 		pending:        make([]byte, cfg.ChunkSize),
 		pendingLen:     0,
@@ -655,6 +666,7 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 				stream.sendMu.Lock()
 				stream.resumeFromWireOffsetLocked(resumeOffset)
 				stream.sendMu.Unlock()
+				stream.lastSACKAt.Store(time.Now().UnixNano()) // reset SACK timer após reconexão
 
 				d.logger.Info("stream reconnected, resuming from offset",
 					"stream", streamIdx, "offset", resumeOffset,
@@ -669,6 +681,30 @@ func (d *Dispatcher) startSenderWithRetry(streamIdx int) {
 			stream.sendMu.Lock()
 			stream.advanceNormalLocked(int64(len(frame)))
 			stream.sendMu.Unlock()
+
+			// SACK timeout: se o agent enviou chunks mas nenhum SACK chegou no período,
+			// a conn está morta. Fecha a conn para que o próximo writeFrame falhe e
+			// entre no retry loop.
+			if d.sackTimeoutFn != nil {
+				last := stream.lastSACKAt.Load()
+				if last > 0 {
+					elapsed := time.Since(time.Unix(0, last))
+					if elapsed > d.sackTimeoutFn() {
+						d.logger.Warn("SACK timeout exceeded, closing connection for retry",
+							"stream", streamIdx,
+							"elapsed", elapsed,
+							"timeout", d.sackTimeoutFn(),
+						)
+						stream.connMu.Lock()
+						if stream.conn != nil {
+							stream.conn.Close()
+						}
+						stream.connMu.Unlock()
+						// Não avançamos — o próximo writeFrame vai falhar → retry
+						continue
+					}
+				}
+			}
 
 			// Per-N-chunk rotation: após enviar N chunks com sucesso,
 			// desconecta e reconecta para mudar o source port TCP.
@@ -761,6 +797,9 @@ func (d *Dispatcher) reconnectStream(streamIdx int) (int64, error) {
 	stream.conn = tlsConn
 	stream.connMu.Unlock()
 
+	// Reset SACK timer para a nova conexão
+	stream.lastSACKAt.Store(time.Now().UnixNano())
+
 	// Reinicia o ACK reader para a nova conexão
 	d.startACKReader(streamIdx)
 
@@ -782,6 +821,9 @@ func (d *Dispatcher) startACKReader(streamIdx int) {
 			if err != nil {
 				return // conn fechada ou erro — sender tratará a reconexão
 			}
+
+			// Atualiza o SACK timer para este stream — detecta conn morta
+			stream.lastSACKAt.Store(time.Now().UnixNano())
 
 			newWireOffset := int64(csack.Offset)
 			stream.sendMu.Lock()
@@ -868,6 +910,7 @@ func (d *Dispatcher) ActivateStream(streamIdx int) error {
 	stream.connMu.Unlock()
 
 	stream.active.Store(true)
+	stream.lastSACKAt.Store(time.Now().UnixNano()) // inicia SACK timer
 	atomic.AddInt32(&d.activeCount, 1)
 
 	// Inicia sender com retry e ACK reader
