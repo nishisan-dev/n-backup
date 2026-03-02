@@ -448,6 +448,13 @@ func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath
 		return "write_error", dataSize
 	}
 
+	// Archive pre-Rotate: envia backups que SERÃO deletados pelo Rotate
+	// (antes da deleção, para que os arquivos ainda existam no disco).
+	if hasArchiveBuckets(storageInfo.Buckets) {
+		candidates, _ := ListRotationCandidates(writer.AgentDir(), storageInfo.MaxBackups)
+		h.runArchivePreRotate(storageInfo, candidates, writer.AgentDir(), logger)
+	}
+
 	// Rotação
 	removed, err := Rotate(writer.AgentDir(), storageInfo.MaxBackups)
 	if err != nil {
@@ -460,8 +467,8 @@ func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath
 		}
 	}
 
-	// Object Storage pós-commit (sync/offload/archive)
-	// Offload bloqueia até upload confirmado; sync/archive são fire-and-forget.
+	// Object Storage pós-commit (sync/offload — archive já tratado acima)
+	// Offload bloqueia até upload confirmado; sync é fire-and-forget.
 	h.runPostCommitSync(storageInfo, finalPath, removed, writer.AgentDir(), logger)
 
 	logger.Info("backup committed",

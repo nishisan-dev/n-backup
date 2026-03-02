@@ -88,6 +88,27 @@ func (w *AtomicWriter) AgentName() string {
 // Rotate remove backups excedentes, mantendo os maxBackups mais recentes.
 // Retorna a lista de nomes de arquivos removidos para auditoria/eventos.
 func Rotate(agentDir string, maxBackups int) ([]string, error) {
+	candidates, err := ListRotationCandidates(agentDir, maxBackups)
+	if err != nil {
+		return nil, err
+	}
+
+	var removed []string
+	for _, name := range candidates {
+		path := filepath.Join(agentDir, name)
+		if err := os.Remove(path); err != nil {
+			return removed, fmt.Errorf("removing old backup %s: %w", name, err)
+		}
+		removed = append(removed, name)
+	}
+
+	return removed, nil
+}
+
+// ListRotationCandidates retorna os nomes dos backups que SERIAM removidos
+// pelo Rotate, sem efetivamente deletá-los. Usado pelo archive mode para
+// enviar backups ao bucket ANTES da deleção local.
+func ListRotationCandidates(agentDir string, maxBackups int) ([]string, error) {
 	if maxBackups <= 0 {
 		return nil, nil
 	}
@@ -97,7 +118,6 @@ func Rotate(agentDir string, maxBackups int) ([]string, error) {
 		return nil, fmt.Errorf("reading agent directory: %w", err)
 	}
 
-	// Filtra apenas arquivos de backup (.tar.gz e .tar.zst)
 	var backups []string
 	for _, e := range entries {
 		if !e.IsDir() && isBackupFile(e.Name()) {
@@ -105,23 +125,13 @@ func Rotate(agentDir string, maxBackups int) ([]string, error) {
 		}
 	}
 
-	// Ordena por nome (timestamp → ordem cronológica natural)
 	sort.Strings(backups)
 
-	// Remove os mais antigos que excedam o limite
-	var removed []string
 	if len(backups) > maxBackups {
-		toRemove := backups[:len(backups)-maxBackups]
-		for _, name := range toRemove {
-			path := filepath.Join(agentDir, name)
-			if err := os.Remove(path); err != nil {
-				return removed, fmt.Errorf("removing old backup %s: %w", name, err)
-			}
-			removed = append(removed, name)
-		}
+		return backups[:len(backups)-maxBackups], nil
 	}
 
-	return removed, nil
+	return nil, nil
 }
 
 // isBackupFile verifica se o nome do arquivo é um backup válido (.tar.gz ou .tar.zst).
