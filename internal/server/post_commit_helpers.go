@@ -34,15 +34,72 @@ func defaultBackendFactory(cfg config.BucketConfig) (objstore.Backend, error) {
 	})
 }
 
-// runPostCommitSync executa as operações de Object Storage pós-commit.
-// É no-op quando não há buckets configurados.
-// Modos bloqueantes (offload) são aguardados antes do retorno.
-func (h *Handler) runPostCommitSync(storageInfo config.StorageInfo, finalPath string, rotatedFiles []string, agentDir string, logger *slog.Logger) {
-	if len(storageInfo.Buckets) == 0 {
+// filterBucketsByMode retorna apenas os buckets que NÃO são do modo informado.
+func filterBucketsExcluding(buckets []config.BucketConfig, excludeMode string) []config.BucketConfig {
+	var result []config.BucketConfig
+	for _, b := range buckets {
+		if b.Mode != excludeMode {
+			result = append(result, b)
+		}
+	}
+	return result
+}
+
+// filterBucketsByMode retorna apenas os buckets do modo informado.
+func filterBucketsByMode(buckets []config.BucketConfig, mode string) []config.BucketConfig {
+	var result []config.BucketConfig
+	for _, b := range buckets {
+		if b.Mode == mode {
+			result = append(result, b)
+		}
+	}
+	return result
+}
+
+// hasArchiveBuckets retorna true se algum bucket é modo archive.
+func hasArchiveBuckets(buckets []config.BucketConfig) bool {
+	for _, b := range buckets {
+		if b.Mode == config.BucketModeArchive {
+			return true
+		}
+	}
+	return false
+}
+
+// runArchivePreRotate executa uploads de archive ANTES do Rotate local.
+// Necessário porque o Rotate deleta os arquivos — archive precisa deles intactos.
+// archiveCandidates: nomes dos arquivos que SERÃO deletados pelo Rotate.
+func (h *Handler) runArchivePreRotate(storageInfo config.StorageInfo, archiveCandidates []string, agentDir string, logger *slog.Logger) {
+	archiveBuckets := filterBucketsByMode(storageInfo.Buckets, config.BucketModeArchive)
+	if len(archiveBuckets) == 0 || len(archiveCandidates) == 0 {
 		return
 	}
 
-	o, err := NewPostCommitOrchestrator(storageInfo.Buckets, defaultBackendFactory, logger)
+	o, err := NewPostCommitOrchestrator(archiveBuckets, defaultBackendFactory, logger)
+	if err != nil {
+		logger.Error("failed to create archive orchestrator", "error", err)
+		return
+	}
+	if o == nil {
+		return
+	}
+
+	// Para archive, finalPath não é usado (archive só envia rotatedFiles).
+	// Passamos os candidates como rotatedFiles; eles ainda existem no disco.
+	results := o.Execute(context.Background(), "", archiveCandidates, agentDir)
+	h.logPostCommitResults(results, logger)
+}
+
+// runPostCommitSync executa operações de sync e offload pós-commit.
+// Archive é excluído pois já foi tratado por runArchivePreRotate.
+func (h *Handler) runPostCommitSync(storageInfo config.StorageInfo, finalPath string, rotatedFiles []string, agentDir string, logger *slog.Logger) {
+	// Filtra archive — já tratado antes do Rotate
+	buckets := filterBucketsExcluding(storageInfo.Buckets, config.BucketModeArchive)
+	if len(buckets) == 0 {
+		return
+	}
+
+	o, err := NewPostCommitOrchestrator(buckets, defaultBackendFactory, logger)
 	if err != nil {
 		logger.Error("failed to create post-commit orchestrator", "error", err)
 		return
@@ -52,6 +109,11 @@ func (h *Handler) runPostCommitSync(storageInfo config.StorageInfo, finalPath st
 	}
 
 	results := o.Execute(context.Background(), finalPath, rotatedFiles, agentDir)
+	h.logPostCommitResults(results, logger)
+}
+
+// logPostCommitResults registra resultados e emite eventos para a WebUI.
+func (h *Handler) logPostCommitResults(results []PostCommitResult, logger *slog.Logger) {
 	for _, r := range results {
 		if !r.Success {
 			logger.Error("post-commit bucket operation failed",
