@@ -147,6 +147,7 @@ O **n-backup** é um sistema de backup client-server de alta performance escrito
 | **Protocol** | `internal/protocol/` | Frames binários (Handshake, ACK, SACK, Resume, Parallel, Control) |
 | **PKI** | `internal/pki/` | Configuração TLS client/server, carregamento de certificados |
 | **Logging** | `internal/logging/` | Factory de `slog.Logger` (JSON/text, nível configurável) |
+| **Object Store** | `internal/objstore/` | Interface `Backend` (Upload, Delete, List) + implementação S3 via AWS SDK v2 |
 
 ---
 

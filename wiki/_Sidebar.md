@@ -7,6 +7,7 @@
 - [[Especificação Técnica|Especificacao-Tecnica]]
 - [[Configuração de Exemplo|Configuracao-de-Exemplo]]
 - [[Cenários de Configuração|Cenarios-de-Configuracao]]
+- [[Object Storage|Object-Storage]]
 - [[WebUI]]
 - [[FAQ]]
 
