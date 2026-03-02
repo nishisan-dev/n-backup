@@ -11,6 +11,26 @@ e o versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v3.1.0] — 2026-03-01
+
+Release estável da linha v3.x. Resolve a causa raiz de chunks faltantes em shutdowns prematuros.
+
+### Adicionado
+- **Final ChunkSACK Drain**: o agent agora aguarda `rb.Tail() == rb.Head()` (confirmação real do server via `ChunkSACK`) em todos os streams **antes** de enviar `ControlIngestionDone`. Anteriormente, o sender declarava sucesso quando `conn.Write()` retornava — sem garantia de que o server realmente recebeu todos os bytes. Se o drain não completar no timeout (baseado em RTT × SACK timeout), o agent reconecta, revalida o offset e retransmite os bytes pendentes. Se max retries for excedido, o backup aborta explicitamente no agent, em vez de produzir gaps silenciosos no server.
+- **Helper `HasUnackedData()`**: indica se um `ParallelStream` ainda possui bytes escritos mas não confirmados por `ChunkSACK`.
+- **`waitForFinalDrain()`**: loop de espera com reconnect e retry para drenagem completa antes do shutdown.
+- **`syncStreamAfterReconnect()`**: validação de alinhamento de `ChunkHeader` no `resumeOffset` após reconexão, com detecção de dessincronização.
+- **`abortSenders` flag**: sinal atômico `atomic.Bool` para interromper waits e retries pendentes durante shutdown do dispatcher.
+- **Script `scripts/check-missing-chunks.py`**: parser de session logs do server que identifica gaps de chunks faltantes para diagnóstico post-mortem.
+
+### Alterado
+- **ParallelJoin com JoinReason Flags**: o frame `PJIN` (v3.0.0+) agora inclui 1 byte de flags após o `StreamIndex`. Valores aceitos: `JoinReasonNone` (`0x00` — first-join ou reconexão por erro) e `JoinReasonRotation` (`0x01` — reconexão intencional por port rotation). O server utiliza esse flag para distinguir reconnects por falha de rotações de porta planejadas, evitando accountar erroneamente eventos de port rotation como falhas de stream.
+
+### Motivação
+> Na sessão de backup real, 5 chunks ficaram faltando porque o agent enviou `ControlIngestionDone` antes de o server confirmar via `ChunkSACK` que todos os bytes tinham sido recebidos. O `conn.Write()` local retornava sucesso, mas bytes ainda estavam em voo quando a conexão foi resetada. O Final ChunkSACK Drain garante que o shutdown só ocorre após confirmação real do server, eliminando essa classe de falhas.
+
+---
+
 ## [v3.0.1] — 2026-03-01
 
 Bugfix de SACK timeout false-positive no startup e correção da rotação de portas.

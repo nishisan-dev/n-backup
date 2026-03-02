@@ -40,6 +40,8 @@ Sistema de backup **high-performance** client-server escrito em Go. Streaming di
 | **Per-N-Chunk Port Rotation** | Rotação intencional de source port TCP por stream após N chunks, evitando throttling por flow em middleboxes. |
 | **RTT Metrics** | RTT EWMA contínuo via control channel, com status do server (carga, disco). |
 | **Prometheus Metrics** | Endpoint `/metrics` compatível com Prometheus para bytes recebidos e sessões. |
+| **Final ChunkSACK Drain** | Agent aguarda confirmação real do server (`ChunkSACK`) antes de declarar sucesso. Elimina chunks faltantes em shutdowns prematuros. |
+| **Diagnostic Script** | Script `check-missing-chunks.py` para análise post-mortem de gaps em session logs. |
 | **Rotação Automática** | Server mantém os N backups mais recentes por agent/storage. |
 | **Retry Exponential** | Reconexão automática com backoff exponencial configurável. |
 | **Named Storages** | Múltiplos storages no server com políticas de rotação independentes. |
