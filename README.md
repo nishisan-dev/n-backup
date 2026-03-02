@@ -48,6 +48,7 @@ Sistema de backup **high-performance** client-server escrito em Go. Streaming di
 | **Progress Bar** | Visualização de progresso em backups manuais (MB/s, ETA, retries). |
 | **Schedule por Backup** | Cada backup entry possui sua própria cron expression. |
 | **Hot Reload (SIGHUP)** | Recarrega configuração sem downtime via `systemctl reload`. |
+| **Object Storage** | Upload automático pós-commit para S3/MinIO com modos sync, offload e archive. Múltiplos buckets em paralelo. |
 | **Stats Reporter** | Agent e server emitem métricas periódicas de conexões, throughput e sessões ativas. |
 
 ---
