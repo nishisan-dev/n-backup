@@ -1025,6 +1025,192 @@ backups:
 	}
 }
 
+func TestLoadServerConfig_BucketValidSync(t *testing.T) {
+	content := validServerYAMLBase + `
+    buckets:
+      - name: s3-mirror
+        provider: s3
+        bucket: my-bucket
+        mode: sync
+        credentials:
+          access_key_env: AWS_ACCESS_KEY_ID
+          secret_key_env: AWS_SECRET_ACCESS_KEY
+`
+	cfgPath := writeTempConfig(t, content)
+	cfg, err := LoadServerConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s, _ := cfg.GetStorage("default")
+	if len(s.Buckets) != 1 {
+		t.Fatalf("expected 1 bucket, got %d", len(s.Buckets))
+	}
+	if s.Buckets[0].Mode != BucketModeSync {
+		t.Errorf("expected mode sync, got %q", s.Buckets[0].Mode)
+	}
+	if s.Buckets[0].Region != "us-east-1" {
+		t.Errorf("expected default region us-east-1, got %q", s.Buckets[0].Region)
+	}
+}
+
+func TestLoadServerConfig_BucketMissingName(t *testing.T) {
+	content := validServerYAMLBase + `
+    buckets:
+      - provider: s3
+        bucket: my-bucket
+        mode: sync
+        credentials:
+          access_key_env: A
+          secret_key_env: B
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadServerConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for missing bucket name")
+	}
+}
+
+func TestLoadServerConfig_BucketInvalidMode(t *testing.T) {
+	content := validServerYAMLBase + `
+    buckets:
+      - name: test
+        provider: s3
+        bucket: my-bucket
+        mode: magic
+        credentials:
+          access_key_env: A
+          secret_key_env: B
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadServerConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for invalid bucket mode")
+	}
+}
+
+func TestLoadServerConfig_BucketSyncWithRetain(t *testing.T) {
+	content := validServerYAMLBase + `
+    buckets:
+      - name: test
+        provider: s3
+        bucket: my-bucket
+        mode: sync
+        retain: 5
+        credentials:
+          access_key_env: A
+          secret_key_env: B
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadServerConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for sync mode with retain set")
+	}
+}
+
+func TestLoadServerConfig_BucketOffloadMissingRetain(t *testing.T) {
+	content := validServerYAMLBase + `
+    buckets:
+      - name: test
+        provider: s3
+        bucket: my-bucket
+        mode: offload
+        credentials:
+          access_key_env: A
+          secret_key_env: B
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadServerConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for offload mode without retain")
+	}
+}
+
+func TestLoadServerConfig_BucketArchiveValid(t *testing.T) {
+	content := validServerYAMLBase + `
+    buckets:
+      - name: cold
+        provider: s3
+        bucket: cold-backups
+        prefix: "scripts/"
+        mode: archive
+        retain: 30
+        credentials:
+          access_key_env: A
+          secret_key_env: B
+`
+	cfgPath := writeTempConfig(t, content)
+	cfg, err := LoadServerConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s, _ := cfg.GetStorage("default")
+	if s.Buckets[0].Retain != 30 {
+		t.Errorf("expected retain 30, got %d", s.Buckets[0].Retain)
+	}
+}
+
+func TestLoadServerConfig_BucketDuplicateName(t *testing.T) {
+	content := validServerYAMLBase + `
+    buckets:
+      - name: dup
+        provider: s3
+        bucket: b1
+        mode: sync
+        credentials:
+          access_key_env: A
+          secret_key_env: B
+      - name: dup
+        provider: s3
+        bucket: b2
+        mode: offload
+        retain: 5
+        credentials:
+          access_key_env: A
+          secret_key_env: B
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadServerConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for duplicate bucket name")
+	}
+}
+
+func TestLoadServerConfig_BucketMissingCredentials(t *testing.T) {
+	content := validServerYAMLBase + `
+    buckets:
+      - name: test
+        provider: s3
+        bucket: my-bucket
+        mode: sync
+        credentials:
+          access_key_env: ""
+          secret_key_env: B
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadServerConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for empty access_key_env")
+	}
+}
+
+func TestLoadServerConfig_BucketInvalidProvider(t *testing.T) {
+	content := validServerYAMLBase + `
+    buckets:
+      - name: test
+        provider: gcs
+        bucket: my-bucket
+        mode: sync
+        credentials:
+          access_key_env: A
+          secret_key_env: B
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadServerConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for unsupported provider")
+	}
+}
+
 func writeTempConfig(t *testing.T, content string) string {
 	t.Helper()
 	dir := t.TempDir()
