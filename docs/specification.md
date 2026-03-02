@@ -706,7 +706,40 @@ chunk_buffer:
   drain_ratio: 0.5     # 0.0 = write-through | 0.5 = drena a 50% | 1.0 = drena quando cheio
 ```
 
-### 4.3 Rotação por Índice (Server)
+### 4.3 Object Storage Pós-Commit (Server)
+
+O server pode enviar backups automaticamente para destinos de Object Storage S3-compatible após o commit local. Configuração na seção `buckets` de cada storage:
+
+```yaml
+storages:
+  scripts:
+    base_dir: /var/backups/scripts
+    max_backups: 5
+    buckets:
+      - name: s3-mirror
+        provider: s3
+        region: us-east-1
+        bucket: my-backup-bucket
+        prefix: "scripts/"
+        mode: sync            # sync | offload | archive
+        credentials:
+          access_key_env: AWS_ACCESS_KEY_ID
+          secret_key_env: AWS_SECRET_ACCESS_KEY
+```
+
+#### Modos
+
+| Modo | Comportamento | `retain` | Bloqueia FinalACK |
+|------|--------------|----------|-------------------|
+| `sync` | Upload + espelha deletes do Rotate | Proibido | Não |
+| `offload` | Upload + deleta local | Obrigatório | **Sim** |
+| `archive` | Upload apenas dos deletados pelo Rotate | Obrigatório | Não |
+
+- Credenciais via variáveis de ambiente (nunca inline no YAML).
+- Retry: 3 tentativas com backoff exponencial (1s → 4s → 16s).
+- Múltiplos buckets por storage executam em paralelo.
+
+### 4.4 Rotação por Índice (Server)
 
 O server organiza os backups por agent e mantém no máximo `max_backups`:
 
