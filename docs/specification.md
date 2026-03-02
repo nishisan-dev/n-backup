@@ -302,13 +302,22 @@ Enviado imediatamente após o ACK GO na conexão primária:
 Enviado em uma **nova conexão TLS** para unir-se a uma sessão existente:
 
 ```
-┌──────────┬────────────────┬───────┬────────────┐
-│ "PJIN"   │ SessionID (UTF8)│ '\n'  │ StreamIndex │
-│ 4 bytes  │ variável        │ 1B    │ 1 byte      │
-└──────────┴────────────────┴───────┴────────────┘
+┌──────────┬────────────────┬───────┬────────────┬───────┐
+│ "PJIN"   │ SessionID (UTF8)│ '\n'  │ StreamIndex │ Flags │
+│ 4 bytes  │ variável        │ 1B    │ 1 byte      │ 1 byte│
+└──────────┴────────────────┴───────┴────────────┴───────┘
 ```
 
 Usado tanto para **first-join** quanto para **re-join** (resume após queda).
+
+##### JoinReason Flags (v3.1.0+)
+
+| Flag | Valor | Significado |
+|------|-------|-------------|
+| `JoinReasonNone` | `0x00` | First-join ou reconexão por erro |
+| `JoinReasonRotation` | `0x01` | Reconexão intencional por port rotation |
+
+O byte `Flags` permite ao server distinguir reconexões por falha de rede de rotações intencionais de porta (`per-n-chunks`). Clients que não enviam o byte de flags são interpretados como `JoinReasonNone` (backward-compatible).
 
 #### ParallelACK (Server → Client)
 
@@ -785,7 +794,42 @@ O daemon responde a `SIGTERM` e `SIGINT`:
 - Se ocioso: shutdown imediato.
 - Se backup em andamento: aguarda conclusão ou timeout configurável antes de abortar.
 
-### 5.6 Control Channel (v1.3.8+)
+#### Final ChunkSACK Drain (v3.1.0+)
+
+Antes de enviar `ControlIngestionDone`, o agent garante que **todos os bytes de todos os streams foram confirmados pelo server** via `ChunkSACK`.
+
+Condição de sucesso por stream: `rb.Tail() == rb.Head()` — nenhum byte pendente no `RingBuffer`.
+
+Fluxo:
+
+1. Produtor termina e chama `dispatcher.Flush()` + `dispatcher.Close()`
+2. Cada sender detecta EOF lógico (`ErrBufferClosed`)
+3. Se `HasUnackedData()` retornar `true`, o sender entra em **final drain wait**
+4. O ACK reader continua processando `ChunkSACK` e avançando `rb.Tail()`
+5. Se `rb.Tail() == rb.Head()` dentro do timeout: sender retorna `nil` (sucesso)
+6. Se timeout expirar com dados pendentes:
+   - Reconecta via `ParallelJoin` com `JoinReasonNone`
+   - Valida alinhamento do `ChunkHeader` no `resumeOffset` (`syncStreamAfterReconnect`)
+   - Retransmite bytes pendentes
+7. Após max retries: stream marcado como morto, backup aborta explicitamente no agent
+8. `WaitAllSenders()` só retorna `nil` quando todos os streams completaram o drain
+9. Só então o agent envia `ControlIngestionDone`
+
+O timeout do drain é baseado em `sackTimeoutFn()` (RTT EWMA), com mínimo de 5 segundos.
+
+> **Motivação:** Em produção, chunks ficavam faltantes porque `conn.Write()` retornava sucesso mas o server não tinha recebido os bytes (connection reset em voo). O Final Drain elimina essa classe de falhas.
+
+### 5.6 SACK Timeout per-stream (v3.0.0+)
+
+Cada `ParallelStream` mantém um timestamp `lastSACKAt` atualizado a cada `ChunkSACK` recebido. O sender goroutine verifica periodicamente se `time.Since(lastSACKAt) > sackTimeout`. Se excedido, o stream é considerado morto e a conexão é fechada, acionando o fluxo de retry e reconexão.
+
+O timeout efetivo é o maior entre:
+- **5 segundos** (mínimo absoluto)
+- Valor derivado do RTT EWMA via `sackTimeoutFn()`
+
+`lastSACKAt` é inicializado no primeiro `writeFrame` bem-sucedido (não no `ActivateStream`), evitando false-positives durante o startup sequencial dos streams.
+
+### 5.7 Control Channel (v1.3.8+)
 
 O agent mantém uma conexão TLS persistente com o server para keep-alive e orquestração:
 
@@ -822,6 +866,8 @@ n-backup/
 ├── configs/
 │   ├── agent.example.yaml
 │   └── server.example.yaml
+├── scripts/
+│   └── check-missing-chunks.py   # Parser de session logs para identificar gaps de chunks
 ├── planning/
 ├── go.mod
 ├── go.sum

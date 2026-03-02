@@ -102,7 +102,7 @@ O **n-backup** é um sistema de backup client-server de alta performance escrito
 | **Streamer** | `internal/agent/streamer.go` | Pipeline `tar.Writer → pgzip.Writer → io.Pipe`, calcula SHA-256 inline |
 | **RingBuffer** | `internal/agent/ringbuffer.go` | Buffer circular em memória (default 256MB), backpressure, suporte a resume |
 | **Backup** | `internal/agent/backup.go` | Orquestrador: conecta, handshake, decide single/parallel, conn primária control-only (parallel) |
-| **Dispatcher** | `internal/agent/dispatcher.go` | Round-robin de chunks, retry/reconnect por stream com backoff, dead stream marking |
+| **Dispatcher** | `internal/agent/dispatcher.go` | Round-robin de chunks, retry/reconnect por stream com backoff, dead stream marking, Final ChunkSACK Drain antes de shutdown, SACK timeout per-stream |
 | **AutoScaler** | `internal/agent/autoscaler.go` | Escala streams dinamicamente com histerese baseada em eficiência |
 | **Progress** | `internal/agent/progress.go` | Barra de progresso para modo `--once --progress` (MB/s, ETA, retries) |
 | **ControlChannel** | `internal/agent/control_channel.go` | Conexão TLS persistente com keep-alive (PING/PONG), RTT EWMA, recepção de ControlRotate para drenagem graceful de streams |
@@ -319,6 +319,16 @@ O scheduler configura `context.WithTimeout(24h)` por job, prevenindo zombie jobs
 - Se ocioso: shutdown imediato
 - Se backup em andamento: aguarda conclusão antes de encerrar
 
+#### Final ChunkSACK Drain (v3.1.0+)
+
+Antes de enviar `ControlIngestionDone`, o dispatcher entra em fase de **final drain**: cada sender verifica se `rb.Tail() == rb.Head()` (todos os bytes confirmados por `ChunkSACK`). Se houver dados pendentes, aguarda com timeout baseado em RTT. Se o timeout expirar, reconecta e retransmite. O backup só é abortado se max retries for excedido — nunca encerra com gaps silenciosos.
+
+O flag `abortSenders` (`atomic.Bool`) permite cancellation imediata de todos os waits e retries pendentes durante shutdown externo.
+
+#### SACK Timeout per-stream (v3.0.0+)
+
+Cada `ParallelStream` possui `lastSACKAt` (timestamp do último `ChunkSACK`). Se exceder o timeout (mínimo 5s, escalado por RTT), o stream é considerado morto e reconecta automaticamente.
+
 ### Control Channel (v1.3.8+)
 
 O agent mantém uma conexão TLS persistente com o server (magic `CTRL`) para:
@@ -414,7 +424,7 @@ n-backup/
 │   │   ├── backup.go                #   Orquestrador de backup
 │   │   ├── control_channel.go       #   Canal de controle persistente (PING/PONG, RTT, ControlRotate)
 │   │   ├── daemon.go                #   Daemon loop com graceful shutdown
-│   │   ├── dispatcher.go            #   Round-robin de chunks
+│   │   ├── dispatcher.go            #   Round-robin de chunks + Final ChunkSACK Drain + SACK timeout
 │   │   ├── progress.go              #   Progress bar (--once)
 │   │   ├── ringbuffer.go            #   Ring buffer para resume
 │   │   ├── scanner.go               #   fs.WalkDir com glob
@@ -455,6 +465,8 @@ n-backup/
 │   ├── deb/                         #   Metadados DEBIAN
 │   ├── systemd/                     #   Units do systemd
 │   └── man/                         #   Man pages
+├── scripts/
+│   └── check-missing-chunks.py      #   Parser de session logs para gaps de chunks
 ├── planning/                         # Artefatos de planejamento
 ├── go.mod
 ├── go.sum
