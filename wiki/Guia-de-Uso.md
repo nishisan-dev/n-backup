@@ -591,7 +591,34 @@ storages:
     assembler_pending_mem_limit: 64mb
 ```
 
-Notas:
 - Defaults por storage: `assembler_mode: eager` e `assembler_pending_mem_limit: 8mb`.
 - Em `lazy`, `assembler_pending_mem_limit` não é utilizado.
 - Se houver pressão de memória no host, reduza `assembler_pending_mem_limit` ou mude para `lazy`.
+
+---
+
+## Ferramentas de Diagnóstico
+
+### check-missing-chunks.py (v3.1.0+)
+
+Script Python para análise post-mortem de session logs do server. Identifica gaps na sequência de `GlobalSeq`, reportando chunks faltantes que podem indicar problemas de transferência.
+
+#### Uso
+
+```bash
+python3 scripts/check-missing-chunks.py /var/log/nbackup-server/session-*.log
+```
+
+#### Saída esperada
+
+```
+Session abc123:
+  Stream 0: OK (1500 chunks)
+  Stream 1: GAPS FOUND
+    Missing: 342, 343, 890
+  Stream 2: OK (1200 chunks)
+
+Total gaps: 3 chunks in 1 stream
+```
+
+> **Quando usar:** Após backups que retornaram `CHECKSUM_MISMATCH` ou quando os logs do agent indicam falhas de drain. O script ajuda a confirmar se o server efetivamente não recebeu todos os chunks.

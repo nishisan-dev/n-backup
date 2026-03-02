@@ -153,6 +153,38 @@ O auto-scaler tem histerese (3 janelas consecutivas) para evitar oscilação. Se
 
 ---
 
+## Final ChunkSACK Drain (v3.1.0+)
+
+### O que é o Final ChunkSACK Drain?
+
+É um mecanismo introduzido na v3.1.0 que garante que o agent **não envia `ControlIngestionDone`** até que o server tenha confirmado via `ChunkSACK` o recebimento de **todos os bytes de todos os streams**. Sem ele, `conn.Write()` podia retornar sucesso enquanto bytes ainda estavam em trânsito na rede — um connection reset nesse momento causava gaps silenciosos no backup.
+
+### Como saber se o Final Drain está ativo?
+
+Se o agent estiver na v3.1.0 ou superior, o Final Drain está ativo por padrão. Nos logs, procure por:
+
+```
+"msg":"final drain complete, all chunks acknowledged"
+```
+
+Se o drain falhar após retries:
+
+```
+"msg":"final drain failed, stream marked dead"
+```
+
+### Posso verificar se houve chunks faltantes em sessões anteriores?
+
+Sim. Use o script `scripts/check-missing-chunks.py` para analisar session logs do server:
+
+```bash
+python3 scripts/check-missing-chunks.py /var/log/nbackup-server/session-*.log
+```
+
+O script identifica gaps na sequência de `GlobalSeq` e reporta os chunks faltantes.
+
+---
+
 ## Control Channel
 
 ### Para que serve o control channel?
