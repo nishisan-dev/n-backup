@@ -1,0 +1,82 @@
+@startuml post_commit_sync
+!theme plain
+
+title Fluxo Pós-Commit — Object Storage
+
+actor Agent
+participant "Handler\n(Single/Parallel)" as Handler
+participant "AtomicWriter" as AW
+participant "Rotate" as Rotate
+participant "PostCommitOrchestrator" as PCO
+participant "S3Backend\n(sync)" as Sync
+participant "S3Backend\n(offload)" as Offload
+participant "S3Backend\n(archive)" as Archive
+database "S3 Bucket" as S3
+
+== Commit Atômico ==
+
+Handler -> AW: Commit(tmpPath)
+AW --> Handler: finalPath
+
+== Rotação Local ==
+
+Handler -> Rotate: Rotate(agentDir, maxBackups)
+Rotate --> Handler: []removedFiles
+
+== Object Storage Pós-Commit ==
+
+Handler -> PCO: Execute(finalPath, removedFiles, agentDir)
+activate PCO
+
+group Paralelo (goroutines)
+
+  group sync (fire-and-forget)
+    PCO -> Sync: Upload(finalPath)
+    Sync -> S3: PutObject
+    S3 --> Sync: OK
+    loop para cada removedFile
+      PCO -> Sync: Delete(removedFile)
+      Sync -> S3: DeleteObject
+    end
+  end
+
+  group offload (blocking)
+    PCO -> Offload: Upload(finalPath)
+    Offload -> S3: PutObject
+    S3 --> Offload: OK
+    Offload -> Offload: os.Remove(local)
+    PCO -> Offload: List(prefix)
+    Offload -> S3: ListObjectsV2
+    note right: Rotate via retain\n(remove excedentes)
+    loop se len > retain
+      PCO -> Offload: Delete(oldest)
+    end
+  end
+
+  group archive (fire-and-forget)
+    loop para cada removedFile
+      PCO -> Archive: Upload(removedFile)
+      Archive -> S3: PutObject
+    end
+    PCO -> Archive: List(prefix)
+    note right: Rotate via retain
+    loop se len > retain
+      PCO -> Archive: Delete(oldest)
+    end
+  end
+
+end
+
+PCO --> Handler: []PostCommitResult
+deactivate PCO
+
+== FinalACK ==
+
+Handler -> Agent: FinalACK(OK)
+
+note over Handler
+  offload bloqueia até upload confirmado
+  sync e archive são fire-and-forget
+end note
+
+@enduml
