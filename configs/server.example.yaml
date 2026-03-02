@@ -19,6 +19,47 @@ storages:
     chunk_shard_levels: 1             # 1|2 — níveis de sharding de chunks no staging (default: 1)
     chunk_fsync: false                # true = fsync a cada write de chunk no staging (mais seguro, mais lento)
 
+    # Destinos de Object Storage pós-commit (opcional).
+    # Cada backup commitado pode ser enviado a um ou mais buckets S3-compatible.
+    # Modos disponíveis:
+    #   sync    — espelha 1:1 o storage local (upload + delete espelhado pelo Rotate)
+    #   offload — envia para o bucket e apaga o local (bucket vira storage primário)
+    #   archive — envia apenas backups deletados pelo Rotate (cold storage)
+    #
+    # buckets:
+    #   - name: s3-mirror
+    #     provider: s3                    # s3 (AWS, MinIO, Wasabi, DO Spaces)
+    #     endpoint: ""                    # vazio = AWS default; preenchido = MinIO/compatível
+    #     region: us-east-1
+    #     bucket: my-backup-bucket
+    #     prefix: "scripts/"              # prefixo de objetos no bucket (opcional)
+    #     mode: sync
+    #     credentials:
+    #       access_key_env: AWS_ACCESS_KEY_ID
+    #       secret_key_env: AWS_SECRET_ACCESS_KEY
+    #
+    #   - name: offload-nas
+    #     provider: s3
+    #     endpoint: "https://minio.internal:9000"
+    #     bucket: primary-backups
+    #     prefix: "scripts/"
+    #     mode: offload
+    #     retain: 10                      # obrigatório: rotação no bucket
+    #     credentials:
+    #       access_key_env: MINIO_ACCESS_KEY
+    #       secret_key_env: MINIO_SECRET_KEY
+    #
+    #   - name: cold-archive
+    #     provider: s3
+    #     endpoint: "https://minio.internal:9000"
+    #     bucket: cold-backups
+    #     prefix: "scripts/"
+    #     mode: archive
+    #     retain: 30                      # quantos backups manter no bucket
+    #     credentials:
+    #       access_key_env: MINIO_ACCESS_KEY
+    #       secret_key_env: MINIO_SECRET_KEY
+
   home-dirs:
     base_dir: /var/backups/home
     max_backups: 10
