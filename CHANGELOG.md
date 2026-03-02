@@ -11,6 +11,28 @@ e o versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v3.2.0] — 2026-03-02
+
+Object Storage post-commit, melhorias de qualidade de código e fix de race condition.
+
+### Adicionado
+- **Object Storage Post-Commit Sync**: após o assembly bem-sucedido de um backup, o arquivo final pode ser sincronizado automaticamente para um bucket S3-compatível (AWS S3, MinIO, etc.). Configuração via `bucket` por storage entry com suporte a `endpoint`, `region`, `bucket`, `prefix` e credenciais via variáveis de ambiente. Implementado como `PostCommitOrchestrator` que se integra nos hooks de `validateAndCommit`.
+  - Interface `Backend` extensível para futuros provedores de object storage.
+  - Implementação `S3Backend` usando AWS SDK v2 com upload multipart automático.
+  - Validação de configuração de bucket no startup.
+- **CI: Race Detection e Linting**: pipeline de CI (`ci.yml`) agora inclui `go test -race`, `golangci-lint` e threshold de cobertura de testes.
+- **CI: Wiki Sync Automático**: workflow (`wiki-sync.yml`) sincroniza automaticamente o diretório `wiki/` para o repositório GitHub Wiki em pushes na `main`.
+- **Testes unitários para Autoscaler e Backup**: cobertura de testes para `autoscaler.go` e `backup.go` incluindo modos efficiency/adaptive, edge cases e thread safety.
+
+### Alterado
+- **Refactoring de `handler.go`**: arquivo monolítico do server splitado em 6 arquivos domain-specific (`handler_parallel.go`, `handler_control.go`, `handler_assembly.go`, `handler_observability.go`, `handler_session.go`, `handler_single.go`), melhorando navegabilidade e manutenção.
+
+### Corrigido
+- **Race condition archive vs Rotate**: corrigida condição de corrida entre a rotação de backups antigos e a escrita do arquivo final do assembler, que podia causar remoção prematura do backup recém-concluído.
+- **Compatibilidade golangci-lint com Go 1.25.6**: ajuste de versão do linter para compatibilidade com a versão do Go em uso.
+
+---
+
 ## [v3.1.0] — 2026-03-01
 
 Release estável da linha v3.x. Resolve a causa raiz de chunks faltantes em shutdowns prematuros.
