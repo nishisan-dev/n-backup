@@ -34,6 +34,7 @@ Sistema de backup **high-performance** client-server escrito em Go. Streaming di
 | **Prometheus Metrics** | Endpoint `/metrics` compatível com Prometheus para bytes recebidos e sessões (v3.0.0+). |
 | **Schedule por Backup** | Cada backup entry possui sua própria cron expression. |
 | **Hot Reload (SIGHUP)** | Recarrega configuração sem downtime via `systemctl reload`. |
+| **Object Storage** | Upload automático pós-commit para S3/MinIO com modos sync, offload e archive. Múltiplos buckets em paralelo. |
 
 ---
 
@@ -88,6 +89,7 @@ Agent ←→ Server: CTRL magic → ControlPing/Pong (keep-alive + RTT) + Contro
 | [[Guia de Uso\|Guia-de-Uso]] | Comandos, daemon, retry, rotação, troubleshooting |
 | [[Especificação Técnica\|Especificacao-Tecnica]] | Protocolo binário, frames, sessão, resume, parallel streaming |
 | [[Configuração de Exemplo\|Configuracao-de-Exemplo]] | Exemplos completos de `agent.yaml` e `server.yaml` |
+| [[Object Storage\|Object-Storage]] | Object Storage pós-commit (sync, offload, archive) |
 | [[WebUI]] | Painel de observabilidade (sessões, events, gauges) |
 | [[FAQ]] | Troubleshooting e perguntas frequentes |
 

@@ -598,6 +598,10 @@ daemon:
 
 Veja [[Configuração de Exemplo|Configuracao-de-Exemplo]] para os arquivos YAML completos e comentados.
 
+### Object Storage Pós-Commit
+
+O server pode enviar backups automaticamente para destinos de Object Storage S3-compatible após o commit local. Três modos: **sync** (espelha 1:1), **offload** (bucket vira primário), **archive** (cold storage dos deletados). Veja detalhes completos na página [[Object Storage|Object-Storage]].
+
 ---
 
 ## 5. Resiliência

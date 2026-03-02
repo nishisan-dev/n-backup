@@ -137,6 +137,7 @@ O **n-backup** é um sistema de backup client-server de alta performance escrito
 | **Handler** | `internal/server/handler.go` | Protocolo: handshake, resume, health check, data stream, trailer, final ACK. Emite eventos (início/fim de sessão, rotações, reconexões) para a WebUI |
 | **Storage** | `internal/server/storage.go` | Escrita atômica (`.tmp` → rename), rotação por `max_backups`, organização por agent |
 | **Assembler** | `internal/server/assembler.go` | Reassembla chunks de streams paralelos na ordem correta via `GlobalSeq` |
+| **PostCommitOrchestrator** | `internal/server/post_commit.go` | Orquestra upload pós-commit para Object Storage (S3-compatible). Modos: sync, offload, archive. Execução paralela por bucket com retry exponencial. |
 | **Slot** | `internal/server/slot.go` | Struct tipada por slot paralelo: estado (`Idle`, `Receiving`, `Disconnected`, `Disabled`), offsets, métricas de chunks e flow rotation. Substitui os 12 `sync.Map` anteriores. |
 
 ### 3.3. Módulos Compartilhados
@@ -147,6 +148,7 @@ O **n-backup** é um sistema de backup client-server de alta performance escrito
 | **Protocol** | `internal/protocol/` | Frames binários (Handshake, ACK, SACK, Resume, Parallel, Control) |
 | **PKI** | `internal/pki/` | Configuração TLS client/server, carregamento de certificados |
 | **Logging** | `internal/logging/` | Factory de `slog.Logger` (JSON/text, nível configurável) |
+| **Object Store** | `internal/objstore/` | Interface `Backend` (Upload, Delete, List) + implementação S3 via AWS SDK v2 |
 
 ---
 
@@ -435,6 +437,10 @@ n-backup/
 │   │   └── server.go                #   ServerConfig
 │   ├── integration/                  # Testes de integração
 │   ├── logging/                      # Factory de slog.Logger
+│   ├── objstore/                     # Interface Backend + S3 implementation
+│   │   ├── backend.go               #   Interface Backend (Upload, Delete, List)
+│   │   ├── s3.go                    #   S3Backend (AWS SDK v2)
+│   │   └── mock.go                  #   MockBackend para testes
 │   ├── pki/                          # Configuração TLS client/server
 │   ├── protocol/                     # Frames binários, reader, writer
 │   │   ├── protocol.go              #   Frames data (Handshake, ACK, SACK, Resume, Parallel)
@@ -442,6 +448,8 @@ n-backup/
 │   └── server/                       # Receiver, handler, storage, assembler
 │       ├── assembler.go             #   Reassembly de chunks paralelos
 │       ├── handler.go               #   Protocolo handler + handleControlChannel
+│       ├── post_commit.go           #   PostCommitOrchestrator (object storage pós-commit)
+│       ├── post_commit_helpers.go   #   Helper runPostCommitSync + defaultBackendFactory
 │       ├── server.go                #   TLS listener
 │       ├── slot.go                  #   Slot struct (estado tipado, métricas atômicas, flow rotation)
 │       ├── storage.go               #   Escrita atômica + rotação

@@ -714,6 +714,10 @@ func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWrit
 		}
 	}
 
+	// Object Storage pós-commit (sync/offload/archive)
+	// Offload bloqueia até upload confirmado; sync/archive são fire-and-forget.
+	h.runPostCommitSync(storageInfo, finalPath, removed, writer.AgentDir(), logger)
+
 	logger.Info("backup committed",
 		"path", finalPath,
 		"bytes", totalBytes,

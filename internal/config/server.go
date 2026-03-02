@@ -154,16 +154,44 @@ type TLSServer struct {
 	ServerKey  string `yaml:"server_key"`
 }
 
+// BucketMode define os modos de operação do object storage pós-commit.
+const (
+	BucketModeSync    = "sync"    // espelha 1:1 o storage local (upload + delete espelhado)
+	BucketModeOffload = "offload" // envia para o bucket e apaga o local
+	BucketModeArchive = "archive" // envia para o bucket apenas backups deletados pelo Rotate
+)
+
+// BucketCredentials referencia credenciais via variáveis de ambiente.
+// Nunca armazena valores diretamente — segurança por padrão.
+type BucketCredentials struct {
+	AccessKeyEnv string `yaml:"access_key_env"` // nome da env var com access key
+	SecretKeyEnv string `yaml:"secret_key_env"` // nome da env var com secret key
+}
+
+// BucketConfig define um destino de object storage pós-commit.
+type BucketConfig struct {
+	Name        string            `yaml:"name"`        // nome único dentro do storage
+	Provider    string            `yaml:"provider"`    // s3 (expandível para gcs, azure)
+	Endpoint    string            `yaml:"endpoint"`    // vazio = AWS default; preenchido = MinIO/compatível
+	Region      string            `yaml:"region"`      // região AWS (default: us-east-1)
+	Bucket      string            `yaml:"bucket"`      // nome do bucket
+	Prefix      string            `yaml:"prefix"`      // prefixo de objetos no bucket (opcional)
+	Mode        string            `yaml:"mode"`        // sync|offload|archive
+	Retain      int               `yaml:"retain"`      // obrigatório para offload/archive; proibido para sync
+	Credentials BucketCredentials `yaml:"credentials"` // credenciais via env vars
+}
+
 // StorageInfo contém configurações de armazenamento e rotação de um storage nomeado.
 type StorageInfo struct {
-	BaseDir                string `yaml:"base_dir"`
-	MaxBackups             int    `yaml:"max_backups"`
-	AssemblerMode          string `yaml:"assembler_mode"`              // eager|lazy (default: eager)
-	AssemblerPendingMem    string `yaml:"assembler_pending_mem_limit"` // ex: "8mb" (default: 8mb)
-	AssemblerPendingMemRaw int64  `yaml:"-"`
-	CompressionMode        string `yaml:"compression_mode"`   // gzip|zst (default: gzip)
-	ChunkShardLevels       int    `yaml:"chunk_shard_levels"` // 1|2 (default: 1, número de níveis de sharding de chunks)
-	ChunkFsync             bool   `yaml:"chunk_fsync"`        // fsync nos writes de chunk staging (default: false)
+	BaseDir                string         `yaml:"base_dir"`
+	MaxBackups             int            `yaml:"max_backups"`
+	AssemblerMode          string         `yaml:"assembler_mode"`              // eager|lazy (default: eager)
+	AssemblerPendingMem    string         `yaml:"assembler_pending_mem_limit"` // ex: "8mb" (default: 8mb)
+	AssemblerPendingMemRaw int64          `yaml:"-"`
+	CompressionMode        string         `yaml:"compression_mode"`   // gzip|zst (default: gzip)
+	ChunkShardLevels       int            `yaml:"chunk_shard_levels"` // 1|2 (default: 1, número de níveis de sharding de chunks)
+	ChunkFsync             bool           `yaml:"chunk_fsync"`        // fsync nos writes de chunk staging (default: false)
+	Buckets                []BucketConfig `yaml:"buckets"`            // destinos de object storage pós-commit (opcional)
 }
 
 // CompressionModeByte converte o compression_mode string para a constante de protocolo.
@@ -270,6 +298,11 @@ func (c *ServerConfig) validate() error {
 		}
 		if s.ChunkShardLevels < 1 || s.ChunkShardLevels > 2 {
 			return fmt.Errorf("storages.%s.chunk_shard_levels must be 1 or 2, got %d", name, s.ChunkShardLevels)
+		}
+
+		// Bucket configs (object storage pós-commit)
+		if err := validateBuckets(name, s.Buckets); err != nil {
+			return err
 		}
 
 		c.Storages[name] = s
@@ -383,5 +416,77 @@ func (c *ServerConfig) validate() error {
 		}
 	}
 
+	return nil
+}
+
+// validateBuckets valida a configuração dos buckets de object storage de um storage.
+func validateBuckets(storageName string, buckets []BucketConfig) error {
+	if len(buckets) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(buckets))
+	for i, b := range buckets {
+		prefix := fmt.Sprintf("storages.%s.buckets[%d]", storageName, i)
+
+		// Nome obrigatório e único
+		if b.Name == "" {
+			return fmt.Errorf("%s.name is required", prefix)
+		}
+		if _, dup := seen[b.Name]; dup {
+			return fmt.Errorf("%s.name %q is duplicated", prefix, b.Name)
+		}
+		seen[b.Name] = struct{}{}
+
+		// Provider
+		b.Provider = strings.ToLower(strings.TrimSpace(b.Provider))
+		if b.Provider == "" {
+			b.Provider = "s3"
+		}
+		if b.Provider != "s3" {
+			return fmt.Errorf("%s.provider must be s3, got %q", prefix, b.Provider)
+		}
+
+		// Region default
+		if b.Region == "" {
+			b.Region = "us-east-1"
+		}
+
+		// Bucket obrigatório
+		if b.Bucket == "" {
+			return fmt.Errorf("%s.bucket is required", prefix)
+		}
+
+		// Mode
+		b.Mode = strings.ToLower(strings.TrimSpace(b.Mode))
+		if b.Mode == "" {
+			return fmt.Errorf("%s.mode is required (sync, offload, or archive)", prefix)
+		}
+		if b.Mode != BucketModeSync && b.Mode != BucketModeOffload && b.Mode != BucketModeArchive {
+			return fmt.Errorf("%s.mode must be sync, offload, or archive, got %q", prefix, b.Mode)
+		}
+
+		// Retain: obrigatório para offload/archive, proibido para sync
+		switch b.Mode {
+		case BucketModeSync:
+			if b.Retain != 0 {
+				return fmt.Errorf("%s.retain must not be set for sync mode (sync mirrors local rotation)", prefix)
+			}
+		case BucketModeOffload, BucketModeArchive:
+			if b.Retain < 1 {
+				return fmt.Errorf("%s.retain must be > 0 for %s mode", prefix, b.Mode)
+			}
+		}
+
+		// Credenciais obrigatórias
+		if b.Credentials.AccessKeyEnv == "" {
+			return fmt.Errorf("%s.credentials.access_key_env is required", prefix)
+		}
+		if b.Credentials.SecretKeyEnv == "" {
+			return fmt.Errorf("%s.credentials.secret_key_env is required", prefix)
+		}
+
+		buckets[i] = b
+	}
 	return nil
 }
