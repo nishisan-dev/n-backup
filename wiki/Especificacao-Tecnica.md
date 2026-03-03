@@ -369,6 +369,7 @@ storages:
     assembler_mode: lazy
     chunk_shard_levels: 2  # 1 (flat, padrão) ou 2 (2 níveis de subdiretórios)
     chunk_fsync: false     # true = fsync a cada write de chunk em staging
+    verify_integrity: true # valida integridade do archive antes de rotacionar
 ```
 
 - **parallels**: `0` desabilita (single stream), `1-255` define o máximo de streams.
@@ -389,6 +390,7 @@ storages:
 
 - **chunk_shard_levels**: `1` (padrão, flat) ou `2` (2 níveis de subdiretórios) — controla a organização dos chunks no staging do assembler.
 - **chunk_fsync**: `false` (padrão). Quando `true`, executa `fsync` a cada write de chunk em staging (lazy e spill), com maior durabilidade e menor throughput.
+- **verify_integrity**: `false` (padrão). Quando `true`, valida a integridade do archive comprimido (equivalente a `tar -tf`) após o commit e antes da rotação. Se a validação falhar, o rotate é pulado (fail-safe: nenhum backup antigo é deletado).
 
 ### 3.6 Control Channel Protocol (v1.3.8+)
 

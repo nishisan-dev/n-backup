@@ -18,6 +18,7 @@ storages:
     assembler_pending_mem_limit: 8mb  # limite de pending em memória no modo eager
     chunk_shard_levels: 1             # 1|2 — níveis de sharding de chunks no staging (default: 1)
     chunk_fsync: false                # true = fsync a cada write de chunk no staging (mais seguro, mais lento)
+    verify_integrity: true            # valida integridade do archive (tar -tf) antes de rotacionar backups antigos (default: false)
 
     # Destinos de Object Storage pós-commit (opcional).
     # Cada backup commitado pode ser enviado a um ou mais buckets S3-compatible.

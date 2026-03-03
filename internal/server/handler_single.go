@@ -448,6 +448,23 @@ func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath
 		return "write_error", dataSize
 	}
 
+	// Verifica integridade do archive antes de rotacionar.
+	// Se falhar, o backup fica no disco mas NÃO apaga os antigos (fail-safe).
+	if storageInfo.VerifyIntegrity {
+		logger.Info("verifying backup integrity", "path", finalPath)
+		if vErr := VerifyArchiveIntegrity(finalPath); vErr != nil {
+			logger.Error("backup integrity check failed — skipping rotation",
+				"path", finalPath, "error", vErr)
+			if h.Events != nil {
+				h.Events.PushEvent("error", "integrity_failed", writer.AgentName(),
+					fmt.Sprintf("integrity check failed for %s: %v", finalPath, vErr), 0)
+			}
+			protocol.WriteFinalACK(conn, protocol.FinalStatusOK)
+			return "ok", dataSize
+		}
+		logger.Info("backup integrity verified", "path", finalPath)
+	}
+
 	// Archive pre-Rotate: envia backups que SERÃO deletados pelo Rotate
 	// (antes da deleção, para que os arquivos ainda existam no disco).
 	if hasArchiveBuckets(storageInfo.Buckets) {

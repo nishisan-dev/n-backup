@@ -191,6 +191,7 @@ type StorageInfo struct {
 	CompressionMode        string         `yaml:"compression_mode"`   // gzip|zst (default: gzip)
 	ChunkShardLevels       int            `yaml:"chunk_shard_levels"` // 1|2 (default: 1, número de níveis de sharding de chunks)
 	ChunkFsync             bool           `yaml:"chunk_fsync"`        // fsync nos writes de chunk staging (default: false)
+	VerifyIntegrity        bool           `yaml:"verify_integrity"`   // valida integridade do archive antes do rotate (default: false)
 	Buckets                []BucketConfig `yaml:"buckets"`            // destinos de object storage pós-commit (opcional)
 }
 

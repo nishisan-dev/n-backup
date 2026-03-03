@@ -691,6 +691,7 @@ storages:
     assembler_mode: eager
     assembler_pending_mem_limit: 8mb
     chunk_fsync: false
+    verify_integrity: true   # valida integridade do archive antes de rotacionar (default: false)
   home-dirs:
     base_dir: /var/backups/home
     max_backups: 10

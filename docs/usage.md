@@ -488,6 +488,7 @@ storages:
     assembler_mode: eager
     assembler_pending_mem_limit: 8mb
     chunk_fsync: false
+    verify_integrity: true
   home-dirs:
     base_dir: /var/backups/home
     max_backups: 10
@@ -500,6 +501,7 @@ Defaults por storage:
 - `assembler_mode`: `eager`
 - `assembler_pending_mem_limit`: `8mb` (8 * 1024 * 1024 bytes)
 - `chunk_fsync`: `false`
+- `verify_integrity`: `false`
 
 Comportamento dos modos:
 - `eager`: monta incrementalmente durante a transferência. Chunks fora de ordem ficam em memória até `assembler_pending_mem_limit`; ao exceder, fazem spill para disco.
@@ -508,6 +510,10 @@ Comportamento dos modos:
 `chunk_fsync`:
 - `false` (padrão): maior throughput, confia no flush normal do kernel.
 - `true`: executa `fsync` a cada write de chunk em staging (lazy e spill), reduzindo janela de perda em quedas abruptas ao custo de desempenho.
+
+`verify_integrity`:
+- `false` (padrão): rotação imediata após commit.
+- `true`: valida a integridade do archive comprimido (equivalente a `tar -tf`) após o commit e antes da rotação. Se o archive estiver corrompido, a rotação é cancelada e os backups antigos são preservados (fail-safe).
 
 Exemplo com `max_backups: 3` no storage `scripts`:
 
