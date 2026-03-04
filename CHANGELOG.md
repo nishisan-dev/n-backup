@@ -11,6 +11,23 @@ e o versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v3.3.0] — 2026-03-04
+
+Verificação de integridade de archives antes da rotação de backups (fail-safe).
+
+### Adicionado
+- **Verificação de Integridade (`verify_integrity`)**: nova opção booleana por storage entry (default: `false`) que valida a integridade de archives comprimidos (`.tar.gz` / `.tar.zst`) **após o commit e antes da rotação**. Se o archive recém-commitado estiver corrompido, a rotação é **abortada** — impedindo que backups antigos válidos sejam deletados em favor de um backup corrompido.
+  - Verificação equivalente a `tar -I zstd -tf archive.tar.zst > /dev/null`: lê e descomprime todo o tarball, validando headers e integridade dos dados.
+  - Novo arquivo `internal/server/integrity.go` com a função `VerifyArchiveIntegrity()`.
+  - 9 testes unitários (`integrity_test.go`) cobrindo cenários: archive válido (gzip/zstd), corrompido, truncado, vazio, extensão não suportada e arquivo inexistente.
+  - Integrado nos handlers `handler_single.go` e `handler_parallel.go` entre o Commit e o Rotate.
+  - Configuração documentada em `configs/server.example.yaml`, `docs/specification.md`, `docs/usage.md` e `wiki/Especificacao-Tecnica.md`.
+
+### Motivação
+> Em cenários onde o disco de destino apresenta falhas silenciosas (bit rot, filesystem corrompido) ou a compressão falha por falta de memória, o backup commitado pode estar corrompido sem que o sistema detecte. Sem verificação, a rotação deletaria os backups antigos válidos, deixando apenas o backup corrompido. O `verify_integrity` atua como fail-safe: se a verificação falhar, os backups antigos são preservados.
+
+---
+
 ## [v3.2.0] — 2026-03-02
 
 Object Storage post-commit, melhorias de qualidade de código e fix de race condition.
