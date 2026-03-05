@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/nishisan-dev/n-backup/internal/config"
@@ -30,17 +31,17 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Tipos de resultado — expostos para observabilidade e futuro WebUI
+// Tipos de resultado — expostos para observabilidade e WebUI
 // ---------------------------------------------------------------------------
 
 // SyncStorageResult agrega o resultado de uma sincronização completa
 // (todos os storages/buckets). Exposto para permitir exibição no WebUI.
 type SyncStorageResult struct {
-	StartedAt time.Time           `json:"started_at"`
-	EndedAt   time.Time           `json:"ended_at"`
-	Duration  time.Duration       `json:"duration"`
-	Buckets   []SyncBucketResult  `json:"buckets"`
-	Total     SyncStorageTotals   `json:"total"`
+	StartedAt time.Time          `json:"started_at"`
+	EndedAt   time.Time          `json:"ended_at"`
+	Duration  time.Duration      `json:"duration"`
+	Buckets   []SyncBucketResult `json:"buckets"`
+	Total     SyncStorageTotals  `json:"total"`
 }
 
 // SyncStorageTotals resume contadores agregados de toda a operação.
@@ -60,6 +61,25 @@ type SyncBucketResult struct {
 	Errors      int           `json:"errors"`
 	Duration    time.Duration `json:"duration"`
 	Error       string        `json:"error,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Progresso em tempo real — leitura lock-free pelo WebUI
+// ---------------------------------------------------------------------------
+
+// SyncProgress rastreia o progresso em tempo real de uma sincronização ativa.
+// Campos atômicos para leitura lock-free pelo endpoint HTTP.
+type SyncProgress struct {
+	Running        atomic.Bool
+	StartedAt      atomic.Value // time.Time
+	CurrentFile    atomic.Value // string — path relativo do arquivo sendo enviado
+	CurrentBucket  atomic.Value // string — nome do bucket atual
+	TotalFiles     atomic.Int64 // total de arquivos a processar (todos os buckets)
+	ProcessedFiles atomic.Int64 // arquivos já processados (uploaded + skipped + errors)
+	UploadedFiles  atomic.Int64
+	SkippedFiles   atomic.Int64
+	ErrorFiles     atomic.Int64
+	BytesUploaded  atomic.Int64 // bytes total enviados (soma de file sizes uploaded)
 }
 
 // ---------------------------------------------------------------------------
@@ -84,9 +104,24 @@ func (h *Handler) SyncExistingStorage(ctx context.Context) *SyncStorageResult {
 	}
 	defer h.syncRunning.Store(false)
 
+	now := time.Now()
 	result := &SyncStorageResult{
-		StartedAt: time.Now(),
+		StartedAt: now,
 	}
+
+	// Inicializa progresso em tempo real
+	p := &h.syncProgress
+	p.Running.Store(true)
+	p.StartedAt.Store(now)
+	p.CurrentFile.Store("")
+	p.CurrentBucket.Store("")
+	p.TotalFiles.Store(0)
+	p.ProcessedFiles.Store(0)
+	p.UploadedFiles.Store(0)
+	p.SkippedFiles.Store(0)
+	p.ErrorFiles.Store(0)
+	p.BytesUploaded.Store(0)
+	defer p.Running.Store(false)
 
 	h.logger.Info("sync-storage: starting retroactive storage sync")
 	if h.Events != nil {
@@ -100,6 +135,19 @@ func (h *Handler) SyncExistingStorage(ctx context.Context) *SyncStorageResult {
 		storageNames = append(storageNames, name)
 	}
 	sort.Strings(storageNames)
+
+	// Pré-scan: conta o total de arquivos locais a processar para progresso global
+	for _, storageName := range storageNames {
+		si := h.cfg.Storages[storageName]
+		syncBuckets := filterBucketsByMode(si.Buckets, config.BucketModeSync)
+		if len(syncBuckets) == 0 {
+			continue
+		}
+		localFiles, err := listLocalBackups(si.BaseDir)
+		if err == nil {
+			p.TotalFiles.Add(int64(len(localFiles)) * int64(len(syncBuckets)))
+		}
+	}
 
 	for _, storageName := range storageNames {
 		si := h.cfg.Storages[storageName]
@@ -121,6 +169,7 @@ func (h *Handler) SyncExistingStorage(ctx context.Context) *SyncStorageResult {
 			default:
 			}
 
+			p.CurrentBucket.Store(bcfg.Name)
 			logger := h.logger.With("storage", storageName, "bucket", bcfg.Name)
 			br := h.syncOneBucket(ctx, storageName, si, bcfg, logger)
 			result.Buckets = append(result.Buckets, br)
@@ -214,6 +263,7 @@ func (h *Handler) syncOneBucket(ctx context.Context, storageName string, si conf
 	)
 
 	// Upload dos faltantes
+	p := &h.syncProgress
 	for _, lf := range localFiles {
 		select {
 		case <-ctx.Done():
@@ -223,10 +273,14 @@ func (h *Handler) syncOneBucket(ctx context.Context, storageName string, si conf
 		default:
 		}
 
+		p.CurrentFile.Store(lf.RelPath)
+
 		// Constrói a chave remota: prefix + path relativo ao BaseDir
 		remoteKey := bcfg.Prefix + lf.RelPath
 		if _, exists := remoteKeySet[remoteKey]; exists {
 			br.Skipped++
+			p.SkippedFiles.Add(1)
+			p.ProcessedFiles.Add(1)
 			continue
 		}
 
@@ -235,12 +289,20 @@ func (h *Handler) syncOneBucket(ctx context.Context, storageName string, si conf
 		if err := uploadWithRetryStandalone(ctx, backend, lf.AbsPath, remoteKey, 3, 30*time.Minute, uploadLogger); err != nil {
 			uploadLogger.Error("sync-storage: upload failed", "error", err)
 			br.Errors++
+			p.ErrorFiles.Add(1)
+			p.ProcessedFiles.Add(1)
 			if h.Events != nil {
 				h.Events.PushEvent("error", "sync_storage_upload_failed", "",
 					fmt.Sprintf("sync upload failed: %s → %s: %v", lf.RelPath, remoteKey, err), 0)
 			}
 		} else {
 			br.Uploaded++
+			p.UploadedFiles.Add(1)
+			p.ProcessedFiles.Add(1)
+			// Contabiliza bytes do arquivo uploaded
+			if fi, statErr := os.Stat(lf.AbsPath); statErr == nil {
+				p.BytesUploaded.Add(fi.Size())
+			}
 			uploadLogger.Info("sync-storage: uploaded successfully")
 		}
 	}

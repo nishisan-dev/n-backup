@@ -214,3 +214,53 @@ type ChunkBufferDTO struct {
 	DrainRatio         float64 `json:"drain_ratio"`
 	DrainRateMBs       float64 `json:"drain_rate_mbs"` // MB/s taxa atual de drenagem (janela ~5s)
 }
+
+// ---------------------------------------------------------------------------
+// Sync Storage DTOs — retornados por GET /api/v1/sync/status
+// ---------------------------------------------------------------------------
+
+// SyncStatusDTO é retornado por GET /api/v1/sync/status.
+type SyncStatusDTO struct {
+	Running    bool             `json:"running"`
+	StartedAt  string           `json:"started_at,omitempty"`
+	Elapsed    string           `json:"elapsed,omitempty"`
+	Progress   *SyncProgressDTO `json:"progress,omitempty"`    // nil quando idle
+	LastResult *SyncResultDTO   `json:"last_result,omitempty"` // nil se nunca rodou
+}
+
+// SyncProgressDTO contém métricas de progresso em tempo real.
+type SyncProgressDTO struct {
+	CurrentFile    string  `json:"current_file"`
+	CurrentBucket  string  `json:"current_bucket"`
+	TotalFiles     int64   `json:"total_files"`
+	ProcessedFiles int64   `json:"processed_files"`
+	UploadedFiles  int64   `json:"uploaded_files"`
+	SkippedFiles   int64   `json:"skipped_files"`
+	ErrorFiles     int64   `json:"error_files"`
+	BytesUploaded  int64   `json:"bytes_uploaded"`
+	ProgressPct    float64 `json:"progress_pct"` // 0-100
+	ETA            string  `json:"eta,omitempty"`
+}
+
+// SyncResultDTO resume o último resultado completo de uma sincronização.
+type SyncResultDTO struct {
+	StartedAt string          `json:"started_at"`
+	EndedAt   string          `json:"ended_at"`
+	Duration  string          `json:"duration"`
+	Uploaded  int             `json:"uploaded"`
+	Skipped   int             `json:"skipped"`
+	Errors    int             `json:"errors"`
+	Buckets   []SyncBucketDTO `json:"buckets"`
+}
+
+// SyncBucketDTO resume resultado por bucket.
+type SyncBucketDTO struct {
+	StorageName string `json:"storage_name"`
+	BucketName  string `json:"bucket_name"`
+	Mode        string `json:"mode"`
+	Uploaded    int    `json:"uploaded"`
+	Skipped     int    `json:"skipped"`
+	Errors      int    `json:"errors"`
+	Duration    string `json:"duration"`
+	Error       string `json:"error,omitempty"`
+}

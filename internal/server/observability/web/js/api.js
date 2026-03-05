@@ -27,4 +27,5 @@ const API = {
         const sid = sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : "";
         return this.get(`/api/v1/sessions/active-history?limit=${limit}${sid}`, init);
     },
+    syncStatus(init) { return this.get('/api/v1/sync/status', init); },
 };

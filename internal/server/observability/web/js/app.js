@@ -143,12 +143,13 @@
     async function fetchOverview() {
         const { requestId, signal } = beginViewRequest();
         try {
-            const [health, metrics, sessions, agents, storages] = await Promise.all([
+            const [health, metrics, sessions, agents, storages, syncStatus] = await Promise.all([
                 API.health({ signal }),
                 API.metrics({ signal }),
                 API.sessions({ signal }),
                 API.agents({ signal }),
                 API.storages({ signal }),
+                API.syncStatus({ signal }),
             ]);
             if (!isLatestRequest(requestId)) return;
 
@@ -159,6 +160,7 @@
             Components.renderServerInfo(health);
             Components.renderOverviewMetrics(metrics);
             Components.renderChunkBufferCard(metrics.chunk_buffer || null);
+            Components.renderSyncStatusCard(syncStatus);
             Components.renderOverviewAgents(agents);
             Components.renderOverviewStorages(storages);
             Components.renderOverviewSessions(sessions);

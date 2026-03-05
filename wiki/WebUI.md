@@ -146,6 +146,7 @@ A WebUI consome uma API REST interna. Os endpoints disponíveis:
 | `/api/v1/storages` | GET | Storages com uso de disco |
 | `/api/v1/events` | GET | Eventos recentes |
 | `/api/v1/config/effective` | GET | Configuração efetiva do server |
+| `/api/v1/sync/status` | GET | Status e progresso do sync retroativo de Object Storage |
 | `/metrics` | GET | Métricas Prometheus-compatíveis (v3.0.0+) |
 
 > **Nota:** A API é interna e pode mudar entre versões. Não há garantia de estabilidade.

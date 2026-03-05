@@ -24,6 +24,7 @@ type mockMetrics struct {
 	agents      []AgentInfo
 	storages    []StorageUsage
 	bufferStats *ChunkBufferDTO
+	syncStatus  SyncStatusDTO
 }
 
 func (m *mockMetrics) MetricsSnapshot() MetricsData       { return m.data }
@@ -42,6 +43,7 @@ func (m *mockMetrics) ActiveSessionHistorySnapshot(sessionID string, limit int) 
 	return nil
 }
 func (m *mockMetrics) ChunkBufferStats() *ChunkBufferDTO { return m.bufferStats }
+func (m *mockMetrics) SyncStatusSnapshot() SyncStatusDTO { return m.syncStatus }
 
 func newMockMetrics() *mockMetrics {
 	return &mockMetrics{
@@ -525,5 +527,139 @@ func TestActiveSessionHistory_ReturnsArray(t *testing.T) {
 	}
 	if len(resp) != 0 {
 		t.Fatalf("expected empty array, got %d", len(resp))
+	}
+}
+
+func TestSyncStatus_Idle(t *testing.T) {
+	router := NewRouter(newMockMetrics(), testCfg(), localhostACL(t), nil)
+
+	req := httptest.NewRequest("GET", "/api/v1/sync/status", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var resp SyncStatusDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if resp.Running {
+		t.Error("expected running=false")
+	}
+	if resp.Progress != nil {
+		t.Error("expected progress=nil when idle")
+	}
+	if resp.LastResult != nil {
+		t.Error("expected last_result=nil when never run")
+	}
+}
+
+func TestSyncStatus_Running(t *testing.T) {
+	mock := newMockMetrics()
+	mock.syncStatus = SyncStatusDTO{
+		Running:   true,
+		StartedAt: "2026-03-05T18:00:00-03:00",
+		Elapsed:   "5m30s",
+		Progress: &SyncProgressDTO{
+			CurrentFile:    "agent1/daily/2026-03-01T00-00-00-000.tar.gz",
+			CurrentBucket:  "my-bucket",
+			TotalFiles:     100,
+			ProcessedFiles: 42,
+			UploadedFiles:  30,
+			SkippedFiles:   10,
+			ErrorFiles:     2,
+			BytesUploaded:  1024 * 1024 * 500,
+			ProgressPct:    42.0,
+			ETA:            "7m",
+		},
+	}
+	router := NewRouter(mock, testCfg(), localhostACL(t), nil)
+
+	req := httptest.NewRequest("GET", "/api/v1/sync/status", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var resp SyncStatusDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if !resp.Running {
+		t.Error("expected running=true")
+	}
+	if resp.Progress == nil {
+		t.Fatal("expected progress to be set")
+	}
+	if resp.Progress.TotalFiles != 100 {
+		t.Errorf("expected total_files=100, got %d", resp.Progress.TotalFiles)
+	}
+	if resp.Progress.UploadedFiles != 30 {
+		t.Errorf("expected uploaded_files=30, got %d", resp.Progress.UploadedFiles)
+	}
+	if resp.Progress.ProgressPct != 42.0 {
+		t.Errorf("expected progress_pct=42.0, got %f", resp.Progress.ProgressPct)
+	}
+}
+
+func TestSyncStatus_WithLastResult(t *testing.T) {
+	mock := newMockMetrics()
+	mock.syncStatus = SyncStatusDTO{
+		Running: false,
+		LastResult: &SyncResultDTO{
+			StartedAt: "2026-03-05T17:00:00-03:00",
+			EndedAt:   "2026-03-05T17:30:00-03:00",
+			Duration:  "30m0s",
+			Uploaded:  50,
+			Skipped:   40,
+			Errors:    2,
+			Buckets: []SyncBucketDTO{
+				{
+					StorageName: "default",
+					BucketName:  "my-bucket",
+					Mode:        "sync",
+					Uploaded:    50,
+					Skipped:     40,
+					Errors:      2,
+					Duration:    "29m58s",
+				},
+			},
+		},
+	}
+	router := NewRouter(mock, testCfg(), localhostACL(t), nil)
+
+	req := httptest.NewRequest("GET", "/api/v1/sync/status", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var resp SyncStatusDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if resp.Running {
+		t.Error("expected running=false")
+	}
+	if resp.LastResult == nil {
+		t.Fatal("expected last_result to be set")
+	}
+	if resp.LastResult.Uploaded != 50 {
+		t.Errorf("expected uploaded=50, got %d", resp.LastResult.Uploaded)
+	}
+	if len(resp.LastResult.Buckets) != 1 {
+		t.Fatalf("expected 1 bucket, got %d", len(resp.LastResult.Buckets))
+	}
+	if resp.LastResult.Buckets[0].BucketName != "my-bucket" {
+		t.Errorf("expected bucket 'my-bucket', got %q", resp.LastResult.Buckets[0].BucketName)
 	}
 }

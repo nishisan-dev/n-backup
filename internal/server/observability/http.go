@@ -32,6 +32,7 @@ type HandlerMetrics interface {
 	SessionHistorySnapshot() []SessionHistoryEntry
 	ActiveSessionHistorySnapshot(sessionID string, limit int) []ActiveSessionSnapshotEntry
 	ChunkBufferStats() *ChunkBufferDTO
+	SyncStatusSnapshot() SyncStatusDTO
 }
 
 // MetricsData contém os dados de métricas coletados do Handler.
@@ -59,6 +60,7 @@ func NewRouter(metrics HandlerMetrics, cfg *config.ServerConfig, acl *ACL, store
 	mux.HandleFunc("GET /api/v1/sessions/history", makeSessionHistoryHandler(metrics))
 	mux.HandleFunc("GET /api/v1/sessions/active-history", makeActiveSessionHistoryHandler(metrics))
 	mux.HandleFunc("GET /api/v1/config/effective", makeConfigHandler(cfg))
+	mux.HandleFunc("GET /api/v1/sync/status", makeSyncStatusHandler(metrics))
 
 	// Events endpoint (se store fornecido)
 	if store != nil {
@@ -238,6 +240,35 @@ func makePrometheusHandler(metrics HandlerMetrics) http.HandlerFunc {
 			fmt.Fprintf(w, "# TYPE nbackup_server_chunk_buffer_drain_mbps gauge\n")
 			fmt.Fprintf(w, "nbackup_server_chunk_buffer_drain_mbps %g\n", cb.DrainRateMBs)
 		}
+
+		// Sync storage metrics
+		syncStatus := metrics.SyncStatusSnapshot()
+		syncRunning := 0
+		if syncStatus.Running {
+			syncRunning = 1
+		}
+
+		fmt.Fprintf(w, "# HELP nbackup_server_sync_running Whether a retroactive storage sync is currently running.\n")
+		fmt.Fprintf(w, "# TYPE nbackup_server_sync_running gauge\n")
+		fmt.Fprintf(w, "nbackup_server_sync_running %d\n", syncRunning)
+
+		if syncStatus.Progress != nil {
+			fmt.Fprintf(w, "# HELP nbackup_server_sync_files_uploaded_total Files uploaded during current/last sync.\n")
+			fmt.Fprintf(w, "# TYPE nbackup_server_sync_files_uploaded_total gauge\n")
+			fmt.Fprintf(w, "nbackup_server_sync_files_uploaded_total %d\n", syncStatus.Progress.UploadedFiles)
+
+			fmt.Fprintf(w, "# HELP nbackup_server_sync_files_skipped_total Files skipped during current/last sync.\n")
+			fmt.Fprintf(w, "# TYPE nbackup_server_sync_files_skipped_total gauge\n")
+			fmt.Fprintf(w, "nbackup_server_sync_files_skipped_total %d\n", syncStatus.Progress.SkippedFiles)
+
+			fmt.Fprintf(w, "# HELP nbackup_server_sync_files_errors_total Files with errors during current/last sync.\n")
+			fmt.Fprintf(w, "# TYPE nbackup_server_sync_files_errors_total gauge\n")
+			fmt.Fprintf(w, "nbackup_server_sync_files_errors_total %d\n", syncStatus.Progress.ErrorFiles)
+
+			fmt.Fprintf(w, "# HELP nbackup_server_sync_bytes_uploaded_total Bytes uploaded during current/last sync.\n")
+			fmt.Fprintf(w, "# TYPE nbackup_server_sync_bytes_uploaded_total gauge\n")
+			fmt.Fprintf(w, "nbackup_server_sync_bytes_uploaded_total %d\n", syncStatus.Progress.BytesUploaded)
+		}
 	}
 }
 
@@ -372,4 +403,12 @@ func parseInt(s string, defaultVal int) int {
 		return defaultVal
 	}
 	return v
+}
+
+// makeSyncStatusHandler retorna um handler com status e progresso do sync retroativo.
+func makeSyncStatusHandler(metrics HandlerMetrics) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		status := metrics.SyncStatusSnapshot()
+		writeJSON(w, http.StatusOK, status)
+	}
 }

@@ -167,6 +167,92 @@ func (h *Handler) ActiveSessionHistorySnapshot(sessionID string, limit int) []ob
 	return h.ActiveSessionHistory.Recent(limit, sessionID)
 }
 
+// SyncStatusSnapshot retorna o status atual do sync retroativo para o WebUI.
+// Implementa observability.HandlerMetrics.
+func (h *Handler) SyncStatusSnapshot() observability.SyncStatusDTO {
+	p := &h.syncProgress
+	status := observability.SyncStatusDTO{
+		Running: p.Running.Load(),
+	}
+
+	// Progresso em tempo real (quando sync está rodando)
+	if status.Running {
+		if startedRaw := p.StartedAt.Load(); startedRaw != nil {
+			started := startedRaw.(time.Time)
+			status.StartedAt = started.Format(time.RFC3339)
+			status.Elapsed = time.Since(started).Truncate(time.Second).String()
+
+			total := p.TotalFiles.Load()
+			processed := p.ProcessedFiles.Load()
+
+			var currentFile, currentBucket string
+			if v := p.CurrentFile.Load(); v != nil {
+				currentFile = v.(string)
+			}
+			if v := p.CurrentBucket.Load(); v != nil {
+				currentBucket = v.(string)
+			}
+
+			pct := float64(0)
+			if total > 0 {
+				pct = float64(processed) / float64(total) * 100
+			}
+
+			// ETA baseado na taxa de processamento de arquivos
+			var eta string
+			if processed > 0 && total > processed {
+				elapsed := time.Since(started).Seconds()
+				rate := float64(processed) / elapsed
+				remaining := float64(total - processed)
+				etaSecs := remaining / rate
+				eta = (time.Duration(etaSecs) * time.Second).Truncate(time.Second).String()
+			}
+
+			status.Progress = &observability.SyncProgressDTO{
+				CurrentFile:    currentFile,
+				CurrentBucket:  currentBucket,
+				TotalFiles:     total,
+				ProcessedFiles: processed,
+				UploadedFiles:  p.UploadedFiles.Load(),
+				SkippedFiles:   p.SkippedFiles.Load(),
+				ErrorFiles:     p.ErrorFiles.Load(),
+				BytesUploaded:  p.BytesUploaded.Load(),
+				ProgressPct:    pct,
+				ETA:            eta,
+			}
+		}
+	}
+
+	// Último resultado (quando existe)
+	if raw := h.lastSyncResult.Load(); raw != nil {
+		r := raw.(*SyncStorageResult)
+		buckets := make([]observability.SyncBucketDTO, 0, len(r.Buckets))
+		for _, b := range r.Buckets {
+			buckets = append(buckets, observability.SyncBucketDTO{
+				StorageName: b.StorageName,
+				BucketName:  b.BucketName,
+				Mode:        b.Mode,
+				Uploaded:    b.Uploaded,
+				Skipped:     b.Skipped,
+				Errors:      b.Errors,
+				Duration:    b.Duration.Truncate(time.Millisecond).String(),
+				Error:       b.Error,
+			})
+		}
+		status.LastResult = &observability.SyncResultDTO{
+			StartedAt: r.StartedAt.Format(time.RFC3339),
+			EndedAt:   r.EndedAt.Format(time.RFC3339),
+			Duration:  r.Duration.Truncate(time.Millisecond).String(),
+			Uploaded:  r.Total.Uploaded,
+			Skipped:   r.Total.Skipped,
+			Errors:    r.Total.Errors,
+			Buckets:   buckets,
+		}
+	}
+
+	return status
+}
+
 // SessionsSnapshot retorna lista resumida de todas as sessões ativas.
 // Implementa observability.HandlerMetrics.
 func (h *Handler) SessionsSnapshot() []observability.SessionSummary {

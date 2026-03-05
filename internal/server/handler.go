@@ -113,6 +113,10 @@ type Handler struct {
 	// lastSyncResult armazena o resultado da última sincronização retroativa.
 	// Consultável via WebUI/API para visibilidade operacional.
 	lastSyncResult atomic.Value // *SyncStorageResult
+
+	// syncProgress rastreia progresso em tempo real do sync retroativo.
+	// Campos atômicos para leitura lock-free pelo endpoint HTTP.
+	syncProgress SyncProgress
 }
 
 // ControlConnInfo armazena metadata de um control channel conectado.

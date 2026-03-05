@@ -808,6 +808,128 @@ const Components = {
         `;
     },
 
+    // Renderiza o card "Object Storage Sync" no overview.
+    renderSyncStatusCard(sync) {
+        const el = document.getElementById('sync-status-card');
+        if (!el) return;
+
+        if (!sync || (!sync.running && !sync.last_result)) {
+            el.style.display = 'none';
+            return;
+        }
+
+        el.style.display = '';
+
+        let content = '';
+
+        if (sync.running && sync.progress) {
+            const p = sync.progress;
+            const pct = p.progress_pct || 0;
+            let barColor = 'low';
+            if (pct >= 80) barColor = 'high';
+            else if (pct >= 40) barColor = 'med';
+
+            content = `
+                <div class="sync-header">
+                    <span class="sync-title">☁ Object Storage Sync</span>
+                    <span class="badge badge-running sync-badge-pulse">● SYNCING</span>
+                </div>
+                <div class="sync-progress-section">
+                    <div class="sync-progress-top">
+                        <span class="sync-progress-label">${pct.toFixed(1)}% — ${p.processed_files}/${p.total_files} arquivos</span>
+                        ${p.eta ? `<span class="sync-eta">ETA: ${p.eta}</span>` : ''}
+                    </div>
+                    <div class="stat-track">
+                        <div class="stat-fill ${barColor} sync-progress-animated" style="width:${Math.min(pct, 100)}%"></div>
+                    </div>
+                    <div class="sync-current-file" title="${this.escapeHtml(p.current_file)}">
+                        ${p.current_bucket ? `<span class="badge badge-neutral text-xs">${this.escapeHtml(p.current_bucket)}</span>` : ''}
+                        <span class="sync-file-path">${this.escapeHtml(p.current_file || '...')}</span>
+                    </div>
+                </div>
+                <div class="sync-counters">
+                    <div class="sync-counter">
+                        <span class="sync-counter-value">${p.uploaded_files}</span>
+                        <span class="sync-counter-label">Uploaded</span>
+                    </div>
+                    <div class="sync-counter">
+                        <span class="sync-counter-value">${p.skipped_files}</span>
+                        <span class="sync-counter-label">Skipped</span>
+                    </div>
+                    <div class="sync-counter sync-counter-errors">
+                        <span class="sync-counter-value">${p.error_files}</span>
+                        <span class="sync-counter-label">Errors</span>
+                    </div>
+                    <div class="sync-counter">
+                        <span class="sync-counter-value">${this.formatBytes(p.bytes_uploaded)}</span>
+                        <span class="sync-counter-label">Bytes</span>
+                    </div>
+                </div>
+                ${sync.elapsed ? `<div class="sync-elapsed">Tempo decorrido: ${sync.elapsed}</div>` : ''}
+            `;
+        } else if (sync.last_result) {
+            const r = sync.last_result;
+            const hasErrors = r.errors > 0;
+
+            let bucketsTable = '';
+            if (r.buckets && r.buckets.length > 0) {
+                const rows = r.buckets.map(b => `
+                    <tr>
+                        <td>${this.escapeHtml(b.storage_name)}</td>
+                        <td><span class="badge badge-neutral text-xs">${this.escapeHtml(b.bucket_name)}</span></td>
+                        <td>${b.uploaded}</td>
+                        <td>${b.skipped}</td>
+                        <td>${b.errors > 0 ? `<span class="badge badge-error">${b.errors}</span>` : '0'}</td>
+                        <td>${b.duration}</td>
+                        <td>${b.error ? `<span class="badge badge-error" title="${this.escapeHtml(b.error)}">!</span>` : '—'}</td>
+                    </tr>
+                `).join('');
+                bucketsTable = `
+                    <div class="sync-buckets-table table-wrap">
+                        <table>
+                            <thead><tr>
+                                <th>Storage</th><th>Bucket</th><th>↑</th><th>≡</th><th>✗</th><th>Duração</th><th>Erro</th>
+                            </tr></thead>
+                            <tbody>${rows}</tbody>
+                        </table>
+                    </div>
+                `;
+            }
+
+            content = `
+                <div class="sync-header">
+                    <span class="sync-title">☁ Object Storage Sync</span>
+                    <span class="badge ${hasErrors ? 'badge-warn' : 'badge-success'}">${hasErrors ? '⚠ CONCLUÍDO COM ERROS' : '✓ CONCLUÍDO'}</span>
+                </div>
+                <div class="sync-result-summary">
+                    <div class="sync-counter">
+                        <span class="sync-counter-value">${r.uploaded}</span>
+                        <span class="sync-counter-label">Uploaded</span>
+                    </div>
+                    <div class="sync-counter">
+                        <span class="sync-counter-value">${r.skipped}</span>
+                        <span class="sync-counter-label">Skipped</span>
+                    </div>
+                    <div class="sync-counter sync-counter-errors">
+                        <span class="sync-counter-value">${r.errors}</span>
+                        <span class="sync-counter-label">Errors</span>
+                    </div>
+                    <div class="sync-counter">
+                        <span class="sync-counter-value">${r.duration}</span>
+                        <span class="sync-counter-label">Duração</span>
+                    </div>
+                </div>
+                <div class="sync-result-times">
+                    <span>Início: ${this.formatDateTime(r.started_at)}</span>
+                    <span>Fim: ${this.formatDateTime(r.ended_at)}</span>
+                </div>
+                ${bucketsTable}
+            `;
+        }
+
+        el.innerHTML = content;
+    },
+
     // Renderiza linha compacta de buffer inline nas sessões ativas (na lista).
     // Chamado apenas quando session.buffer_in_flight_bytes > 0.
     renderBufferSessionInline(session) {
