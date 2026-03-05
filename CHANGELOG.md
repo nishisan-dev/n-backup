@@ -11,6 +11,26 @@ e o versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v3.3.1] — 2026-03-05
+
+Sincronização retroativa de backups existentes com Object Storage via sinalização CLI → Daemon.
+
+### Adicionado
+- **Sync Retroativo (`sync-storage`)**: novo subcomando `nbackup-server sync-storage --pid <PID>` que envia `SIGUSR1` ao daemon para triggerar upload de backups locais pré-existentes para buckets `mode: sync`. Resolve o cenário onde o operador adiciona configuração de Object Storage após já possuir backups locais.
+  - Novo arquivo `internal/server/sync_storage.go` com `SyncExistingStorage()` — percorre storages, lista backups locais vs remotos, e faz upload dos faltantes.
+  - Structs observáveis (`SyncStorageResult`, `SyncBucketResult`, `SyncStorageTotals`) JSON-serializáveis para futuro uso na WebUI.
+  - Guard atômico (`syncRunning`) evita execuções concorrentes.
+  - Último resultado armazenado em `lastSyncResult` para consulta futura via API.
+  - Listener `SIGUSR1` integrado ao daemon (`server.go`) com dispatching para goroutine background.
+  - Suporte a `--pid` e `--pid-file` no subcomando CLI.
+  - 15 testes unitários com `-race` cobrindo: uploads faltantes, skip de existentes, filtro mode sync, guard concorrente, cancelamento de context, erro de upload, múltiplos storages e `.tar.zst`.
+- **`defaultBackendFactory` testável**: transformada em variável de função (`var`) para permitir substituição em testes.
+
+### Motivação
+> O Object Storage pós-commit só processa **novos** backups. Se o operador adicionar a configuração de buckets a um storage que já possui backups locais, esses artefatos nunca seriam sincronizados automaticamente. O `sync-storage` resolve isso sem bloquear o daemon e sem exigir um comando CLI de longa duração — o daemon processa o sync em background enquanto continua atendendo backups normalmente.
+
+---
+
 ## [v3.3.0] — 2026-03-04
 
 Verificação de integridade de archives antes da rotação de backups (fail-safe).
