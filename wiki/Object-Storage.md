@@ -188,6 +188,59 @@ Commit → Rotate → Upload(rotated files) → Rotate(bucket via retain) → Fi
 | **Backend Interface** | `internal/objstore/backend.go` | `Upload`, `Delete`, `List` — abstração de provider |
 | **S3Backend** | `internal/objstore/s3.go` | Implementação S3 via AWS SDK v2 (PutObject, DeleteObject, ListObjectsV2) |
 | **Helper** | `internal/server/post_commit_helpers.go` | `runPostCommitSync` — resolve credenciais e invoca orquestrador |
+| **SyncStorage** | `internal/server/sync_storage.go` | Sync retroativo: walk local → diff com remoto → upload faltantes |
+
+---
+
+## 🔄 Sync Retroativo (Backups Existentes)
+
+Ao adicionar configuração de buckets `mode: sync` a um storage que **já possui backups locais**, os artefatos existentes não são sincronizados automaticamente — o Object Storage pós-commit só processa novos backups.
+
+Para sincronizar backups pré-existentes, utilize o subcomando **`sync-storage`**:
+
+### Uso
+
+```bash
+# Enviar sinal SIGUSR1 ao daemon por PID
+nbackup-server sync-storage --pid <PID_DO_DAEMON>
+
+# Ou via pid-file
+nbackup-server sync-storage --pid-file /var/run/nbackup-server.pid
+```
+
+### Como Funciona
+
+1. O CLI envia `SIGUSR1` ao processo do daemon.
+2. O daemon recebe o sinal e inicia uma goroutine background de sync.
+3. Para cada storage com buckets `mode: sync`:
+   - Lista backups locais (`.tar.gz`, `.tar.zst`)
+   - Lista objetos remotos no bucket
+   - Faz upload dos arquivos que **não existem** no remoto
+4. Logging detalhado de progresso e resultado final.
+
+> [!IMPORTANT]
+> O sync retroativo opera **exclusivamente** em buckets `mode: sync`.
+> Modos `offload` e `archive` possuem semântica de lifecycle (deletar local / apenas rotated) que não faz sentido retroativamente.
+
+### Características
+
+- **Non-blocking**: o daemon continua processando backups normalmente durante o sync.
+- **Guard atômico**: sinais duplicados são ignorados se um sync já estiver em execução.
+- **Cancellation-safe**: respeita shutdown graceful (SIGTERM/SIGINT).
+- **Retry**: uploads usam o mesmo mecanismo de retry com exponential backoff (3 tentativas).
+
+### Verificação
+
+Acompanhe o progresso nos logs do daemon:
+
+```
+INFO sync-storage: starting retroactive storage sync
+INFO sync-storage: comparing local vs remote  storage=scripts  bucket=s3-mirror  local_count=12  remote_count=3
+INFO sync-storage: uploaded successfully       file=agent1/daily/2026-01-15.tar.gz
+INFO sync-storage: uploaded successfully       file=agent1/daily/2026-01-16.tar.gz
+...
+INFO sync-storage: completed  duration=2m30s  uploaded=9  skipped=3  errors=0
+```
 
 ---
 
@@ -206,3 +259,6 @@ Não. O n-backup usa o AWS SDK v2 nativamente em Go. Só precisa das variáveis 
 
 ### Quais providers são compatíveis?
 Qualquer endpoint S3-compatible: **AWS S3**, **MinIO**, **Wasabi**, **DigitalOcean Spaces**, **Backblaze B2** (modo S3), **Cloudflare R2**.
+
+### Como sincronizar backups existentes após adicionar a configuração de buckets?
+Use o subcomando `nbackup-server sync-storage --pid <PID>`. Veja a seção [Sync Retroativo](#-sync-retroativo-backups-existentes) acima.
