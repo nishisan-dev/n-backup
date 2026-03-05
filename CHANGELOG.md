@@ -11,6 +11,29 @@ e o versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v3.3.3] — 2026-03-05
+
+Sync jobs de Object Storage visíveis no WebUI com progresso em tempo real.
+
+### Adicionado
+- **Sync Jobs no WebUI (Overview)**: card "☁ Object Storage Sync" no dashboard com três estados:
+  - **Durante sync**: barra de progresso animada, arquivo/bucket atual, ETA, contadores (uploaded/skipped/errors/bytes transferidos).
+  - **Após conclusão**: resumo do último sync (duração, totais) com tabela detalhada por bucket.
+  - **Idle**: card oculto automaticamente quando não há sync recente.
+  - Integrado ao polling de 2s do dashboard — atualização em tempo real sem refresh manual.
+- **API Endpoint `GET /api/v1/sync/status`**: retorna estado completo do sync retroativo (running, progresso em tempo real, último resultado com detalhes por bucket).
+- **`SyncProgress` (contadores atômicos)**: struct com `atomic.Int64`/`atomic.Bool`/`atomic.Value` atualizada a cada arquivo processado em `syncOneBucket`. Leitura lock-free pelo endpoint HTTP — zero contention.
+- **Métricas Prometheus** (5 novas):
+  - `nbackup_server_sync_running` — sync ativo (0/1)
+  - `nbackup_server_sync_files_uploaded_total`
+  - `nbackup_server_sync_files_skipped_total`
+  - `nbackup_server_sync_files_errors_total`
+  - `nbackup_server_sync_bytes_uploaded_total`
+- **DTOs**: `SyncStatusDTO`, `SyncProgressDTO`, `SyncResultDTO`, `SyncBucketDTO` no pacote `observability`.
+- **3 testes unitários**: `TestSyncStatus_Idle`, `TestSyncStatus_Running`, `TestSyncStatus_WithLastResult`.
+
+---
+
 ## [v3.3.2] — 2026-03-05
 
 Fix de upload para arquivos grandes — suporte a multipart upload automático.
