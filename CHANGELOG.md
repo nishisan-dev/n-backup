@@ -11,6 +11,20 @@ e o versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v3.3.2] — 2026-03-05
+
+Fix de upload para arquivos grandes — suporte a multipart upload automático.
+
+### Corrigido
+- **`EntityTooLarge` em backups grandes**: o `S3Backend.Upload` usava `PutObject` simples, limitado a ~5GB por arquivo. Migrado para `s3manager.Uploader` (AWS SDK v2) que automaticamente faz multipart upload, dividindo o arquivo em parts de 64MB com 5 uploads paralelos. Resolve uploads de backups de centenas de GB (testado com arquivo de 456GB).
+
+### Adicionado
+- Dependência `github.com/aws/aws-sdk-go-v2/feature/s3/manager` para multipart upload automático.
+- Log field `multipart: true/false` no início de cada upload para visibilidade.
+- Log field `size` no final do upload para acompanhamento.
+
+---
+
 ## [v3.3.1] — 2026-03-05
 
 Sincronização retroativa de backups existentes com Object Storage via sinalização CLI → Daemon.
