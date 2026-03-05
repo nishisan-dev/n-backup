@@ -16,7 +16,8 @@ import (
 
 // defaultBackendFactory cria um objstore.Backend real a partir de BucketConfig.
 // Resolve credenciais via variáveis de ambiente.
-func defaultBackendFactory(cfg config.BucketConfig) (objstore.Backend, error) {
+// É uma variável para permitir substituição em testes.
+var defaultBackendFactory = func(cfg config.BucketConfig) (objstore.Backend, error) {
 	accessKey := os.Getenv(cfg.Credentials.AccessKeyEnv)
 	secretKey := os.Getenv(cfg.Credentials.SecretKeyEnv)
 

@@ -106,6 +106,13 @@ type Handler struct {
 	// storageCache mantém snapshot cacheado de StorageUsage, atualizado por StartStorageScanner.
 	// Evita syscall.Statfs + filepath.WalkDir a cada request HTTP.
 	storageCache atomic.Value // []observability.StorageUsage
+
+	// syncRunning guarda o estado do sync retroativo para evitar execuções concorrentes.
+	syncRunning atomic.Bool
+
+	// lastSyncResult armazena o resultado da última sincronização retroativa.
+	// Consultável via WebUI/API para visibilidade operacional.
+	lastSyncResult atomic.Value // *SyncStorageResult
 }
 
 // ControlConnInfo armazena metadata de um control channel conectado.

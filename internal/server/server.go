@@ -13,8 +13,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/nishisan-dev/n-backup/internal/config"
@@ -74,6 +76,21 @@ func Run(ctx context.Context, cfg *config.ServerConfig, logger *slog.Logger) err
 
 	// Chunk buffer drainer — desabilitado quando chunk_buffer.size é 0
 	handler.StartChunkBuffer(ctx)
+
+	// SIGUSR1: sync retroativo de storage com Object Storage
+	syncSigCh := make(chan os.Signal, 1)
+	signal.Notify(syncSigCh, syscall.SIGUSR1)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-syncSigCh:
+				logger.Info("SIGUSR1 received — triggering storage sync")
+				go handler.SyncExistingStorage(ctx)
+			}
+		}
+	}()
 
 	// Goroutine para fechar o listener quando o context for cancelado
 	go func() {
