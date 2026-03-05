@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
@@ -23,9 +24,10 @@ import (
 // S3Backend implementa Backend para qualquer endpoint S3-compatible
 // (AWS S3, MinIO, Wasabi, DigitalOcean Spaces, etc.).
 type S3Backend struct {
-	client *s3.Client
-	bucket string
-	logger *slog.Logger
+	client   *s3.Client
+	uploader *manager.Uploader
+	bucket   string
+	logger   *slog.Logger
 }
 
 // S3Config contém os parâmetros para criar um S3Backend.
@@ -37,6 +39,13 @@ type S3Config struct {
 	SecretKey string
 	Logger    *slog.Logger
 }
+
+// multipartPartSize define o tamanho de cada part no multipart upload (64MB).
+// Valor escolhido para balancear throughput e memória em arquivos grandes.
+const multipartPartSize = 64 * 1024 * 1024 // 64 MB
+
+// multipartConcurrency define quantas parts são enviadas em paralelo.
+const multipartConcurrency = 5
 
 // NewS3Backend cria um S3Backend com credenciais estáticas e endpoint configurável.
 func NewS3Backend(ctx context.Context, cfg S3Config) (*S3Backend, error) {
@@ -68,16 +77,24 @@ func NewS3Backend(ctx context.Context, cfg S3Config) (*S3Backend, error) {
 	}
 
 	client := s3.NewFromConfig(awsCfg, s3Opts...)
+
+	uploader := manager.NewUploader(client, func(u *manager.Uploader) {
+		u.PartSize = multipartPartSize
+		u.Concurrency = multipartConcurrency
+	})
+
 	return &S3Backend{
-		client: client,
-		bucket: cfg.Bucket,
-		logger: cfg.Logger,
+		client:   client,
+		uploader: uploader,
+		bucket:   cfg.Bucket,
+		logger:   cfg.Logger,
 	}, nil
 }
 
 // Upload envia um arquivo local para o bucket S3.
-// Usa PutObject simples — suficiente para backups de até ~5GB.
-// Para arquivos maiores, uma evolução futura pode usar multipart upload.
+// Usa o S3 Manager Uploader que automaticamente faz multipart upload para
+// arquivos maiores que PartSize (64MB). Suporta arquivos de qualquer tamanho
+// (até o limite S3 de 5TB).
 func (b *S3Backend) Upload(ctx context.Context, localPath, remotePath string) error {
 	f, err := os.Open(localPath)
 	if err != nil {
@@ -95,10 +112,11 @@ func (b *S3Backend) Upload(ctx context.Context, localPath, remotePath string) er
 		"key", remotePath,
 		"size", info.Size(),
 		"file", filepath.Base(localPath),
+		"multipart", info.Size() > multipartPartSize,
 	)
 
 	start := time.Now()
-	_, err = b.client.PutObject(ctx, &s3.PutObjectInput{
+	_, err = b.uploader.Upload(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(b.bucket),
 		Key:    aws.String(remotePath),
 		Body:   f,
@@ -110,6 +128,7 @@ func (b *S3Backend) Upload(ctx context.Context, localPath, remotePath string) er
 	b.logger.Info("upload completed",
 		"bucket", b.bucket,
 		"key", remotePath,
+		"size", info.Size(),
 		"duration", time.Since(start).Round(time.Millisecond),
 	)
 	return nil
