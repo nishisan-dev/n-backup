@@ -27,11 +27,12 @@ var defaultBackendFactory = func(cfg config.BucketConfig) (objstore.Backend, err
 	}
 
 	return objstore.NewS3Backend(context.Background(), objstore.S3Config{
-		Endpoint:  cfg.Endpoint,
-		Region:    cfg.Region,
-		Bucket:    cfg.Bucket,
-		AccessKey: accessKey,
-		SecretKey: secretKey,
+		Endpoint:     cfg.Endpoint,
+		Region:       cfg.Region,
+		Bucket:       cfg.Bucket,
+		AccessKey:    accessKey,
+		SecretKey:    secretKey,
+		StallTimeout: cfg.StallTimeout,
 	})
 }
 

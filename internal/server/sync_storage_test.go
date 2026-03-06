@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/nishisan-dev/n-backup/internal/config"
 	"github.com/nishisan-dev/n-backup/internal/objstore"
@@ -579,7 +578,7 @@ func TestListLocalBackups(t *testing.T) {
 func TestUploadWithRetryStandalone(t *testing.T) {
 	t.Run("success_first_attempt", func(t *testing.T) {
 		mock := objstore.NewMockBackend()
-		err := uploadWithRetryStandalone(context.Background(), mock, "/dev/null", "test/file.tar.gz", 3, 30*time.Minute, slog.Default())
+		err := uploadWithRetryStandalone(context.Background(), mock, "/dev/null", "test/file.tar.gz", 3, slog.Default())
 		if err != nil {
 			t.Errorf("expected success, got: %v", err)
 		}
@@ -588,7 +587,7 @@ func TestUploadWithRetryStandalone(t *testing.T) {
 	t.Run("all_attempts_fail", func(t *testing.T) {
 		mock := objstore.NewMockBackend()
 		mock.UploadErr = fmt.Errorf("permanent failure")
-		err := uploadWithRetryStandalone(context.Background(), mock, "/dev/null", "test/file.tar.gz", 2, 1*time.Second, slog.Default())
+		err := uploadWithRetryStandalone(context.Background(), mock, "/dev/null", "test/file.tar.gz", 2, slog.Default())
 		if err == nil {
 			t.Error("expected error after all retries, got nil")
 		}
@@ -599,7 +598,7 @@ func TestUploadWithRetryStandalone(t *testing.T) {
 		mock.UploadErr = fmt.Errorf("transient failure")
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		err := uploadWithRetryStandalone(ctx, mock, "/dev/null", "test/file.tar.gz", 3, 30*time.Minute, slog.Default())
+		err := uploadWithRetryStandalone(ctx, mock, "/dev/null", "test/file.tar.gz", 3, slog.Default())
 		if err == nil {
 			t.Error("expected error with cancelled context, got nil")
 		}

@@ -27,8 +27,7 @@ import (
 type PostCommitOrchestrator struct {
 	buckets  []bucketTarget
 	logger   *slog.Logger
-	timeout  time.Duration // timeout por upload (default: 30min)
-	maxRetry int           // tentativas de retry (default: 3)
+	maxRetry int // tentativas de retry (default: 3)
 }
 
 // bucketTarget agrupa config + backend instanciado para um bucket.
@@ -69,7 +68,6 @@ func NewPostCommitOrchestrator(
 	return &PostCommitOrchestrator{
 		buckets:  targets,
 		logger:   logger,
-		timeout:  30 * time.Minute,
 		maxRetry: 3,
 	}, nil
 }
@@ -271,12 +269,13 @@ func (o *PostCommitOrchestrator) rotateBucket(ctx context.Context, bt bucketTarg
 }
 
 // uploadWithRetry tenta upload com retry exponencial (backoff 1s → 4s → 16s).
+// O timeout por inatividade é controlado internamente pelo stall detection do
+// S3Backend — não há deadline global. Após falha definitiva, multipart
+// uploads incompletos são limpos via AbortIncompleteUploads.
 func (o *PostCommitOrchestrator) uploadWithRetry(ctx context.Context, backend objstore.Backend, localPath, remotePath string, logger *slog.Logger) error {
 	var lastErr error
 	for attempt := 0; attempt < o.maxRetry; attempt++ {
-		uploadCtx, cancel := context.WithTimeout(ctx, o.timeout)
-		err := backend.Upload(uploadCtx, localPath, remotePath)
-		cancel()
+		err := backend.Upload(ctx, localPath, remotePath)
 
 		if err == nil {
 			return nil
@@ -296,6 +295,11 @@ func (o *PostCommitOrchestrator) uploadWithRetry(ctx context.Context, backend ob
 			return ctx.Err()
 		case <-time.After(backoff):
 		}
+	}
+
+	// Limpeza: aborta multipart uploads incompletos para não deixar lixo
+	if abortErr := backend.AbortIncompleteUploads(context.Background(), remotePath); abortErr != nil {
+		logger.Warn("failed to abort incomplete multipart uploads", "key", remotePath, "error", abortErr)
 	}
 
 	return fmt.Errorf("upload failed after %d attempts: %w", o.maxRetry, lastErr)
