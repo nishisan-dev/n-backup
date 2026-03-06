@@ -11,6 +11,24 @@ e o versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ---
 
+## [v3.3.4] — 2026-03-06
+
+Upload resiliente com stall detection — substitui timeout fixo de 30min por detecção de inatividade inteligente.
+
+### Adicionado
+- **Stall Detection para uploads S3**: o `S3Backend.Upload` agora wrapa o `io.Reader` do arquivo com um `stallDetectReader` que reseta um timer a cada `Read()` bem-sucedido. **Enquanto bytes estiverem fluindo, o upload continua indefinidamente** — sem deadline global. Se a conexão ficar parada por 5 minutos (configurável via `stall_timeout`), o contexto é cancelado e o retry é acionado. Resolve uploads de arquivos grandes (>100GB) que falhavam sistematicamente com `context deadline exceeded` após 30min.
+- **Limpeza de multipart uploads incompletos**: novo método `AbortIncompleteUploads` na interface `Backend`. Após falha definitiva de upload, multipart uploads órfãos são abortados via `ListMultipartUploads` + `AbortMultipartUpload`, eliminando "pastas fantasmas" no bucket.
+- **`stall_timeout` configurável por bucket**: campo `stall_timeout` no `BucketConfig` (YAML) permite ajustar a tolerância de inatividade por bucket (default: 5 minutos).
+- **Logs de upload enriquecidos**: `size_human` (ex: `425.64 GB`), `avg_mbps`, `stall_timeout` nos logs de início/fim de upload para diagnóstico operacional.
+
+### Removido
+- **Timeout fixo de 30min**: o `context.WithTimeout` de 30 minutos em `uploadWithRetry` e `uploadWithRetryStandalone` foi completamente removido. O campo `timeout` do `PostCommitOrchestrator` também foi eliminado.
+
+### Motivação
+> Em produção (Contabo S3-compatible), uploads de backups de ~456GB falhavam após exatamente 30 minutos em cada tentativa (3 retries × 30min = ~3h desperdiçadas). O timeout fixo não considerava se dados ainda estavam fluindo — matava o upload mesmo com banda ativa. O stall detection resolve isso: se a conexão está lenta mas funcional (ex: 5MB/s), o upload continua por 25h se necessário. Só cancela quando a conexão realmente morre.
+
+---
+
 ## [v3.3.3] — 2026-03-05
 
 Sync jobs de Object Storage visíveis no WebUI com progresso em tempo real.
