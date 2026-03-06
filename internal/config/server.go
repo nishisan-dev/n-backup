@@ -170,15 +170,16 @@ type BucketCredentials struct {
 
 // BucketConfig define um destino de object storage pós-commit.
 type BucketConfig struct {
-	Name        string            `yaml:"name"`        // nome único dentro do storage
-	Provider    string            `yaml:"provider"`    // s3 (expandível para gcs, azure)
-	Endpoint    string            `yaml:"endpoint"`    // vazio = AWS default; preenchido = MinIO/compatível
-	Region      string            `yaml:"region"`      // região AWS (default: us-east-1)
-	Bucket      string            `yaml:"bucket"`      // nome do bucket
-	Prefix      string            `yaml:"prefix"`      // prefixo de objetos no bucket (opcional)
-	Mode        string            `yaml:"mode"`        // sync|offload|archive
-	Retain      int               `yaml:"retain"`      // obrigatório para offload/archive; proibido para sync
-	Credentials BucketCredentials `yaml:"credentials"` // credenciais via env vars
+	Name         string            `yaml:"name"`          // nome único dentro do storage
+	Provider     string            `yaml:"provider"`      // s3 (expandível para gcs, azure)
+	Endpoint     string            `yaml:"endpoint"`      // vazio = AWS default; preenchido = MinIO/compatível
+	Region       string            `yaml:"region"`        // região AWS (default: us-east-1)
+	Bucket       string            `yaml:"bucket"`        // nome do bucket
+	Prefix       string            `yaml:"prefix"`        // prefixo de objetos no bucket (opcional)
+	Mode         string            `yaml:"mode"`          // sync|offload|archive
+	Retain       int               `yaml:"retain"`        // obrigatório para offload/archive; proibido para sync
+	StallTimeout time.Duration     `yaml:"stall_timeout"` // inatividade máxima antes de cancelar upload (default: 5m)
+	Credentials  BucketCredentials `yaml:"credentials"`   // credenciais via env vars
 }
 
 // StorageInfo contém configurações de armazenamento e rotação de um storage nomeado.
