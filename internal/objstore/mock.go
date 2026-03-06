@@ -19,6 +19,7 @@ type MockBackend struct {
 
 	UploadCalls []string // registra remotePaths enviados
 	DeleteCalls []string // registra remotePaths deletados
+	AbortCalls  []string // registra prefixos de abort chamados
 
 	// Injeção de erros para testes de falha
 	UploadErr error
@@ -98,6 +99,14 @@ func (m *MockBackend) ObjectKeys() []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// AbortIncompleteUploads registra a chamada e retorna nil (mock no-op).
+func (m *MockBackend) AbortIncompleteUploads(_ context.Context, prefix string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.AbortCalls = append(m.AbortCalls, prefix)
+	return nil
 }
 
 // Compile-time interface check
