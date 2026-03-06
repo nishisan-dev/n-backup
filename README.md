@@ -83,6 +83,18 @@ Agent ←→ Server: CTRL magic → ControlPing/Pong (keep-alive + RTT) + Contro
 
 ---
 
+## 🖥️ WebUI — Observabilidade em Tempo Real
+
+O server inclui uma **SPA embarcada** para monitoramento em tempo real — sessões, agents, throughput, eventos e configuração efetiva.
+
+![Overview da WebUI](https://raw.githubusercontent.com/nishisan-dev/n-backup/main/wiki/images/webui_overview.png)
+
+![Sessões da WebUI](https://raw.githubusercontent.com/nishisan-dev/n-backup/main/wiki/images/webui_sessions.png)
+
+Mais detalhes na [documentação da WebUI](https://github.com/nishisan-dev/n-backup/wiki/WebUI).
+
+---
+
 ## 📦 Instalação
 
 ### Via pacote `.deb` (Ubuntu/Debian) — Recomendado

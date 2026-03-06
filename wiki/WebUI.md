@@ -2,6 +2,8 @@
 
 O n-backup inclui uma **SPA (Single Page Application) embarcada** no binário do server (via `go:embed`), oferecendo um painel de observabilidade em tempo real para monitorar sessões de backup.
 
+![Overview da WebUI](https://raw.githubusercontent.com/nishisan-dev/n-backup/main/wiki/images/webui_overview.png)
+
 ---
 
 ## Ativação
@@ -50,7 +52,11 @@ A página principal exibe:
 | **Active Sessions** | Sessões de backup em andamento |
 | **Recent Events** | Timeline de eventos do server (início/fim de sessão, reconexões, rotações) |
 
+> A imagem no topo desta página mostra a view Overview com dados reais de um ambiente de produção.
+
 ### Session List
+
+![Sessões da WebUI](https://raw.githubusercontent.com/nishisan-dev/n-backup/main/wiki/images/webui_sessions.png)
 
 Cada sessão ativa é exibida como um card contendo:
 
@@ -81,6 +87,18 @@ Ao clicar em uma sessão, visualize:
 ### Session History
 
 As sessões completadas ficam acessíveis na aba de histórico, **persistidas em disco** via `session_history_file` — disponíveis mesmo após reinicios do server.
+
+### Eventos
+
+![Eventos da WebUI](https://raw.githubusercontent.com/nishisan-dev/n-backup/main/wiki/images/webui_events.png)
+
+Timeline de eventos do server em tempo real, com filtros de quantidade e exportação em JSON.
+
+### Configuração Efetiva
+
+![Config da WebUI](https://raw.githubusercontent.com/nishisan-dev/n-backup/main/wiki/images/webui_config.png)
+
+Visualização da configuração efetiva do server em formato JSON.
 
 ---
 
