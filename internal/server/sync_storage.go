@@ -286,7 +286,7 @@ func (h *Handler) syncOneBucket(ctx context.Context, storageName string, si conf
 
 		// Upload com retry
 		uploadLogger := logger.With("file", lf.RelPath, "remote_key", remoteKey)
-		if err := uploadWithRetryStandalone(ctx, backend, lf.AbsPath, remoteKey, 3, 30*time.Minute, uploadLogger); err != nil {
+		if err := uploadWithRetryStandalone(ctx, backend, lf.AbsPath, remoteKey, 3, uploadLogger); err != nil {
 			uploadLogger.Error("sync-storage: upload failed", "error", err)
 			br.Errors++
 			p.ErrorFiles.Add(1)
@@ -360,12 +360,12 @@ func listLocalBackups(baseDir string) ([]localBackupFile, error) {
 
 // uploadWithRetryStandalone é uma versão standalone do upload com retry,
 // sem depender de um PostCommitOrchestrator instanciado.
-func uploadWithRetryStandalone(ctx context.Context, backend objstore.Backend, localPath, remotePath string, maxRetry int, timeout time.Duration, logger *slog.Logger) error {
+// O timeout por inatividade é controlado internamente pelo stall detection
+// do S3Backend — não há deadline global.
+func uploadWithRetryStandalone(ctx context.Context, backend objstore.Backend, localPath, remotePath string, maxRetry int, logger *slog.Logger) error {
 	var lastErr error
 	for attempt := 0; attempt < maxRetry; attempt++ {
-		uploadCtx, cancel := context.WithTimeout(ctx, timeout)
-		err := backend.Upload(uploadCtx, localPath, remotePath)
-		cancel()
+		err := backend.Upload(ctx, localPath, remotePath)
 
 		if err == nil {
 			return nil
@@ -385,6 +385,11 @@ func uploadWithRetryStandalone(ctx context.Context, backend objstore.Backend, lo
 			return ctx.Err()
 		case <-time.After(backoff):
 		}
+	}
+
+	// Limpeza: aborta multipart uploads incompletos para não deixar lixo
+	if abortErr := backend.AbortIncompleteUploads(context.Background(), remotePath); abortErr != nil {
+		logger.Warn("sync-storage: failed to abort incomplete multipart uploads", "key", remotePath, "error", abortErr)
 	}
 
 	return fmt.Errorf("upload failed after %d attempts: %w", maxRetry, lastErr)

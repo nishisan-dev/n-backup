@@ -24,20 +24,22 @@ import (
 // S3Backend implementa Backend para qualquer endpoint S3-compatible
 // (AWS S3, MinIO, Wasabi, DigitalOcean Spaces, etc.).
 type S3Backend struct {
-	client   *s3.Client
-	uploader *manager.Uploader
-	bucket   string
-	logger   *slog.Logger
+	client       *s3.Client
+	uploader     *manager.Uploader
+	bucket       string
+	logger       *slog.Logger
+	stallTimeout time.Duration // inatividade máxima antes de cancelar upload
 }
 
 // S3Config contém os parâmetros para criar um S3Backend.
 type S3Config struct {
-	Endpoint  string // vazio = AWS default
-	Region    string
-	Bucket    string
-	AccessKey string
-	SecretKey string
-	Logger    *slog.Logger
+	Endpoint     string        // vazio = AWS default
+	Region       string
+	Bucket       string
+	AccessKey    string
+	SecretKey    string
+	Logger       *slog.Logger
+	StallTimeout time.Duration // 0 = defaultStallTimeout (5min)
 }
 
 // multipartPartSize define o tamanho de cada part no multipart upload (64MB).
@@ -83,11 +85,17 @@ func NewS3Backend(ctx context.Context, cfg S3Config) (*S3Backend, error) {
 		u.Concurrency = multipartConcurrency
 	})
 
+	stallTimeout := cfg.StallTimeout
+	if stallTimeout <= 0 {
+		stallTimeout = defaultStallTimeout
+	}
+
 	return &S3Backend{
-		client:   client,
-		uploader: uploader,
-		bucket:   cfg.Bucket,
-		logger:   cfg.Logger,
+		client:       client,
+		uploader:     uploader,
+		bucket:       cfg.Bucket,
+		logger:       cfg.Logger,
+		stallTimeout: stallTimeout,
 	}, nil
 }
 
@@ -95,6 +103,10 @@ func NewS3Backend(ctx context.Context, cfg S3Config) (*S3Backend, error) {
 // Usa o S3 Manager Uploader que automaticamente faz multipart upload para
 // arquivos maiores que PartSize (64MB). Suporta arquivos de qualquer tamanho
 // (até o limite S3 de 5TB).
+//
+// Stall detection: o reader é wrapeado com stallDetectReader que cancela
+// o contexto se nenhum byte for lido em stallTimeout. Enquanto bytes
+// fluírem, o upload continua indefinidamente — sem deadline global.
 func (b *S3Backend) Upload(ctx context.Context, localPath, remotePath string) error {
 	f, err := os.Open(localPath)
 	if err != nil {
@@ -107,29 +119,44 @@ func (b *S3Backend) Upload(ctx context.Context, localPath, remotePath string) er
 		return fmt.Errorf("objstore/s3: stat file %q: %w", localPath, err)
 	}
 
+	fileSize := info.Size()
 	b.logger.Info("uploading to S3",
 		"bucket", b.bucket,
 		"key", remotePath,
-		"size", info.Size(),
+		"size", fileSize,
+		"size_human", humanSize(fileSize),
 		"file", filepath.Base(localPath),
-		"multipart", info.Size() > multipartPartSize,
+		"multipart", fileSize > multipartPartSize,
+		"stall_timeout", b.stallTimeout,
 	)
 
+	// Contexto com cancel para stall detection
+	uploadCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Wrapa o reader com stall detection
+	stallReader := newStallDetectReader(f, b.stallTimeout, cancel)
+	defer stallReader.Close()
+
 	start := time.Now()
-	_, err = b.uploader.Upload(ctx, &s3.PutObjectInput{
+	_, err = b.uploader.Upload(uploadCtx, &s3.PutObjectInput{
 		Bucket: aws.String(b.bucket),
 		Key:    aws.String(remotePath),
-		Body:   f,
+		Body:   stallReader,
 	})
 	if err != nil {
 		return fmt.Errorf("objstore/s3: PutObject %q: %w", remotePath, err)
 	}
 
+	duration := time.Since(start)
+	avgMBps := float64(fileSize) / (1024 * 1024) / duration.Seconds()
 	b.logger.Info("upload completed",
 		"bucket", b.bucket,
 		"key", remotePath,
-		"size", info.Size(),
-		"duration", time.Since(start).Round(time.Millisecond),
+		"size", fileSize,
+		"size_human", humanSize(fileSize),
+		"duration", duration.Round(time.Millisecond),
+		"avg_mbps", fmt.Sprintf("%.2f", avgMBps),
 	)
 	return nil
 }
@@ -187,4 +214,71 @@ func s3ObjectToInfo(obj types.Object) ObjectInfo {
 		oi.LastModified = *obj.LastModified
 	}
 	return oi
+}
+
+// AbortIncompleteUploads cancela multipart uploads pendentes cujas chaves
+// correspondem ao prefixo informado. Usado para limpar lixo após falha
+// definitiva de upload (parts órfãs que geram "pastas fantasmas" no bucket).
+func (b *S3Backend) AbortIncompleteUploads(ctx context.Context, prefix string) error {
+	paginator := s3.NewListMultipartUploadsPaginator(b.client, &s3.ListMultipartUploadsInput{
+		Bucket: aws.String(b.bucket),
+		Prefix: aws.String(prefix),
+	})
+
+	var aborted int
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("objstore/s3: ListMultipartUploads prefix=%q: %w", prefix, err)
+		}
+
+		for _, upload := range page.Uploads {
+			_, abortErr := b.client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+				Bucket:   aws.String(b.bucket),
+				Key:      upload.Key,
+				UploadId: upload.UploadId,
+			})
+			if abortErr != nil {
+				b.logger.Warn("failed to abort multipart upload",
+					"key", aws.ToString(upload.Key),
+					"upload_id", aws.ToString(upload.UploadId),
+					"error", abortErr,
+				)
+			} else {
+				aborted++
+			}
+		}
+	}
+
+	if aborted > 0 {
+		b.logger.Info("aborted incomplete multipart uploads",
+			"bucket", b.bucket,
+			"prefix", prefix,
+			"count", aborted,
+		)
+	}
+
+	return nil
+}
+
+// humanSize formata bytes em representação legível (KB, MB, GB, TB).
+func humanSize(bytes int64) string {
+	const (
+		kb = 1024
+		mb = 1024 * kb
+		gb = 1024 * mb
+		tb = 1024 * gb
+	)
+	switch {
+	case bytes >= tb:
+		return fmt.Sprintf("%.2f TB", float64(bytes)/float64(tb))
+	case bytes >= gb:
+		return fmt.Sprintf("%.2f GB", float64(bytes)/float64(gb))
+	case bytes >= mb:
+		return fmt.Sprintf("%.2f MB", float64(bytes)/float64(mb))
+	case bytes >= kb:
+		return fmt.Sprintf("%.2f KB", float64(bytes)/float64(kb))
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
 }

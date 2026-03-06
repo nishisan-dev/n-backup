@@ -31,4 +31,9 @@ type Backend interface {
 	// List lista objetos no bucket com o prefixo dado, ordenados por chave.
 	// Usado para rotação via retain (offload/archive).
 	List(ctx context.Context, prefix string) ([]ObjectInfo, error)
+
+	// AbortIncompleteUploads cancela multipart uploads pendentes cujas chaves
+	// correspondem ao prefixo informado. Chamado após falha definitiva de upload
+	// para evitar acúmulo de lixo (parts órfãs) no bucket.
+	AbortIncompleteUploads(ctx context.Context, prefix string) error
 }
