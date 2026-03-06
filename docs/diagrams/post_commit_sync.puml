@@ -6,6 +6,7 @@ title Fluxo Pós-Commit — Object Storage
 actor Agent
 participant "Handler\n(Single/Parallel)" as Handler
 participant "AtomicWriter" as AW
+participant "IntegrityVerifier" as IV
 participant "Rotate" as Rotate
 participant "PostCommitOrchestrator" as PCO
 participant "S3Backend\n(sync)" as Sync
@@ -17,6 +18,20 @@ database "S3 Bucket" as S3
 
 Handler -> AW: Commit(tmpPath)
 AW --> Handler: finalPath
+
+== Verificação de Integridade (opcional) ==
+
+opt verify_integrity: true
+  Handler -> IV: VerifyArchiveIntegrity(finalPath)
+  IV -> IV: Descomprime e valida tar entries\n(gzip ou zstd conforme extensão)
+  alt Integridade OK
+    IV --> Handler: nil
+  else Integridade falhou
+    IV --> Handler: error
+    Handler -> Handler: Abort — não rotaciona\n(preserva backups anteriores)
+    Handler -> Agent: **FINAL ACK** [INTEGRITY_ERROR]
+  end
+end
 
 == Rotação Local ==
 
@@ -32,7 +47,12 @@ group Paralelo (goroutines)
 
   group sync (fire-and-forget)
     PCO -> Sync: Upload(finalPath)
-    Sync -> S3: PutObject
+    note right
+      S3 Manager Uploader (multipart)
+      StallDetectReader monitora inatividade
+      Stall timeout cancela contexto se idle > N min
+    end note
+    Sync -> S3: CreateMultipartUpload\n+ UploadPart(s) + CompleteMultipart
     S3 --> Sync: OK
     loop para cada removedFile
       PCO -> Sync: Delete(removedFile)
@@ -42,7 +62,7 @@ group Paralelo (goroutines)
 
   group offload (blocking)
     PCO -> Offload: Upload(finalPath)
-    Offload -> S3: PutObject
+    Offload -> S3: CreateMultipartUpload\n+ UploadPart(s) + CompleteMultipart
     S3 --> Offload: OK
     Offload -> Offload: os.Remove(local)
     PCO -> Offload: List(prefix)
@@ -56,7 +76,7 @@ group Paralelo (goroutines)
   group archive (fire-and-forget)
     loop para cada removedFile
       PCO -> Archive: Upload(removedFile)
-      Archive -> S3: PutObject
+      Archive -> S3: CreateMultipartUpload\n+ UploadPart(s) + CompleteMultipart
     end
     PCO -> Archive: List(prefix)
     note right: Rotate via retain
@@ -65,6 +85,14 @@ group Paralelo (goroutines)
     end
   end
 
+end
+
+alt Upload falhou após retries
+  PCO -> Sync: AbortIncompleteUploads(prefix)
+  note right
+    Cleanup de parts órfãs no bucket
+    Evita acúmulo de lixo (multipart incompletos)
+  end note
 end
 
 PCO --> Handler: []PostCommitResult
@@ -77,6 +105,8 @@ Handler -> Agent: FinalACK(OK)
 note over Handler
   offload bloqueia até upload confirmado
   sync e archive são fire-and-forget
+  Stall detection: cancela upload se inativo > stall_timeout
+  Timeout por inatividade, sem deadline global
 end note
 
 @enduml

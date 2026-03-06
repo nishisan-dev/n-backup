@@ -106,6 +106,10 @@ O **n-backup** é um sistema de backup client-server de alta performance escrito
 | **AutoScaler** | `internal/agent/autoscaler.go` | Escala streams dinamicamente com histerese baseada em eficiência |
 | **Progress** | `internal/agent/progress.go` | Barra de progresso para modo `--once --progress` (MB/s, ETA, retries) |
 | **ControlChannel** | `internal/agent/control_channel.go` | Conexão TLS persistente com keep-alive (PING/PONG), RTT EWMA, recepção de ControlRotate para drenagem graceful de streams |
+| **DSCP** | `internal/agent/dscp.go` | DSCP marking em sockets TCP para QoS (Differentiated Services) |
+| **Monitor** | `internal/agent/monitor.go` | Monitor de recursos do sistema (CPU, memória, disco) para report ao server |
+| **StatsReporter** | `internal/agent/stats_reporter.go` | Reporter periódico de stats para o server via Control Channel |
+| **Throttle** | `internal/agent/throttle.go` | `ThrottledWriter` com Token Bucket para rate limiting de upload |
 
 ### 3.2. nbackup-server
 
@@ -134,21 +138,32 @@ O **n-backup** é um sistema de backup client-server de alta performance escrito
 | Componente | Arquivo | Responsabilidade |
 |-----------|---------|-----------------|
 | **Server** | `internal/server/server.go` | Listener TLS, aceita conexões, despacha para Handler |
-| **Handler** | `internal/server/handler.go` | Protocolo: handshake, resume, health check, data stream, trailer, final ACK. Emite eventos (início/fim de sessão, rotações, reconexões) para a WebUI |
-| **Storage** | `internal/server/storage.go` | Escrita atômica (`.tmp` → rename), rotação por `max_backups`, organização por agent |
-| **Assembler** | `internal/server/assembler.go` | Reassembla chunks de streams paralelos na ordem correta via `GlobalSeq` |
-| **PostCommitOrchestrator** | `internal/server/post_commit.go` | Orquestra upload pós-commit para Object Storage (S3-compatible). Modos: sync, offload, archive. Execução paralela por bucket com retry exponencial. |
-| **Slot** | `internal/server/slot.go` | Struct tipada por slot paralelo: estado (`Idle`, `Receiving`, `Disconnected`, `Disabled`), offsets, métricas de chunks e flow rotation. Substitui os 12 `sync.Map` anteriores. |
+| **Handler** | `internal/server/handler.go` | Router principal: despacha para handler modular conforme tipo de conexão (single, parallel, control, health) |
+| **HandlerSingle** | `internal/server/handler_single.go` | Fluxo de backup single-stream: data stream, trailer, final ACK |
+| **HandlerParallel** | `internal/server/handler_parallel.go` | Fluxo de backup paralelo: ParallelInit/Join, ChunkSACK, multi-stream |
+| **HandlerControl** | `internal/server/handler_control.go` | Canal de controle persistente: ControlPing/Pong, ControlRotate, ControlAdmit/Defer/Abort, SlotPark/Resume |
+| **HandlerHealth** | `internal/server/handler_health.go` | Health check: PING/PONG com status e disco |
+| **HandlerStorage** | `internal/server/handler_storage.go` | Operações de storage: commit atômico, rotação, integração com PostCommit |
+| **HandlerObservability** | `internal/server/handler_observability.go` | Emissão de eventos e métricas para WebUI (início/fim de sessão, rotações, reconexões) |
+| **Storage** | `internal/server/storage.go` | Escrita atômica (`.tmp` → rename), rotação por `max_backups`, organização por agent. Rotação emite log e evento com lista de backups removidos |
+| **Assembler** | `internal/server/assembler.go` | Reassembla chunks de streams paralelos na ordem correta via `GlobalSeq`. Staging de chunks suporta 1 ou 2 níveis de sharding (`chunk_shard_levels`) para reduzir entradas por diretório |
+| **ChunkBuffer** | `internal/server/chunkbuffer.go` | Buffer de chunks em memória global e compartilhado entre sessões paralelas. Drain configurável via `drain_ratio` (0.0=write-through, 0.0–1.0=threshold). Fallback direto ao assembler se chunk exceder capacidade. Flush scoped por sessão |
+| **PostCommitOrchestrator** | `internal/server/post_commit.go` | Orquestra upload pós-commit para Object Storage (S3-compatible). Modos: sync, offload, archive. Execução paralela por bucket com retry exponencial |
+| **PostCommitHelpers** | `internal/server/post_commit_helpers.go` | Helper `runPostCommitSync` + `defaultBackendFactory` para instanciação de backends |
+| **SyncStorage** | `internal/server/sync_storage.go` | Sincronização retroativa de backups locais com Object Storage. Acionado via SIGUSR1. Apenas buckets `mode: sync`. Progresso em tempo real (atômico) para WebUI |
+| **Integrity** | `internal/server/integrity.go` | `VerifyArchiveIntegrity()` — valida integridade de archives `.tar.gz`/`.tar.zst` antes da rotação (descomprime e itera todos os entries do tar) |
+| **Sanitize** | `internal/server/sanitize.go` | Sanitização de nomes de agent, storage e backup contra path traversal (`..`, `/`, `\`, null bytes, nomes ocultos) |
+| **Slot** | `internal/server/slot.go` | Struct tipada por slot paralelo: estado (`Idle`, `Receiving`, `Disconnected`, `Disabled`), offsets, métricas de chunks (recebidos/perdidos/retransmitidos) e flow rotation. Substitui os `sync.Map` anteriores |
 
 ### 3.3. Módulos Compartilhados
 
 | Módulo | Pacote | Responsabilidade |
 |--------|--------|-----------------|
-| **Config** | `internal/config/` | Parsing YAML, validação, defaults, `ParseByteSize`, `ControlChannelConfig` |
+| **Config** | `internal/config/` | Parsing YAML, validação, defaults, `ParseByteSize`, `ControlChannelConfig`, `ChunkBufferConfig` |
 | **Protocol** | `internal/protocol/` | Frames binários (Handshake, ACK, SACK, Resume, Parallel, Control) |
 | **PKI** | `internal/pki/` | Configuração TLS client/server, carregamento de certificados |
 | **Logging** | `internal/logging/` | Factory de `slog.Logger` (JSON/text, nível configurável) |
-| **Object Store** | `internal/objstore/` | Interface `Backend` (Upload, Delete, List) + implementação S3 via AWS SDK v2 |
+| **Object Store** | `internal/objstore/` | Interface `Backend` (Upload, Delete, List, AbortIncompleteUploads) + implementação S3 via AWS SDK v2 (S3 Manager Uploader para multipart). Inclui `StallDetectReader` para cancelamento por inatividade |
 
 ---
 
@@ -290,7 +305,9 @@ Tentativa 3 → falha → aguarda 4s
 Tentativa N → falha → aguarda min(2^N × initial_delay, max_delay)
 ```
 
-**Streams paralelos (v1.2.3+):** cada stream tem retry independente (3 tentativas). O backup só falha quando todos os streams morrem (`ErrAllStreamsDead`). Conexões TCP usam **write deadline** para detectar half-open connections.
+**Streams paralelos (v1.2.3+):** cada stream tem retry independente (até `maxRetriesPerStream=5` tentativas). O backup só falha quando todos os streams morrem (`ErrAllStreamsDead`). Conexões TCP usam **write deadline** para detectar half-open connections.
+
+> **Fix (v2.6.0):** O contador de retries é **resetado para zero** após cada reconexão bem-sucedida — evitando a morte prematura de streams que enfrentam falhas intermitentes esporádicas.
 
 ### Resume de Sessão
 
@@ -362,8 +379,9 @@ O nbackup-server embarca uma **SPA de observabilidade** acessível via HTTP, ser
 
 | Endpoint | Descrição |
 |----------|-----------|
-| `GET /api/v1/health` | Status do server |
-| `GET /api/v1/metrics` | Bytes recebidos, sessões |
+| `GET /api/v1/health` | Status do server (uptime, versão, goroutines, heap, GC) |
+| `GET /api/v1/metrics` | Bytes recebidos, sessões, chunk buffer stats |
+| `GET /metrics` | Métricas em formato Prometheus (conexões, sessões por modo, streams, agents, chunk buffer, sync storage) |
 | `GET /api/v1/sessions` | Sessões ativas |
 | `GET /api/v1/sessions/{id}` | Detalhe de sessão (streams, sparklines, assembler) |
 | `GET /api/v1/sessions/history` | Histórico de sessões finalizadas (ring buffer + JSONL) |
@@ -372,6 +390,7 @@ O nbackup-server embarca uma **SPA de observabilidade** acessível via HTTP, ser
 | `GET /api/v1/storages` | Storages com uso de disco (usado/total/percentual) |
 | `GET /api/v1/events` | Eventos recentes (ring buffer + persistência JSONL) |
 | `GET /api/v1/config/effective` | Configuração efetiva do server |
+| `GET /api/v1/sync/status` | Status e progresso em tempo real do sync retroativo de storage |
 
 ### WebUI (SPA)
 
@@ -387,10 +406,14 @@ O nbackup-server embarca uma **SPA de observabilidade** acessível via HTTP, ser
 
 | Componente | Arquivo | Responsabilidade |
 |-----------|---------|------------------|
-| **Observability HTTP** | `internal/server/observability/http.go` | Router, handlers REST, ACL |
+| **Observability HTTP** | `internal/server/observability/http.go` | Router, handlers REST e Prometheus, middleware ACL |
+| **ACL** | `internal/server/observability/acl.go` | Middleware de ACL baseada em IP/CIDR (deny-by-default) |
 | **DTOs** | `internal/server/observability/dto.go` | Structs para serialização JSON |
+| **Embed** | `internal/server/observability/embed.go` | Helper para embed de assets web (`go:embed`) |
+| **Events** | `internal/server/observability/events.go` | Lógica de emissão e gestão de eventos |
 | **Event Store** | `internal/server/observability/event_store.go` | Persistência JSONL com rotação |
-| **Session History Store** | `internal/server/observability/session_history_store.go` | Ring + persistência JSONL de sessões finalizadas |
+| **Session History** | `internal/server/observability/session_history.go` | Ring buffer de histórico de sessões |
+| **Session History Store** | `internal/server/observability/session_history_store.go` | Persistência JSONL de sessões finalizadas |
 | **Active Session Store** | `internal/server/observability/active_session_store.go` | Snapshots periódicos de sessões ativas (ring + JSONL) |
 | **WebUI Assets** | `internal/server/observability/web/` | SPA (HTML, CSS, JS) embarcados |
 
@@ -427,19 +450,24 @@ n-backup/
 │   │   ├── control_channel.go       #   Canal de controle persistente (PING/PONG, RTT, ControlRotate)
 │   │   ├── daemon.go                #   Daemon loop com graceful shutdown
 │   │   ├── dispatcher.go            #   Round-robin de chunks + Final ChunkSACK Drain + SACK timeout
+│   │   ├── dscp.go                  #   DSCP marking em sockets TCP (QoS)
+│   │   ├── monitor.go               #   Monitor de recursos (CPU, memória, disco)
 │   │   ├── progress.go              #   Progress bar (--once)
 │   │   ├── ringbuffer.go            #   Ring buffer para resume
 │   │   ├── scanner.go               #   fs.WalkDir com glob
 │   │   ├── scheduler.go             #   Cron scheduler wrapper
-│   │   └── streamer.go              #   Pipeline tar → pgzip → rede
+│   │   ├── stats_reporter.go        #   Reporter de stats para o server (control channel)
+│   │   ├── streamer.go              #   Pipeline tar → pgzip → rede
+│   │   └── throttle.go              #   ThrottledWriter (Token Bucket)
 │   ├── config/                       # Parsing YAML + validação
 │   │   ├── agent.go                 #   AgentConfig + ControlChannelConfig
-│   │   └── server.go                #   ServerConfig
+│   │   └── server.go                #   ServerConfig + ChunkBufferConfig
 │   ├── integration/                  # Testes de integração
 │   ├── logging/                      # Factory de slog.Logger
 │   ├── objstore/                     # Interface Backend + S3 implementation
-│   │   ├── backend.go               #   Interface Backend (Upload, Delete, List)
-│   │   ├── s3.go                    #   S3Backend (AWS SDK v2)
+│   │   ├── backend.go               #   Interface Backend (Upload, Delete, List, AbortIncompleteUploads)
+│   │   ├── s3.go                    #   S3Backend (AWS SDK v2, S3 Manager Uploader)
+│   │   ├── stall_reader.go          #   StallDetectReader (cancelamento por inatividade)
 │   │   └── mock.go                  #   MockBackend para testes
 │   ├── pki/                          # Configuração TLS client/server
 │   ├── protocol/                     # Frames binários, reader, writer
@@ -447,17 +475,32 @@ n-backup/
 │   │   └── control.go               #   Frames de controle (CPNG, CROT, CRAK, CADM, CDFE, CABT)
 │   └── server/                       # Receiver, handler, storage, assembler
 │       ├── assembler.go             #   Reassembly de chunks paralelos
-│       ├── handler.go               #   Protocolo handler + handleControlChannel
+│       ├── chunkbuffer.go           #   Buffer de chunks em memória (global, compartilhado)
+│       ├── handler.go               #   Router principal (despacha para handlers modulares)
+│       ├── handler_control.go       #   Canal de controle persistente
+│       ├── handler_health.go        #   Health check (PING/PONG)
+│       ├── handler_observability.go  #   Emissão de eventos e métricas para WebUI
+│       ├── handler_parallel.go      #   Fluxo de backup paralelo (ParallelInit/Join, ChunkSACK)
+│       ├── handler_single.go        #   Fluxo de backup single-stream
+│       ├── handler_storage.go       #   Operações de storage (commit, rotação, PostCommit)
+│       ├── integrity.go             #   Verificação de integridade de archives (.tar.gz/.tar.zst)
 │       ├── post_commit.go           #   PostCommitOrchestrator (object storage pós-commit)
 │       ├── post_commit_helpers.go   #   Helper runPostCommitSync + defaultBackendFactory
+│       ├── sanitize.go              #   Sanitização de nomes (anti path-traversal)
 │       ├── server.go                #   TLS listener
 │       ├── slot.go                  #   Slot struct (estado tipado, métricas atômicas, flow rotation)
 │       ├── storage.go               #   Escrita atômica + rotação
-│       └── observability/           #   WebUI + APIs REST + persistência JSONL de chunks paralelos
-│           ├── http.go              #     Router e handlers
+│       ├── sync_storage.go          #   Sincronização retroativa com Object Storage (SIGUSR1)
+│       └── observability/           #   WebUI + APIs REST + Prometheus + persistência JSONL
+│           ├── acl.go               #     Middleware ACL (IP/CIDR)
 │           ├── dto.go               #     DTOs de serialização
+│           ├── embed.go             #     Helper go:embed
+│           ├── events.go            #     Lógica de eventos
 │           ├── event_store.go       #     Persistência JSONL de eventos
+│           ├── http.go              #     Router e handlers (REST + Prometheus)
 │           ├── session_history.go   #     Ring buffer de histórico
+│           ├── session_history_store.go # Persistência JSONL de sessões finalizadas
+│           ├── active_session_store.go  # Snapshots periódicos de sessões ativas
 │           └── web/                 #     SPA embarcado (go:embed)
 ├── configs/                          # Exemplos de configuração
 │   ├── agent.example.yaml
@@ -475,6 +518,7 @@ n-backup/
 │   └── man/                         #   Man pages
 ├── scripts/
 │   └── check-missing-chunks.py      #   Parser de session logs para gaps de chunks
+├── wiki/                             # Conteúdo da GitHub Wiki
 ├── planning/                         # Artefatos de planejamento
 ├── go.mod
 ├── go.sum
@@ -497,6 +541,9 @@ n-backup/
 | 7 | **`slog` (stdlib)** | Zap, Zerolog, Logrus | Zero dependências externas. Performance adequada. JSON structured por padrão. |
 | 8 | **Named Storages** (mapa no server) | Storage único, filesystem routing | Permite políticas de rotação independentes por tipo de backup (scripts vs dados vs configs). |
 | 9 | **SPA embarcado** (`go:embed`) | Grafana, Prometheus UI | Zero dependências externas. Single binary deployment. Assets estáticos servidos diretamente do binário. |
+| 10 | **Chunk shard levels configurável** (1 ou 2) | Estrutura flat única | 1 nível é suficiente para a maioria. 2 níveis reduz contagem de entradas por diretório em sessões com muitos chunks paralelos, melhorando performance do filesystem. |
+| 11 | **Persistência JSONL da WebUI** | SQLite, banco em memória | JSONL é append-only, zero dependências, rotação por `max_lines`. Sobrevive a crashes sem corrupção. |
+| 12 | **Slot struct pré-alocado** (v3.0.0) | 12× `sync.Map` | Elimina overhead de type-assertion, permite métricas atômicas tipadas por slot e estado de vida explícito. |
 
 ---
 

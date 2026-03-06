@@ -48,6 +48,15 @@ while (Mais backup entries?) is (sim)
       :Stream N\n(ParallelJoin);
     end fork
 
+    :Server: **ChunkSACK** per-chunk\n(ack por chunk recebido);
+
+    if (ChunkBuffer habilitado?) then (sim)
+      :Push chunk → ChunkBuffer\n(in-memory staging);
+      :Drainer → Assembler.WriteChunk\n(conforme drain_ratio);
+    else (não)
+      :WriteChunk direto\n(staging em disco ou append);
+    endif
+
     if (Stream cai?) then (sim)
       :Retry + Re-Join\n(backoff 1s/2s/4s);
       if (3 tentativas?) then (esgotou)
@@ -58,6 +67,7 @@ while (Mais backup entries?) is (sim)
     else (não)
     endif
 
+    :Final ChunkSACK Drain\n(aguarda todos os chunks confirmados);
     :ChunkAssembler\nreassembla na ordem;
 
   else (não — Single)
@@ -83,7 +93,30 @@ while (Mais backup entries?) is (sim)
   :Calcular SHA-256 (io.MultiWriter);
   if (Checksum match?) then (sim)
     :Rename .tmp → timestamp.tar.gz\n(atomic rename);
+
+    if (verify_integrity habilitado?) then (sim)
+      :VerifyArchiveIntegrity\n(lê e descomprime tar inteiro);
+      if (Integridade OK?) then (sim)
+      else (falha)
+        :Log error, abort;\nNão rota — backup preservado;
+        stop
+      endif
+    else (não)
+    endif
+
     :Rotação (max_backups);
+
+    if (Object Storage configurado?) then (sim)
+      :PostCommitOrchestrator\n(sync/offload/archive);
+      :S3 Manager Uploader\n(multipart + stall detection);
+      if (Upload falhou?) then (sim)
+        :Retry exponencial;
+        :AbortIncompleteUploads\n(cleanup multipart órfãos);
+      else (não)
+      endif
+    else (não)
+    endif
+
     :Enviar **FINAL ACK** (OK);
   else (não)
     :Remover .tmp;

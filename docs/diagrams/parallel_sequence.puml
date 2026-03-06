@@ -9,6 +9,7 @@ title NBackup — Sessão de Backup Paralelo (v1.2.3+)
 participant "Agent\n(Primary Conn)" as C
 participant "Agent\n(Stream Senders)" as S
 participant "Server\n(Handler)" as H
+participant "ChunkBuffer\n(in-memory)" as CB
 database "Storage\n(ChunkAssembler)" as D
 
 == TLS 1.3 Handshake (mTLS) — Conn Primária ==
@@ -43,17 +44,25 @@ H -> S : **ParallelACK** [OK, lastOffset=0]
 S -> H : **ParallelJoin** [SessionID, idx=3]\n(nova Conn TLS)
 H -> S : **ParallelACK** [OK, lastOffset=0]
 
-== Data Streaming (ChunkHeader + Payload) ==
+== Data Streaming (ChunkHeader + Payload + ChunkSACK) ==
 
 loop Dispatcher round-robin entre streams ativos
   S -> H : **[ChunkHeader]** [idx, seq, len]\n+ **DATA** (payload bytes)
-  H -> D : Escrita no offset correto\n(StreamOffsets atualizado atomicamente)
+
+  alt ChunkBuffer habilitado
+    H -> CB : Push(globalSeq, data)
+    CB -> D : Drainer → WriteChunk\n(conforme drain_ratio)
+  else ChunkBuffer desabilitado
+    H -> D : WriteChunk direto\n(StreamOffsets atualizado atomicamente)
+  end
+
+  H -> S : **ChunkSACK** [seq, offset]\n(ack per-chunk)
 end
 
 == Stream Failure + Resume (Re-Join) ==
 
 note over S, H #FFE0E0
-  Stream 2 cai (i/o timeout)
+  Stream 2 cai (i/o timeout ou SACK timeout)
 end note
 
 S -> S : Retry 1: aguarda 1s
@@ -67,19 +76,40 @@ note over S
   Se 3 retries falharem:
   stream marcado como **dead**.
   Backup continua nos demais.
+  (Retry count reseta após reconexão OK — v2.6.0+)
 end note
 
-== Finalização ==
+== Final ChunkSACK Drain (v3.1.0+) ==
+
+note over S, H #E0F0FF
+  Antes de enviar Trailer, Dispatcher entra
+  em fase de **final drain**: cada sender aguarda
+  rb.Tail() == rb.Head() (todos os bytes confirmados
+  por ChunkSACK). Timeout baseado em RTT.
+end note
 
 S -> S : Todos os senders\nconcluem (WaitAllSenders)
 note over H : StreamWg.Wait() retorna\n(todos os streams terminaram)
+
+alt ChunkBuffer habilitado
+  H -> CB : Flush(assembler)\n(aguarda drain scoped por sessão)
+end
+
+== Finalização ==
 
 C -> H : **TRAILER** [SHA-256, Size]\n(direto na conn primária, sem ChunkHeader)
 
 H -> D : Finaliza assembler\n(flush + close)
 H -> H : Valida SHA-256\nclient vs server
 alt Checksum OK
-  H -> D : Rename .tmp → timestamp.tar.gz\nRotação (max_backups)
+  H -> D : Rename .tmp → timestamp.tar.gz
+  opt verify_integrity habilitado
+    H -> H : VerifyArchiveIntegrity\n(lê e descomprime tar inteiro)
+  end
+  H -> D : Rotação (max_backups)
+  opt Object Storage configurado
+    H -> H : PostCommitOrchestrator\n(sync/offload/archive)
+  end
   H -> C : **FINAL ACK** [Status: OK]
 else Checksum mismatch
   H -> D : Remove .tmp

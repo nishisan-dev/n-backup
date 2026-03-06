@@ -4,7 +4,7 @@ skinparam backgroundColor #FEFEFE
 skinparam defaultFontName Inter
 skinparam sequenceMessageAlign center
 
-title StreamGuard — Protocolo de Sessão de Backup
+title NBackup — Protocolo de Sessão de Backup
 
 participant "Agent\n(Client)" as C
 participant "Network\n(TCP)" as N
@@ -17,9 +17,9 @@ C -> S : ClientHello + Certificate
 S -> C : ServerHello + Certificate
 note over C, S : Autenticação mútua via certificados X.509
 
-== Handshake StreamGuard ==
+== Handshake NBKP ==
 
-C -> S : **HANDSHAKE**\n[Magic: "SGRD"] [Ver: 0x01]\n[AgentName: "web-server-01"] [\\n]
+C -> S : **HANDSHAKE**\n[Magic: "NBKP"] [Ver: 0x01]\n[AgentName: "web-server-01"] [\n]
 
 S -> S : Valida agent\nVerifica disco\nVerifica lock
 alt Pronto
@@ -70,7 +70,7 @@ C -> S : TCP FIN
 skinparam backgroundColor #FEFEFE
 skinparam defaultFontName Inter
 
-title StreamGuard — Health Check
+title NBackup — Health Check
 
 participant "Agent CLI" as C
 participant "Server" as S
@@ -83,7 +83,7 @@ S -> C : ServerHello + Certificate
 == Health Check ==
 
 C -> S : **PING** [Magic: "PING" 4 bytes]
-S -> C : **PONG** [Status: 1B] [DiskFree: uint64] [\\n]
+S -> C : **PONG** [Status: 1B] [DiskFree: uint64] [\n]
 
 note over C
   Status:

@@ -14,7 +14,12 @@ package "Host de Origem" as origin {
     component "Scanner" as scan
     component "Streamer" as stream
     component "RingBuffer" as rb
+    component "Dispatcher" as disp
+    component "AutoScaler" as ascaler
+    component "ControlChannel" as ctrl
     component "Retry Engine" as retry
+    component "Throttle" as throttle
+    component "Monitor" as monitor
     component "Config" as cfg_a
   }
   database "Filesystem\n(Origem)" as fs_origin
@@ -23,16 +28,23 @@ package "Host de Origem" as origin {
 package "Host de Destino" as dest {
   component "nbackup-server" as server <<Go Binary>> {
     component "TLS Listener" as tls_srv
-    component "Protocol Handler" as proto
+    component "Protocol Handler\n(modularizado)" as proto
+    component "ChunkAssembler" as asm
+    component "ChunkBuffer" as cbuf
     component "Storage Writer" as sw
     component "Rotation Manager" as rot
-    component "Observability HTTP" as obs
+    component "Integrity Verifier" as integrity
+    component "PostCommitOrchestrator" as pco
+    component "SyncStorage" as sync_st
+    component "Slot Manager" as slot_mgr
+    component "Observability HTTP\n(REST + Prometheus)" as obs
     component "Config" as cfg_s
   }
   database "Filesystem\n(Destino)" as fs_dest
 }
 
 cloud "Rede" as net
+cloud "Object Storage\n(S3-compatible)" as s3
 
 admin --> cfg_a : Configura\n(YAML)
 admin --> cfg_s : Configura\n(YAML)
@@ -41,23 +53,36 @@ sched --> scan : trigger (cron)
 scan --> fs_origin : fs.WalkDir\n(glob filter)
 scan --> stream : file list
 stream --> rb : tar → gzip → buffer
-rb --> net : TCP + TLS 1.3\n(mTLS)
+rb --> disp : chunks
+disp --> net : TCP + TLS 1.3\n(mTLS)\nChunkHeader framing
+ascaler ..> disp : scale streams
+throttle ..> disp : rate limit
+ctrl --> net : PING/PONG,\nRTT, ControlRotate
+monitor ..> ctrl : CPU/Mem/Disk stats
 retry ..> net : reconnect
 
 net --> tls_srv
 tls_srv --> proto : conexão aceita
-proto --> sw : data stream
+proto --> cbuf : chunks em memória
+cbuf --> asm : drain → WriteChunk
+proto --> sw : single stream
+asm --> sw : Finalize
 sw --> fs_dest : .tmp → rename\n(atomic write)
-sw --> rot : após checksum OK
+sw --> integrity : verify_integrity
+integrity --> rot : se válido
 rot --> fs_dest : remove antigos
+rot --> pco : após rotação
+pco --> s3 : Upload (multipart)\nstall detection
+sync_st --> s3 : Retroactive sync\n(SIGUSR1)
+slot_mgr ..> proto : estado por stream
 
-admin --> obs : HTTP :8080\n(WebUI + REST API)
-obs ..> proto : snapshots\n(métricas, sessões)
+admin --> obs : HTTP :9848\n(WebUI + REST + Prometheus)
+obs ..> proto : snapshots\n(métricas, sessões, sync)
 
 note right of net
   Protocolo NBKP binário
   ~60 bytes overhead/sessão
-  Payload: tar.gz stream raw
+  Payload: tar.gz/tar.zst stream raw
   Porta: 9847/tcp
 end note
 
@@ -72,5 +97,12 @@ note bottom of sw
   2. Calcula SHA-256 inline
   3. Compara com hash do agent
   4. Rename atômico
+end note
+
+note bottom of pco
+  Modos: sync, offload, archive
+  S3 Manager Uploader (multipart)
+  Stall detection + retry exponencial
+  AbortIncompleteUploads no fallout
 end note
 @enduml
