@@ -264,6 +264,10 @@ func (h *Handler) SessionsSnapshot() []observability.SessionSummary {
 		switch s := value.(type) {
 		case *PartialSession:
 			lastAct := time.Unix(0, s.LastActivity.Load())
+			phase := ""
+			if s.Phase != nil {
+				phase = s.Phase.Get()
+			}
 			sessions = append(sessions, observability.SessionSummary{
 				SessionID:     sessionID,
 				Agent:         s.AgentName,
@@ -276,6 +280,7 @@ func (h *Handler) SessionsSnapshot() []observability.SessionSummary {
 				BytesReceived: s.BytesWritten.Load(),
 				ActiveStreams: 1,
 				Status:        sessionStatus(lastAct),
+				Phase:         phase,
 			})
 
 		case *ParallelSession:
@@ -320,6 +325,10 @@ func (h *Handler) SessionsSnapshot() []observability.SessionSummary {
 
 			// Status: se Closing=true, a transferência acabou e o assembler está finalizando
 			status := sessionStatus(lastAct)
+			phase := ""
+			if s.Phase != nil {
+				phase = s.Phase.Get()
+			}
 			if s.Closing.Load() {
 				status = "finalizing"
 			}
@@ -338,6 +347,7 @@ func (h *Handler) SessionsSnapshot() []observability.SessionSummary {
 				ActiveStreams:  activeStreams,
 				MaxStreams:     int(s.MaxStreams),
 				Status:         status,
+				Phase:          phase,
 				TotalObjects:   totalObj,
 				ObjectsSent:    sentObj,
 				WalkComplete:   walkDone,
@@ -387,6 +397,10 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 	switch s := raw.(type) {
 	case *PartialSession:
 		lastAct := time.Unix(0, s.LastActivity.Load())
+		phase := ""
+		if s.Phase != nil {
+			phase = s.Phase.Get()
+		}
 		return &observability.SessionDetail{
 			SessionSummary: observability.SessionSummary{
 				SessionID:     id,
@@ -400,7 +414,10 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 				BytesReceived: s.BytesWritten.Load(),
 				ActiveStreams: 1,
 				Status:        sessionStatus(lastAct),
+				Phase:         phase,
 			},
+			IntegrityProgress:  h.buildIntegrityProgressDTO(s.IntProgress),
+			PostCommitProgress: h.buildPostCommitProgressDTO(s.PCProgress),
 		}, true
 
 	case *ParallelSession:
@@ -505,6 +522,10 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 
 		// Status: se Closing=true, a transferência acabou e o assembler está finalizando
 		detailStatus := sessionStatus(lastAct)
+		phase := ""
+		if s.Phase != nil {
+			phase = s.Phase.Get()
+		}
 		if s.Closing.Load() {
 			detailStatus = "finalizing"
 		}
@@ -524,6 +545,7 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 				ActiveStreams:  activeStreams,
 				MaxStreams:     int(s.MaxStreams),
 				Status:         detailStatus,
+				Phase:          phase,
 				TotalObjects:   totalObj,
 				ObjectsSent:    sentObj,
 				WalkComplete:   walkDone,
@@ -541,6 +563,8 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 				},
 			},
 			Streams: streams,
+			IntegrityProgress:  h.buildIntegrityProgressDTO(s.IntProgress),
+			PostCommitProgress: h.buildPostCommitProgressDTO(s.PCProgress),
 		}
 
 		// Auto-scale info
@@ -562,6 +586,71 @@ func (h *Handler) SessionDetail(id string) (*observability.SessionDetail, bool) 
 	}
 
 	return nil, false
+}
+
+// buildIntegrityProgressDTO converte IntegrityProgress atômico em DTO para serialização JSON.
+// Retorna nil quando o progresso não está ativo.
+func (h *Handler) buildIntegrityProgressDTO(p *IntegrityProgress) *observability.IntegrityProgressDTO {
+	if p == nil {
+		return nil
+	}
+	bytesRead := p.BytesRead.Load()
+	totalBytes := p.TotalBytes.Load()
+	entries := p.Entries.Load()
+
+	var pct float64
+	if totalBytes > 0 {
+		pct = float64(bytesRead) / float64(totalBytes) * 100
+	}
+
+	var eta string
+	if startedRaw := p.StartedAt.Load(); startedRaw != nil && bytesRead > 0 && totalBytes > bytesRead {
+		started := startedRaw.(time.Time)
+		elapsed := time.Since(started).Seconds()
+		rate := float64(bytesRead) / elapsed
+		remaining := float64(totalBytes - bytesRead)
+		etaSecs := remaining / rate
+		eta = (time.Duration(etaSecs) * time.Second).Truncate(time.Second).String()
+	}
+
+	return &observability.IntegrityProgressDTO{
+		BytesRead:   bytesRead,
+		TotalBytes:  totalBytes,
+		Entries:     entries,
+		ProgressPct: pct,
+		ETA:         eta,
+	}
+}
+
+// buildPostCommitProgressDTO converte PostCommitProgress atômico em DTO para serialização JSON.
+// Retorna nil quando o progresso não está ativo.
+func (h *Handler) buildPostCommitProgressDTO(p *PostCommitProgress) *observability.PostCommitProgressDTO {
+	if p == nil {
+		return nil
+	}
+	bytesSent := p.BytesSent.Load()
+	totalBytes := p.TotalBytes.Load()
+
+	var pct float64
+	if totalBytes > 0 {
+		pct = float64(bytesSent) / float64(totalBytes) * 100
+	}
+
+	var bucket, mode string
+	if v := p.Bucket.Load(); v != nil {
+		bucket = v.(string)
+	}
+	if v := p.Mode.Load(); v != nil {
+		mode = v.(string)
+	}
+
+	return &observability.PostCommitProgressDTO{
+		Bucket:      bucket,
+		Mode:        mode,
+		BytesSent:   bytesSent,
+		TotalBytes:  totalBytes,
+		ProgressPct: pct,
+	}
 }
 
 // formatBytesGo formata bytes em string legível (ex: "12.3 MB").
