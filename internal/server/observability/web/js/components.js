@@ -86,6 +86,21 @@ const Components = {
         return `<span class="${cls}">${status || '—'}</span>`;
     },
 
+    // Badge de fase do ciclo de vida da sessão
+    phaseBadge(phase) {
+        if (!phase) return '';
+        const phaseConfig = {
+            receiving:  { cls: 'badge-info',       icon: '📥', label: 'receiving' },
+            assembling: { cls: 'badge-assembling', icon: '⚙️',  label: 'assembling' },
+            verifying:  { cls: 'badge-warn',       icon: '🔍', label: 'verifying' },
+            uploading:  { cls: 'badge-uploading',  icon: '☁️',  label: 'uploading' },
+            done:       { cls: 'badge-success',    icon: '✓',  label: 'done' },
+            failed:     { cls: 'badge-error',      icon: '✗',  label: 'failed' },
+        };
+        const cfg = phaseConfig[phase] || { cls: 'badge-neutral', icon: '', label: phase };
+        return `<span class="badge ${cfg.cls}">${cfg.icon} ${cfg.label}</span>`;
+    },
+
     // Badge de modo
     modeBadge(mode) {
         const cls = `badge badge-${mode || 'single'}`;
@@ -281,7 +296,7 @@ const Components = {
                 <td>${this.modeBadge(s.mode)}</td>
                 <td>${s.active_streams}${s.max_streams ? '/' + s.max_streams : ''}</td>
                 <td>${this.formatBytes(s.bytes_received)}</td>
-                <td>${this.statusBadge(s.status)}</td>
+                <td>${this.statusBadge(s.status)} ${this.phaseBadge(s.phase)}</td>
             </tr>
         `).join('');
     },
@@ -309,6 +324,7 @@ const Components = {
                         ${this.modeBadge(s.mode)}
                         ${this.compressionBadge(s.compression)}
                         ${this.statusBadge(s.status)}
+                        ${this.phaseBadge(s.phase)}
                         ${s.assembler && s.assembler.phase === 'assembling' ? '<span class="badge badge-assembling">⚙ assembling</span>' : ''}
                         <span>Início: ${this.formatTime(s.started_at)}</span>
                         <span>Último I/O: ${this.formatTime(s.last_activity)}</span>
@@ -366,6 +382,7 @@ const Components = {
             ${detail.auto_scale ? this.renderAutoScaleInfo(detail.auto_scale, detail) : ''}
             ${detail.buffer_enabled ? this.renderBufferMemoryBlock(detail) : ''}
             ${progressHtml}
+            ${this.renderLifecycleProgress(detail)}
         `;
 
         // Sparklines section (rede + disk I/O)
@@ -667,6 +684,71 @@ const Components = {
                     ${progressBar}
                 </div>
             </div>`;
+    },
+
+    // Badge de resultado para sessões finalizadas
+    // Renderiza progress bars de lifecycle (Verifying / Uploading) no session detail
+    renderLifecycleProgress(detail) {
+        if (!detail.phase) return '';
+        let html = '';
+
+        // Verifying progress
+        if (detail.phase === 'verifying' && detail.integrity_progress) {
+            const ip = detail.integrity_progress;
+            const pct = ip.progress_pct || 0;
+            html += `
+                <div class="info-item lifecycle-progress" style="grid-column: 1/-1; border-top: 1px solid var(--border-color); margin-top: 0.5rem; padding-top: 0.5rem;">
+                    <span class="info-label">🔍 Integrity Check</span>
+                    <div class="info-value" style="display: flex; flex-direction: column; gap: 0.25rem;">
+                        <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                            <span class="badge badge-warn">verifying</span>
+                            <span class="text-xs font-mono">
+                                ${this.formatBytes(ip.bytes_read)} / ${this.formatBytes(ip.total_bytes)}
+                                | ${ip.entries} entries
+                                ${ip.eta ? ' | ETA: ' + ip.eta : ''}
+                            </span>
+                        </div>
+                        <div class="progress-bar-wrap" style="margin-top: 0.25rem;">
+                            <div class="progress-bar-fill" style="width: ${Math.min(pct, 100)}%; background: var(--color-amber, #f59e0b);"></div>
+                        </div>
+                        <span class="progress-text" style="font-size: 0.75rem;">${pct.toFixed(1)}%</span>
+                    </div>
+                </div>`;
+        }
+
+        // Uploading progress
+        if (detail.phase === 'uploading' && detail.post_commit_progress) {
+            const pc = detail.post_commit_progress;
+            const pct = pc.progress_pct || 0;
+            html += `
+                <div class="info-item lifecycle-progress" style="grid-column: 1/-1; border-top: 1px solid var(--border-color); margin-top: 0.5rem; padding-top: 0.5rem;">
+                    <span class="info-label">☁️ Upload</span>
+                    <div class="info-value" style="display: flex; flex-direction: column; gap: 0.25rem;">
+                        <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                            <span class="badge badge-uploading">uploading</span>
+                            <span class="text-xs font-mono">
+                                ${pc.bucket ? pc.bucket + ' (' + pc.mode + ')' : ''}
+                                | ${this.formatBytes(pc.bytes_sent)} / ${this.formatBytes(pc.total_bytes)}
+                            </span>
+                        </div>
+                        <div class="progress-bar-wrap" style="margin-top: 0.25rem;">
+                            <div class="progress-bar-fill" style="width: ${Math.min(pct, 100)}%; background: var(--color-orange, #f97316);"></div>
+                        </div>
+                        <span class="progress-text" style="font-size: 0.75rem;">${pct.toFixed(1)}%</span>
+                    </div>
+                </div>`;
+        }
+
+        // Done / Failed phase badge (sem progress bar, apenas status)
+        if (detail.phase === 'done' || detail.phase === 'failed') {
+            html += `
+                <div class="info-item" style="grid-column: 1/-1;">
+                    <span class="info-label">Phase</span>
+                    <span class="info-value">${this.phaseBadge(detail.phase)}</span>
+                </div>`;
+        }
+
+        return html;
     },
 
     // Badge de resultado para sessões finalizadas

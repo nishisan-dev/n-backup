@@ -533,6 +533,12 @@ body {
     animation: pulse 2s infinite;
 }
 
+.badge-uploading {
+    background: rgba(249, 115, 22, 0.15);
+    color: #f97316;
+    animation: pulse 2s infinite;
+}
+
 .badge-success {
     background: rgba(34, 197, 94, 0.15);
     color: #22c55e;
