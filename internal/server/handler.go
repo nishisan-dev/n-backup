@@ -69,6 +69,11 @@ type PartialSession struct {
 	LastActivity    atomic.Int64 // UnixNano do último I/O bem-sucedido
 	ClientVersion   string       // Versão do client (protocolo v3+)
 	CompressionMode string       // gzip | zst
+
+	// Lifecycle phases — rastreamento de fase pós-streaming para WebUI
+	Phase       *SessionPhaseTracker // fase atual da sessão
+	IntProgress *IntegrityProgress   // progresso da verificação de integridade (nil quando não ativo)
+	PCProgress  *PostCommitProgress  // progresso do upload pós-commit (nil quando não ativo)
 }
 
 // Handler processa conexões individuais de backup.
