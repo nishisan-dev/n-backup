@@ -110,7 +110,7 @@ func TestVerifyArchiveIntegrity_ValidTarGz(t *testing.T) {
 	dir := t.TempDir()
 	path := createTestTarGz(t, dir, "valid.tar.gz")
 
-	if err := VerifyArchiveIntegrity(path); err != nil {
+	if err := VerifyArchiveIntegrity(path, nil, nil); err != nil {
 		t.Fatalf("expected valid tar.gz to pass, got: %v", err)
 	}
 }
@@ -119,7 +119,7 @@ func TestVerifyArchiveIntegrity_ValidTarZst(t *testing.T) {
 	dir := t.TempDir()
 	path := createTestTarZst(t, dir, "valid.tar.zst")
 
-	if err := VerifyArchiveIntegrity(path); err != nil {
+	if err := VerifyArchiveIntegrity(path, nil, nil); err != nil {
 		t.Fatalf("expected valid tar.zst to pass, got: %v", err)
 	}
 }
@@ -129,7 +129,7 @@ func TestVerifyArchiveIntegrity_CorruptTarGz(t *testing.T) {
 	path := filepath.Join(dir, "corrupt.tar.gz")
 	os.WriteFile(path, []byte("this is not a gzip file at all"), 0644)
 
-	if err := VerifyArchiveIntegrity(path); err == nil {
+	if err := VerifyArchiveIntegrity(path, nil, nil); err == nil {
 		t.Fatal("expected corrupt tar.gz to fail integrity check")
 	}
 }
@@ -139,7 +139,7 @@ func TestVerifyArchiveIntegrity_CorruptTarZst(t *testing.T) {
 	path := filepath.Join(dir, "corrupt.tar.zst")
 	os.WriteFile(path, []byte("this is not a zstd file at all"), 0644)
 
-	if err := VerifyArchiveIntegrity(path); err == nil {
+	if err := VerifyArchiveIntegrity(path, nil, nil); err == nil {
 		t.Fatal("expected corrupt tar.zst to fail integrity check")
 	}
 }
@@ -152,7 +152,7 @@ func TestVerifyArchiveIntegrity_TruncatedTarGz(t *testing.T) {
 	fi, _ := os.Stat(path)
 	os.Truncate(path, fi.Size()/2)
 
-	if err := VerifyArchiveIntegrity(path); err == nil {
+	if err := VerifyArchiveIntegrity(path, nil, nil); err == nil {
 		t.Fatal("expected truncated tar.gz to fail integrity check")
 	}
 }
@@ -164,7 +164,7 @@ func TestVerifyArchiveIntegrity_TruncatedTarZst(t *testing.T) {
 	fi, _ := os.Stat(path)
 	os.Truncate(path, fi.Size()/2)
 
-	if err := VerifyArchiveIntegrity(path); err == nil {
+	if err := VerifyArchiveIntegrity(path, nil, nil); err == nil {
 		t.Fatal("expected truncated tar.zst to fail integrity check")
 	}
 }
@@ -174,7 +174,7 @@ func TestVerifyArchiveIntegrity_EmptyFile(t *testing.T) {
 	path := filepath.Join(dir, "empty.tar.gz")
 	os.WriteFile(path, []byte{}, 0644)
 
-	if err := VerifyArchiveIntegrity(path); err == nil {
+	if err := VerifyArchiveIntegrity(path, nil, nil); err == nil {
 		t.Fatal("expected empty file to fail integrity check")
 	}
 }
@@ -184,15 +184,65 @@ func TestVerifyArchiveIntegrity_UnsupportedExtension(t *testing.T) {
 	path := filepath.Join(dir, "file.tar.bz2")
 	os.WriteFile(path, []byte("data"), 0644)
 
-	err := VerifyArchiveIntegrity(path)
+	err := VerifyArchiveIntegrity(path, nil, nil)
 	if err == nil {
 		t.Fatal("expected unsupported extension to fail")
 	}
 }
 
 func TestVerifyArchiveIntegrity_NonExistentFile(t *testing.T) {
-	err := VerifyArchiveIntegrity("/nonexistent/path/backup.tar.gz")
+	err := VerifyArchiveIntegrity("/nonexistent/path/backup.tar.gz", nil, nil)
 	if err == nil {
 		t.Fatal("expected non-existent file to fail")
+	}
+}
+
+// TestVerifyArchiveIntegrity_Progress verifica que IntegrityProgress é atualizado
+// durante a verificação (BytesRead > 0, Entries > 0 no final).
+func TestVerifyArchiveIntegrity_Progress(t *testing.T) {
+	dir := t.TempDir()
+	path := createTestTarGz(t, dir, "progress.tar.gz")
+
+	progress := &IntegrityProgress{}
+
+	if err := VerifyArchiveIntegrity(path, progress, nil); err != nil {
+		t.Fatalf("expected valid archive to pass, got: %v", err)
+	}
+
+	// Verifica que o progresso foi atualizado
+	bytesRead := progress.BytesRead.Load()
+	entries := progress.Entries.Load()
+	totalBytes := progress.TotalBytes.Load()
+
+	if bytesRead == 0 {
+		t.Error("BytesRead should be > 0 after verification")
+	}
+	if entries != 2 {
+		t.Errorf("expected 2 entries, got %d", entries)
+	}
+	if totalBytes == 0 {
+		t.Error("TotalBytes should be > 0 after verification")
+	}
+	if bytesRead > totalBytes {
+		t.Errorf("BytesRead (%d) should be <= TotalBytes (%d)", bytesRead, totalBytes)
+	}
+}
+
+// TestVerifyArchiveIntegrity_ProgressZst verifica progresso com zstd.
+func TestVerifyArchiveIntegrity_ProgressZst(t *testing.T) {
+	dir := t.TempDir()
+	path := createTestTarZst(t, dir, "progress.tar.zst")
+
+	progress := &IntegrityProgress{}
+
+	if err := VerifyArchiveIntegrity(path, progress, nil); err != nil {
+		t.Fatalf("expected valid archive to pass, got: %v", err)
+	}
+
+	if progress.BytesRead.Load() == 0 {
+		t.Error("BytesRead should be > 0")
+	}
+	if progress.Entries.Load() != 2 {
+		t.Errorf("expected 2 entries, got %d", progress.Entries.Load())
 	}
 }
