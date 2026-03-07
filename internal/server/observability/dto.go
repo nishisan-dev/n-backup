@@ -40,6 +40,7 @@ type SessionSummary struct {
 	ActiveStreams  int    `json:"active_streams"`
 	MaxStreams     int    `json:"max_streams,omitempty"`
 	Status         string `json:"status"` // running | idle | degraded
+	Phase          string `json:"phase,omitempty"` // receiving | assembling | verifying | uploading | done | failed
 
 	// Campos de progresso vindos do agent (via ControlProgress).
 	// Zero values quando o agent não reporta progresso.
@@ -69,10 +70,30 @@ type AssemblerStats struct {
 	Phase           string `json:"phase"` // "receiving" | "assembling" | "done"
 }
 
+// IntegrityProgressDTO contém métricas de progresso da verificação de integridade.
+type IntegrityProgressDTO struct {
+	BytesRead   int64   `json:"bytes_read"`
+	TotalBytes  int64   `json:"total_bytes"`
+	Entries     int64   `json:"entries"`
+	ProgressPct float64 `json:"progress_pct"`
+	ETA         string  `json:"eta,omitempty"`
+}
+
+// PostCommitProgressDTO contém métricas de progresso do upload pós-commit.
+type PostCommitProgressDTO struct {
+	Bucket      string  `json:"bucket"`
+	Mode        string  `json:"mode"`
+	BytesSent   int64   `json:"bytes_sent"`
+	TotalBytes  int64   `json:"total_bytes"`
+	ProgressPct float64 `json:"progress_pct"`
+}
+
 // SessionDetail é retornado por GET /api/v1/sessions/{id}.
 type SessionDetail struct {
 	SessionSummary
-	Streams []StreamDetail `json:"streams,omitempty"`
+	Streams            []StreamDetail        `json:"streams,omitempty"`
+	IntegrityProgress  *IntegrityProgressDTO  `json:"integrity_progress,omitempty"`
+	PostCommitProgress *PostCommitProgressDTO `json:"post_commit_progress,omitempty"`
 }
 
 // StreamDetail representa o estado de um stream individual dentro de uma sessão paralela.
