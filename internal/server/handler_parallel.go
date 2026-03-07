@@ -71,6 +71,11 @@ type ParallelSession struct {
 	abortOnce       sync.Once     // garante close único do Aborted
 	AbortErr        atomic.Value  // error do aborto (quando houver)
 
+	// Lifecycle phases — rastreamento de fase pós-streaming para WebUI
+	Phase      *SessionPhaseTracker // fase atual da sessão
+	IntProgress *IntegrityProgress   // progresso da verificação de integridade (nil quando não ativo)
+	PCProgress  *PostCommitProgress  // progresso do upload pós-commit (nil quando não ativo)
+
 	Logger *slog.Logger // Session logger (enriquecido com session_log_dir quando habilitado)
 }
 
@@ -182,6 +187,7 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		CreatedAt:     now,
 		IngestionDone: make(chan struct{}),
 		Aborted:       make(chan struct{}),
+		Phase:         NewSessionPhaseTracker(),
 	}
 
 	pSession.Logger = logger // session logger (com fan-out para arquivo quando habilitado)
@@ -258,6 +264,7 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	}
 
 	pSession.Closing.Store(true)
+	pSession.Phase.Set(PhaseAssembling)
 	pSession.StreamWg.Wait()
 	logger.Info("all parallel streams complete — proceeding to finalize")
 
@@ -327,9 +334,17 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
 		return
 	}
-	result := h.validateAndCommitWithTrailer(conn, writer, assembledPath, totalBytes, trailer, serverChecksum, storageInfo, logger)
+	result := h.validateAndCommitWithTrailer(conn, writer, assembledPath, totalBytes, trailer, serverChecksum, storageInfo, pSession, logger)
 	h.recordSessionEnd(sessionID, agentName, storageName, backupName, "parallel", storageInfo.CompressionMode, result, now, totalBytes)
-	h.sessions.Delete(sessionID) // remove somente após commit+recordSessionEnd
+	if result == "ok" {
+		pSession.Phase.Set(PhaseDone)
+	} else {
+		pSession.Phase.Set(PhaseFailed)
+	}
+	// Mantém sessão visível por 3s para que o WebUI capture a fase final
+	time.AfterFunc(3*time.Second, func() {
+		h.sessions.Delete(sessionID)
+	})
 
 	// Gerencia arquivo de log da sessão: remove em sucesso, retém para post-mortem em falha.
 	if sessionLogPath != "" {
@@ -664,7 +679,7 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 // Diferente de validateAndCommit, o Trailer já foi recebido separadamente
 // pela conn de controle (não embutido no arquivo). O arquivo contém apenas dados.
 // Retorna o resultado: "ok", "checksum_mismatch" ou "write_error".
-func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWriter, tmpPath string, totalBytes int64, trailer *protocol.Trailer, serverChecksum [32]byte, storageInfo config.StorageInfo, logger *slog.Logger) string {
+func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWriter, tmpPath string, totalBytes int64, trailer *protocol.Trailer, serverChecksum [32]byte, storageInfo config.StorageInfo, pSession *ParallelSession, logger *slog.Logger) string {
 	if totalBytes == 0 {
 		logger.Error("no data received")
 		writer.Abort(tmpPath)
@@ -705,8 +720,10 @@ func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWrit
 	// Verifica integridade do archive antes de rotacionar.
 	// Se falhar, o backup fica no disco mas NÃO apaga os antigos (fail-safe).
 	if storageInfo.VerifyIntegrity {
+		pSession.Phase.Set(PhaseVerifying)
+		pSession.IntProgress = NewIntegrityProgress(0) // TotalBytes será setado por VerifyArchiveIntegrity
 		logger.Info("verifying backup integrity", "path", finalPath)
-		if vErr := VerifyArchiveIntegrity(finalPath); vErr != nil {
+		if vErr := VerifyArchiveIntegrity(finalPath, pSession.IntProgress, logger); vErr != nil {
 			logger.Error("backup integrity check failed — skipping rotation",
 				"path", finalPath, "error", vErr)
 			if h.Events != nil {
@@ -740,6 +757,10 @@ func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWrit
 
 	// Object Storage pós-commit (sync/offload — archive já tratado acima)
 	// Offload bloqueia até upload confirmado; sync é fire-and-forget.
+	if len(filterBucketsExcluding(storageInfo.Buckets, config.BucketModeArchive)) > 0 {
+		pSession.Phase.Set(PhaseUploading)
+		pSession.PCProgress = NewPostCommitProgress()
+	}
 	h.runPostCommitSync(storageInfo, finalPath, removed, writer.AgentDir(), logger)
 
 	logger.Info("backup committed",

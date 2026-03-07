@@ -208,10 +208,16 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 		CreatedAt:       now,
 		ClientVersion:   clientVersion,
 		CompressionMode: storageInfo.CompressionMode,
+		Phase:           NewSessionPhaseTracker(),
 	}
 	session.LastActivity.Store(now.UnixNano())
 	h.sessions.Store(sessionID, session)
-	defer h.sessions.Delete(sessionID) // limpa quando terminar com sucesso
+	defer func() {
+		// Mantém sessão visível por 3s para que o WebUI capture a fase final
+		time.AfterFunc(3*time.Second, func() {
+			h.sessions.Delete(sessionID)
+		})
+	}()
 
 	// Stream com SACK periódico — usa br em vez de conn para não perder dados bufferizados
 	bytesReceived, err := h.receiveWithSACK(ctx, br, conn, tmpFile, tmpPath, session, logger)
@@ -223,12 +229,16 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 		return
 	}
 
-	// Remove sessão — backup recebido com sucesso, resume não será necessário
-	h.sessions.Delete(sessionID)
+	// Remove sessão parcial — backup recebido com sucesso, resume não será necessário
 
 	// Validação do trailer e commit
-	result, dataSize := h.validateAndCommit(conn, writer, tmpPath, bytesReceived, storageInfo, logger)
+	result, dataSize := h.validateAndCommitSingle(conn, writer, tmpPath, bytesReceived, storageInfo, session, logger)
 	h.recordSessionEnd(sessionID, agentName, storageName, backupName, "single", storageInfo.CompressionMode, result, now, dataSize)
+	if result == "ok" {
+		session.Phase.Set(PhaseDone)
+	} else {
+		session.Phase.Set(PhaseFailed)
+	}
 }
 
 // handleResume processa um pedido de resume do agent.
@@ -327,7 +337,7 @@ func (h *Handler) handleResume(ctx context.Context, conn net.Conn, logger *slog.
 		return
 	}
 
-	result, dataSize := h.validateAndCommit(conn, writer, session.TmpPath, totalBytes, storageInfo, logger)
+	result, dataSize := h.validateAndCommitSingle(conn, writer, session.TmpPath, totalBytes, storageInfo, nil, logger)
 	h.recordSessionEnd(resume.SessionID, session.AgentName, session.StorageName, session.BackupName, "single", session.CompressionMode, result, session.CreatedAt, dataSize)
 }
 
@@ -390,9 +400,10 @@ func (h *Handler) receiveWithSACK(ctx context.Context, reader io.Reader, sackWri
 	}
 }
 
-// validateAndCommit valida o trailer, checksum e comita o backup.
+// validateAndCommitSingle valida o trailer, checksum e comita o backup.
 // Retorna (resultado, dataSize). resultado: "ok", "checksum_mismatch" ou "write_error".
-func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath string, totalBytes int64, storageInfo config.StorageInfo, logger *slog.Logger) (string, int64) {
+// session pode ser nil (resume não tem PartialSession com phase tracker).
+func (h *Handler) validateAndCommitSingle(conn net.Conn, writer *AtomicWriter, tmpPath string, totalBytes int64, storageInfo config.StorageInfo, session *PartialSession, logger *slog.Logger) (string, int64) {
 	const trailerSize int64 = 4 + 32 + 8
 
 	if totalBytes < trailerSize {
@@ -451,8 +462,14 @@ func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath
 	// Verifica integridade do archive antes de rotacionar.
 	// Se falhar, o backup fica no disco mas NÃO apaga os antigos (fail-safe).
 	if storageInfo.VerifyIntegrity {
+		var intProgress *IntegrityProgress
+		if session != nil {
+			session.Phase.Set(PhaseVerifying)
+			intProgress = NewIntegrityProgress(0)
+			session.IntProgress = intProgress
+		}
 		logger.Info("verifying backup integrity", "path", finalPath)
-		if vErr := VerifyArchiveIntegrity(finalPath); vErr != nil {
+		if vErr := VerifyArchiveIntegrity(finalPath, intProgress, logger); vErr != nil {
 			logger.Error("backup integrity check failed — skipping rotation",
 				"path", finalPath, "error", vErr)
 			if h.Events != nil {
@@ -486,6 +503,10 @@ func (h *Handler) validateAndCommit(conn net.Conn, writer *AtomicWriter, tmpPath
 
 	// Object Storage pós-commit (sync/offload — archive já tratado acima)
 	// Offload bloqueia até upload confirmado; sync é fire-and-forget.
+	if session != nil && len(filterBucketsExcluding(storageInfo.Buckets, config.BucketModeArchive)) > 0 {
+		session.Phase.Set(PhaseUploading)
+		session.PCProgress = NewPostCommitProgress()
+	}
 	h.runPostCommitSync(storageInfo, finalPath, removed, writer.AgentDir(), logger)
 
 	logger.Info("backup committed",
