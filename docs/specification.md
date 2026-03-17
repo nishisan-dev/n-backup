@@ -723,6 +723,8 @@ storages:
         bucket: my-backup-bucket
         prefix: "scripts/"
         mode: sync            # sync | offload | archive
+        sync_strategy: safe   # safe (default) | space_efficient — só para mode: sync
+        async_upload: false    # false (default) | true — libera lock/ACK antes do sync
         credentials:
           access_key_env: AWS_ACCESS_KEY_ID
           secret_key_env: AWS_SECRET_ACCESS_KEY
@@ -732,9 +734,16 @@ storages:
 
 | Modo | Comportamento | `retain` | Bloqueia FinalACK |
 |------|--------------|----------|-------------------|
-| `sync` | Upload + espelha deletes do Rotate | Proibido | Não |
+| `sync` | Upload + espelha deletes do Rotate | Proibido | Não (exceto se `async_upload: false` e offload presente) |
 | `offload` | Upload + deleta local | Obrigatório | **Sim** |
 | `archive` | Upload apenas dos deletados pelo Rotate | Obrigatório | Não |
+
+#### Parâmetros adicionais
+
+| Parâmetro | Válido para | Default | Descrição |
+|-----------|-------------|---------|-----------|
+| `sync_strategy` | `sync` | `safe` | `safe`: upload primeiro, delete depois. `space_efficient`: delete primeiro, upload depois (libera espaço no bucket) |
+| `async_upload` | `sync`, `archive` | `false` | `true`: libera o lock e envia FinalACK antes do sync, permitindo novas sessões. Proibido para `offload` |
 
 - Credenciais via variáveis de ambiente (nunca inline no YAML).
 - Retry: 3 tentativas com backoff exponencial (1s → 4s → 16s).

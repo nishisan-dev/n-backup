@@ -38,25 +38,47 @@ end
 Handler -> Rotate: Rotate(agentDir, maxBackups)
 Rotate --> Handler: []removedFiles
 
+== Async Upload Check ==
+
+alt async_upload: true (sync/archive)
+  Handler -> Agent: **FINAL ACK** [OK]
+  note right
+    Lock liberado — agent pode
+    iniciar novo backup imediatamente
+  end note
+  Handler -> PCO: Execute(finalPath, removedFiles, agentDir)\n[goroutine background]
+else async_upload: false (default) ou offload
+  Handler -> PCO: Execute(finalPath, removedFiles, agentDir)
+end
+
 == Object Storage Pós-Commit ==
 
-Handler -> PCO: Execute(finalPath, removedFiles, agentDir)
 activate PCO
 
 group Paralelo (goroutines)
 
-  group sync (fire-and-forget)
-    PCO -> Sync: Upload(finalPath)
-    note right
-      S3 Manager Uploader (multipart)
-      StallDetectReader monitora inatividade
-      Stall timeout cancela contexto se idle > N min
-    end note
-    Sync -> S3: CreateMultipartUpload\n+ UploadPart(s) + CompleteMultipart
-    S3 --> Sync: OK
-    loop para cada removedFile
-      PCO -> Sync: Delete(removedFile)
-      Sync -> S3: DeleteObject
+  group sync
+    alt sync_strategy: safe (default)
+      PCO -> Sync: Upload(finalPath)
+      note right
+        Upload primeiro (redundância imediata)
+        S3 Manager Uploader (multipart)
+      end note
+      Sync -> S3: CreateMultipartUpload\n+ UploadPart(s) + CompleteMultipart
+      S3 --> Sync: OK
+      loop para cada removedFile
+        PCO -> Sync: Delete(removedFile)
+        Sync -> S3: DeleteObject
+      end
+    else sync_strategy: space_efficient
+      loop para cada removedFile
+        PCO -> Sync: Delete(removedFile)
+        note right: Delete primeiro\n(libera espaço no bucket)
+        Sync -> S3: DeleteObject
+      end
+      PCO -> Sync: Upload(finalPath)
+      Sync -> S3: CreateMultipartUpload\n+ UploadPart(s) + CompleteMultipart
+      S3 --> Sync: OK
     end
   end
 
@@ -98,15 +120,18 @@ end
 PCO --> Handler: []PostCommitResult
 deactivate PCO
 
-== FinalACK ==
+== FinalACK (se síncrono) ==
 
-Handler -> Agent: FinalACK(OK)
+opt async_upload: false (ou offload)
+  Handler -> Agent: FinalACK(OK)
+end
 
 note over Handler
   offload bloqueia até upload confirmado
   sync e archive são fire-and-forget
+  async_upload: true libera lock e ACK antes do sync
   Stall detection: cancela upload se inativo > stall_timeout
-  Timeout por inatividade, sem deadline global
 end note
 
 @enduml
+

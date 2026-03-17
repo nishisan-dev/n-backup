@@ -162,10 +162,28 @@ func (o *PostCommitOrchestrator) HasBlockingBuckets() bool {
 }
 
 // executeSync: upload do backup + delete espelhado dos rotated.
+// sync_strategy: safe (default) faz upload primeiro; space_efficient deleta primeiro.
 func (o *PostCommitOrchestrator) executeSync(ctx context.Context, bt bucketTarget, finalPath string, rotatedFiles []string, logger *slog.Logger) error {
 	remotePath := bt.cfg.Prefix + filepath.Base(finalPath)
 
-	// Upload do novo backup
+	if bt.cfg.SyncStrategy == config.SyncStrategySpaceEfficient {
+		// Delete primeiro para liberar espaço no bucket
+		for _, name := range rotatedFiles {
+			remoteKey := bt.cfg.Prefix + name
+			if err := bt.backend.Delete(ctx, remoteKey); err != nil {
+				logger.Warn("sync space_efficient: mirror delete failed (non-fatal)", "key", remoteKey, "error", err)
+			} else {
+				logger.Info("sync space_efficient: mirror deleted", "key", remoteKey)
+			}
+		}
+		// Depois faz upload do novo backup
+		if err := o.uploadWithRetry(ctx, bt.backend, finalPath, remotePath, logger); err != nil {
+			return fmt.Errorf("sync upload: %w", err)
+		}
+		return nil
+	}
+
+	// Default (safe): upload primeiro, delete depois
 	if err := o.uploadWithRetry(ctx, bt.backend, finalPath, remotePath, logger); err != nil {
 		return fmt.Errorf("sync upload: %w", err)
 	}

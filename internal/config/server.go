@@ -161,6 +161,12 @@ const (
 	BucketModeArchive = "archive" // envia para o bucket apenas backups deletados pelo Rotate
 )
 
+// SyncStrategy define a ordem de operações no modo sync.
+const (
+	SyncStrategySafe           = "safe"             // default: upload primeiro, delete depois
+	SyncStrategySpaceEfficient = "space_efficient" // delete primeiro, upload depois (economia de espaço)
+)
+
 // BucketCredentials referencia credenciais via variáveis de ambiente.
 // Nunca armazena valores diretamente — segurança por padrão.
 type BucketCredentials struct {
@@ -170,14 +176,16 @@ type BucketCredentials struct {
 
 // BucketConfig define um destino de object storage pós-commit.
 type BucketConfig struct {
-	Name         string            `yaml:"name"`          // nome único dentro do storage
-	Provider     string            `yaml:"provider"`      // s3 (expandível para gcs, azure)
-	Endpoint     string            `yaml:"endpoint"`      // vazio = AWS default; preenchido = MinIO/compatível
-	Region       string            `yaml:"region"`        // região AWS (default: us-east-1)
-	Bucket       string            `yaml:"bucket"`        // nome do bucket
-	Prefix       string            `yaml:"prefix"`        // prefixo de objetos no bucket (opcional)
-	Mode         string            `yaml:"mode"`          // sync|offload|archive
-	Retain       int               `yaml:"retain"`        // obrigatório para offload/archive; proibido para sync
+	Name         string            `yaml:"name"`           // nome único dentro do storage
+	Provider     string            `yaml:"provider"`       // s3 (expandível para gcs, azure)
+	Endpoint     string            `yaml:"endpoint"`       // vazio = AWS default; preenchido = MinIO/compatível
+	Region       string            `yaml:"region"`         // região AWS (default: us-east-1)
+	Bucket       string            `yaml:"bucket"`         // nome do bucket
+	Prefix       string            `yaml:"prefix"`         // prefixo de objetos no bucket (opcional)
+	Mode         string            `yaml:"mode"`           // sync|offload|archive
+	Retain       int               `yaml:"retain"`         // obrigatório para offload/archive; proibido para sync
+	SyncStrategy string            `yaml:"sync_strategy"` // safe (default) | space_efficient — só para mode: sync
+	AsyncUpload  bool              `yaml:"async_upload"`  // false (default) | true — libera lock/ACK antes do sync
 	StallTimeout time.Duration     `yaml:"stall_timeout"` // inatividade máxima antes de cancelar upload (default: 5m)
 	Credentials  BucketCredentials `yaml:"credentials"`   // credenciais via env vars
 }
@@ -478,6 +486,24 @@ func validateBuckets(storageName string, buckets []BucketConfig) error {
 			if b.Retain < 1 {
 				return fmt.Errorf("%s.retain must be > 0 for %s mode", prefix, b.Mode)
 			}
+		}
+
+		// SyncStrategy: default safe, só válido para sync
+		if b.SyncStrategy == "" {
+			b.SyncStrategy = SyncStrategySafe
+		}
+		b.SyncStrategy = strings.ToLower(strings.TrimSpace(b.SyncStrategy))
+		if b.Mode == BucketModeSync {
+			if b.SyncStrategy != SyncStrategySafe && b.SyncStrategy != SyncStrategySpaceEfficient {
+				return fmt.Errorf("%s.sync_strategy must be safe or space_efficient, got %q", prefix, b.SyncStrategy)
+			}
+		} else if b.SyncStrategy != SyncStrategySafe {
+			return fmt.Errorf("%s.sync_strategy is only valid for sync mode, got mode %q", prefix, b.Mode)
+		}
+
+		// AsyncUpload: proibido para offload (sempre bloqueante)
+		if b.AsyncUpload && b.Mode == BucketModeOffload {
+			return fmt.Errorf("%s.async_upload must not be set for offload mode (offload is always blocking)", prefix)
 		}
 
 		// Credenciais obrigatórias

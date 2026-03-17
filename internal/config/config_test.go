@@ -1211,6 +1211,133 @@ func TestLoadServerConfig_BucketInvalidProvider(t *testing.T) {
 	}
 }
 
+func TestLoadServerConfig_BucketSyncStrategyDefault(t *testing.T) {
+	content := validServerYAMLBase + `
+    buckets:
+      - name: s3-mirror
+        provider: s3
+        bucket: my-bucket
+        mode: sync
+        credentials:
+          access_key_env: A
+          secret_key_env: B
+`
+	cfgPath := writeTempConfig(t, content)
+	cfg, err := LoadServerConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s, _ := cfg.GetStorage("default")
+	if s.Buckets[0].SyncStrategy != SyncStrategySafe {
+		t.Errorf("expected default sync_strategy safe, got %q", s.Buckets[0].SyncStrategy)
+	}
+}
+
+func TestLoadServerConfig_BucketSyncStrategySpaceEfficient(t *testing.T) {
+	content := validServerYAMLBase + `
+    buckets:
+      - name: s3-mirror
+        provider: s3
+        bucket: my-bucket
+        mode: sync
+        sync_strategy: space_efficient
+        credentials:
+          access_key_env: A
+          secret_key_env: B
+`
+	cfgPath := writeTempConfig(t, content)
+	cfg, err := LoadServerConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s, _ := cfg.GetStorage("default")
+	if s.Buckets[0].SyncStrategy != SyncStrategySpaceEfficient {
+		t.Errorf("expected sync_strategy space_efficient, got %q", s.Buckets[0].SyncStrategy)
+	}
+}
+
+func TestLoadServerConfig_BucketSyncStrategyInvalidValue(t *testing.T) {
+	content := validServerYAMLBase + `
+    buckets:
+      - name: s3-mirror
+        provider: s3
+        bucket: my-bucket
+        mode: sync
+        sync_strategy: fast
+        credentials:
+          access_key_env: A
+          secret_key_env: B
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadServerConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for invalid sync_strategy value")
+	}
+}
+
+func TestLoadServerConfig_BucketSyncStrategyOnOffloadRejected(t *testing.T) {
+	content := validServerYAMLBase + `
+    buckets:
+      - name: offload-test
+        provider: s3
+        bucket: my-bucket
+        mode: offload
+        retain: 3
+        sync_strategy: space_efficient
+        credentials:
+          access_key_env: A
+          secret_key_env: B
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadServerConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for sync_strategy on offload mode")
+	}
+}
+
+func TestLoadServerConfig_BucketAsyncUploadOnSync(t *testing.T) {
+	content := validServerYAMLBase + `
+    buckets:
+      - name: s3-async
+        provider: s3
+        bucket: my-bucket
+        mode: sync
+        async_upload: true
+        credentials:
+          access_key_env: A
+          secret_key_env: B
+`
+	cfgPath := writeTempConfig(t, content)
+	cfg, err := LoadServerConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s, _ := cfg.GetStorage("default")
+	if !s.Buckets[0].AsyncUpload {
+		t.Error("expected async_upload true")
+	}
+}
+
+func TestLoadServerConfig_BucketAsyncUploadOnOffloadRejected(t *testing.T) {
+	content := validServerYAMLBase + `
+    buckets:
+      - name: offload-async
+        provider: s3
+        bucket: my-bucket
+        mode: offload
+        retain: 3
+        async_upload: true
+        credentials:
+          access_key_env: A
+          secret_key_env: B
+`
+	cfgPath := writeTempConfig(t, content)
+	_, err := LoadServerConfig(cfgPath)
+	if err == nil {
+		t.Fatal("expected error for async_upload on offload mode")
+	}
+}
+
 func writeTempConfig(t *testing.T, content string) string {
 	t.Helper()
 	dir := t.TempDir()

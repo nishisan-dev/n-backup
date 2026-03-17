@@ -306,3 +306,112 @@ func TestPostCommit_NoBuckets(t *testing.T) {
 		t.Error("expected nil orchestrator for empty buckets")
 	}
 }
+
+func TestPostCommit_SyncMode_SpaceEfficient(t *testing.T) {
+	mock := objstore.NewMockBackend()
+	// Simula backups antigos já no bucket
+	mock.Seed("scripts/old-backup-1.tar.gz", "scripts/old-backup-2.tar.gz")
+
+	buckets := []config.BucketConfig{{
+		Name:         "s3-space",
+		Provider:     "s3",
+		Bucket:       "test-bucket",
+		Prefix:       "scripts/",
+		Mode:         config.BucketModeSync,
+		SyncStrategy: config.SyncStrategySpaceEfficient,
+	}}
+
+	backends := map[string]*objstore.MockBackend{"s3-space": mock}
+	o := newTestOrchestrator(t, buckets, backends)
+
+	// Cria arquivo local de backup para upload
+	tmpDir := t.TempDir()
+	backupFile := filepath.Join(tmpDir, "2026-01-01T00-00-00-000.tar.gz")
+	if err := os.WriteFile(backupFile, []byte("backup data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simula que o Rotate removeu "old-backup-2.tar.gz"
+	rotated := []string{"old-backup-2.tar.gz"}
+
+	results := o.Execute(context.Background(), backupFile, rotated, tmpDir)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if !results[0].Success {
+		t.Fatalf("sync should succeed, got error: %v", results[0].Error)
+	}
+
+	// Deve ter feito delete ANTES do upload (space_efficient)
+	if len(mock.DeleteCalls) != 1 || mock.DeleteCalls[0] != "scripts/old-backup-2.tar.gz" {
+		t.Errorf("expected delete of rotated backup, got %v", mock.DeleteCalls)
+	}
+	if len(mock.UploadCalls) != 1 || mock.UploadCalls[0] != "scripts/2026-01-01T00-00-00-000.tar.gz" {
+		t.Errorf("expected upload of new backup, got %v", mock.UploadCalls)
+	}
+
+	// Arquivo local deve continuar existindo
+	if _, err := os.Stat(backupFile); err != nil {
+		t.Errorf("local file should still exist: %v", err)
+	}
+}
+
+func TestShouldAsyncUpload(t *testing.T) {
+	tests := []struct {
+		name     string
+		buckets  []config.BucketConfig
+		expected bool
+	}{
+		{
+			name:     "no buckets",
+			buckets:  nil,
+			expected: false,
+		},
+		{
+			name: "only archive buckets",
+			buckets: []config.BucketConfig{
+				{Mode: config.BucketModeArchive, AsyncUpload: true},
+			},
+			expected: false,
+		},
+		{
+			name: "sync with async_upload true",
+			buckets: []config.BucketConfig{
+				{Mode: config.BucketModeSync, AsyncUpload: true},
+			},
+			expected: true,
+		},
+		{
+			name: "sync without async_upload",
+			buckets: []config.BucketConfig{
+				{Mode: config.BucketModeSync, AsyncUpload: false},
+			},
+			expected: false,
+		},
+		{
+			name: "mixed sync async and sync non-async",
+			buckets: []config.BucketConfig{
+				{Mode: config.BucketModeSync, AsyncUpload: true},
+				{Mode: config.BucketModeSync, AsyncUpload: false},
+			},
+			expected: false,
+		},
+		{
+			name: "sync async + archive async",
+			buckets: []config.BucketConfig{
+				{Mode: config.BucketModeSync, AsyncUpload: true},
+				{Mode: config.BucketModeArchive, AsyncUpload: true},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldAsyncUpload(tt.buckets)
+			if got != tt.expected {
+				t.Errorf("shouldAsyncUpload() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}

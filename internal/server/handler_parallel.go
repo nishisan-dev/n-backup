@@ -334,7 +334,7 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
 		return
 	}
-	result := h.validateAndCommitWithTrailer(conn, writer, assembledPath, totalBytes, trailer, serverChecksum, storageInfo, pSession, logger)
+	result := h.validateAndCommitWithTrailer(conn, writer, assembledPath, totalBytes, trailer, serverChecksum, storageInfo, pSession, lockKey, logger)
 	h.recordSessionEnd(sessionID, agentName, storageName, backupName, "parallel", storageInfo.CompressionMode, result, now, totalBytes)
 	if result == "ok" {
 		pSession.Phase.Set(PhaseDone)
@@ -675,11 +675,8 @@ func (h *Handler) handleParallelJoin(ctx context.Context, conn net.Conn, logger 
 	logger.Info("parallel stream complete", "bytes", bytesReceived)
 }
 
-// validateAndCommitWithTrailer valida e comita um backup paralelo.
-// Diferente de validateAndCommit, o Trailer já foi recebido separadamente
-// pela conn de controle (não embutido no arquivo). O arquivo contém apenas dados.
-// Retorna o resultado: "ok", "checksum_mismatch" ou "write_error".
-func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWriter, tmpPath string, totalBytes int64, trailer *protocol.Trailer, serverChecksum [32]byte, storageInfo config.StorageInfo, pSession *ParallelSession, logger *slog.Logger) string {
+// lockKey identifica o lock agent:storage:backup para liberação antecipada em async_upload.
+func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWriter, tmpPath string, totalBytes int64, trailer *protocol.Trailer, serverChecksum [32]byte, storageInfo config.StorageInfo, pSession *ParallelSession, lockKey string, logger *slog.Logger) string {
 	if totalBytes == 0 {
 		logger.Error("no data received")
 		writer.Abort(tmpPath)
@@ -761,6 +758,22 @@ func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWrit
 		pSession.Phase.Set(PhaseUploading)
 		pSession.PCProgress = NewPostCommitProgress()
 	}
+
+	// async_upload: libera lock e envia FinalACK ANTES do sync para permitir novas sessões.
+	// Offload nunca chega aqui com async_upload=true (validação de config impede).
+	if shouldAsyncUpload(storageInfo.Buckets) {
+		logger.Info("backup committed (async upload)",
+			"path", finalPath,
+			"bytes", totalBytes,
+			"checksum", fmt.Sprintf("%x", serverChecksum),
+		)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusOK)
+		// Libera lock explicitamente — o defer é idempotente (sync.Map.Delete noop)
+		h.locks.Delete(lockKey)
+		go h.runPostCommitSync(storageInfo, finalPath, removed, writer.AgentDir(), logger)
+		return "ok"
+	}
+
 	h.runPostCommitSync(storageInfo, finalPath, removed, writer.AgentDir(), logger)
 
 	logger.Info("backup committed",

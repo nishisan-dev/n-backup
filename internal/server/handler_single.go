@@ -231,8 +231,7 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 
 	// Remove sessão parcial — backup recebido com sucesso, resume não será necessário
 
-	// Validação do trailer e commit
-	result, dataSize := h.validateAndCommitSingle(conn, writer, tmpPath, bytesReceived, storageInfo, session, logger)
+	result, dataSize := h.validateAndCommitSingle(conn, writer, tmpPath, bytesReceived, storageInfo, session, lockKey, logger)
 	h.recordSessionEnd(sessionID, agentName, storageName, backupName, "single", storageInfo.CompressionMode, result, now, dataSize)
 	if result == "ok" {
 		session.Phase.Set(PhaseDone)
@@ -337,7 +336,7 @@ func (h *Handler) handleResume(ctx context.Context, conn net.Conn, logger *slog.
 		return
 	}
 
-	result, dataSize := h.validateAndCommitSingle(conn, writer, session.TmpPath, totalBytes, storageInfo, nil, logger)
+	result, dataSize := h.validateAndCommitSingle(conn, writer, session.TmpPath, totalBytes, storageInfo, nil, lockKey, logger)
 	h.recordSessionEnd(resume.SessionID, session.AgentName, session.StorageName, session.BackupName, "single", session.CompressionMode, result, session.CreatedAt, dataSize)
 }
 
@@ -403,7 +402,8 @@ func (h *Handler) receiveWithSACK(ctx context.Context, reader io.Reader, sackWri
 // validateAndCommitSingle valida o trailer, checksum e comita o backup.
 // Retorna (resultado, dataSize). resultado: "ok", "checksum_mismatch" ou "write_error".
 // session pode ser nil (resume não tem PartialSession com phase tracker).
-func (h *Handler) validateAndCommitSingle(conn net.Conn, writer *AtomicWriter, tmpPath string, totalBytes int64, storageInfo config.StorageInfo, session *PartialSession, logger *slog.Logger) (string, int64) {
+// lockKey identifica o lock agent:storage:backup para liberação antecipada em async_upload.
+func (h *Handler) validateAndCommitSingle(conn net.Conn, writer *AtomicWriter, tmpPath string, totalBytes int64, storageInfo config.StorageInfo, session *PartialSession, lockKey string, logger *slog.Logger) (string, int64) {
 	const trailerSize int64 = 4 + 32 + 8
 
 	if totalBytes < trailerSize {
@@ -507,6 +507,22 @@ func (h *Handler) validateAndCommitSingle(conn net.Conn, writer *AtomicWriter, t
 		session.Phase.Set(PhaseUploading)
 		session.PCProgress = NewPostCommitProgress()
 	}
+
+	// async_upload: libera lock e envia FinalACK ANTES do sync para permitir novas sessões.
+	// Offload nunca chega aqui com async_upload=true (validação de config impede).
+	if shouldAsyncUpload(storageInfo.Buckets) {
+		logger.Info("backup committed (async upload)",
+			"path", finalPath,
+			"bytes", dataSize,
+			"checksum", fmt.Sprintf("%x", serverChecksum),
+		)
+		protocol.WriteFinalACK(conn, protocol.FinalStatusOK)
+		// Libera lock explicitamente — o defer é idempotente (sync.Map.Delete noop)
+		h.locks.Delete(lockKey)
+		go h.runPostCommitSync(storageInfo, finalPath, removed, writer.AgentDir(), logger)
+		return "ok", dataSize
+	}
+
 	h.runPostCommitSync(storageInfo, finalPath, removed, writer.AgentDir(), logger)
 
 	logger.Info("backup committed",

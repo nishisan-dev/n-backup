@@ -528,6 +528,97 @@ Exemplo com `max_backups: 3` no storage `scripts`:
 
 ---
 
+## Object Storage Pós-Commit
+
+O server pode enviar backups automaticamente para destinos de Object Storage S3-compatible após o commit local. Configure na seção `buckets` de cada storage:
+
+```yaml
+storages:
+  scripts:
+    base_dir: /var/backups/scripts
+    max_backups: 5
+    buckets:
+      - name: s3-mirror
+        provider: s3
+        region: us-east-1
+        bucket: my-backup-bucket
+        prefix: "scripts/"
+        mode: sync
+        sync_strategy: safe    # safe | space_efficient
+        async_upload: false    # true libera o lock antes do sync
+        credentials:
+          access_key_env: AWS_ACCESS_KEY_ID
+          secret_key_env: AWS_SECRET_ACCESS_KEY
+```
+
+### Modos
+
+| Modo | Comportamento | `retain` |
+|------|--------------|----------|
+| `sync` | Espelha o storage local: upload do novo backup + delete dos rotacionados | Proibido |
+| `offload` | Upload para o bucket e deleta o arquivo local (bloqueante) | Obrigatório |
+| `archive` | Envia para o bucket apenas os backups deletados pelo Rotate local | Obrigatório |
+
+### Sync Strategy (`sync_strategy`)
+
+Controla a ordem das operações no modo `sync`. Só válido para `mode: sync`.
+
+| Estratégia | Comportamento | Quando usar |
+|-----------|---------------|-------------|
+| `safe` (default) | Upload primeiro, delete depois | Quando redundância imediata é prioritária |
+| `space_efficient` | Delete primeiro, upload depois | Quando o bucket tem espaço limitado |
+
+> [!WARNING]
+> `space_efficient` introduz uma janela onde o bucket pode temporariamente não ter o backup antigo NEM o novo — se o upload falhar após o delete, os dados locais continuam preservados, mas o bucket fica desatualizado até o próximo sync.
+
+### Async Upload (`async_upload`)
+
+Controla se o sync roda em background após o commit local, liberando o lock e o FinalACK antes da conclusão do sync.
+
+| Valor | Comportamento |
+|-------|---------------|
+| `false` (default) | Sync síncrono — lock mantido até o fim do sync |
+| `true` | Sync assíncrono — lock liberado e FinalACK enviado imediatamente após o commit/rotate |
+
+> [!NOTE]
+> `async_upload: true` permite que o agent inicie um novo backup enquanto o sync anterior ainda está em andamento. Proibido para `mode: offload` (que requer confirmação de upload antes de deletar o local).
+
+> [!TIP]
+> Use `async_upload: true` quando o throughput de backup é mais importante que a confirmação imediata de upload. Combine com `sync_strategy: space_efficient` para buckets com espaço restritor.
+
+### Exemplo Completo
+
+```yaml
+storages:
+  scripts:
+    base_dir: /var/backups/scripts
+    max_backups: 5
+    buckets:
+      # Mirror síncrono (padrão seguro)
+      - name: s3-primary
+        provider: s3
+        bucket: primary-backups
+        prefix: "scripts/"
+        mode: sync
+        credentials:
+          access_key_env: AWS_ACCESS_KEY_ID
+          secret_key_env: AWS_SECRET_ACCESS_KEY
+
+      # Mirror assíncrono com economia de espaço
+      - name: s3-secondary
+        provider: s3
+        bucket: secondary-backups
+        prefix: "scripts/"
+        mode: sync
+        sync_strategy: space_efficient
+        async_upload: true
+        credentials:
+          access_key_env: AWS_ACCESS_KEY_ID_2
+          secret_key_env: AWS_SECRET_ACCESS_KEY_2
+```
+
+---
+
 ## Restauração
 
 O n-backup v1 não inclui restore automatizado. Os backups são arquivos `.tar.gz` padrão:

@@ -68,6 +68,22 @@ func hasArchiveBuckets(buckets []config.BucketConfig) bool {
 	return false
 }
 
+// shouldAsyncUpload retorna true se TODOS os buckets não-archive têm async_upload habilitado.
+// Se não há buckets ativos (excluindo archive), retorna false.
+// Offload nunca será async (validação de config impede), mas o check é defensivo.
+func shouldAsyncUpload(buckets []config.BucketConfig) bool {
+	active := filterBucketsExcluding(buckets, config.BucketModeArchive)
+	if len(active) == 0 {
+		return false
+	}
+	for _, b := range active {
+		if !b.AsyncUpload {
+			return false
+		}
+	}
+	return true
+}
+
 // runArchivePreRotate executa uploads de archive ANTES do Rotate local.
 // Necessário porque o Rotate deleta os arquivos — archive precisa deles intactos.
 // archiveCandidates: nomes dos arquivos que SERÃO deletados pelo Rotate.
