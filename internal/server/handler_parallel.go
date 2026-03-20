@@ -71,6 +71,7 @@ type ParallelSession struct {
 	abortOnce        sync.Once     // garante close único do Aborted
 	AbortErr         atomic.Value  // error do aborto (quando houver)
 	ControlLost      chan struct{} // fechado quando o control channel deste agent cai
+	controlLostMu    sync.Mutex    // protege ControlLost + controlLostOnce para reset thread-safe
 	controlLostOnce  sync.Once     // garante close único do ControlLost
 
 	// Lifecycle phases — rastreamento de fase pós-streaming para WebUI
@@ -84,7 +85,19 @@ type ParallelSession struct {
 // signalControlLost fecha o channel ControlLost de forma segura (idempotente).
 // Chamado por handleControlChannel quando o control channel do agent é encerrado.
 func (ps *ParallelSession) signalControlLost() {
+	ps.controlLostMu.Lock()
+	defer ps.controlLostMu.Unlock()
 	ps.controlLostOnce.Do(func() { close(ps.ControlLost) })
+}
+
+// resetControlLost recria o channel ControlLost, permitindo que novas quedas
+// do control channel sejam detectadas. Chamado quando o agent reconecta.
+// Thread-safe: protegido pelo mesmo mutex de signalControlLost.
+func (ps *ParallelSession) resetControlLost() {
+	ps.controlLostMu.Lock()
+	defer ps.controlLostMu.Unlock()
+	ps.ControlLost = make(chan struct{})
+	ps.controlLostOnce = sync.Once{}
 }
 
 // abort marca a sessão como abortada, fecha o channel Aborted e cancela todos os slots.

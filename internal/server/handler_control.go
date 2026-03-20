@@ -125,6 +125,29 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 		"read_timeout", readTimeout,
 	)
 
+	// Reassociação: se há sessões ativas deste agent com ControlLost sinalizado
+	// (perda anterior do control channel), a reconexão reseta o estado,
+	// permitindo que o grace period do handleParallelBackup receba IngestionDone.
+	h.sessions.Range(func(_, value any) bool {
+		ps, ok := value.(*ParallelSession)
+		if !ok || ps.AgentName != agentName {
+			return true
+		}
+		select {
+		case <-ps.ControlLost:
+			// Control channel estava perdido — reconexão restabelece
+			ps.resetControlLost()
+			logger.Info("control channel reassociated with active session", "session", ps.SessionID)
+			if h.Events != nil {
+				h.Events.PushEvent("info", "control_reassociated", agentName,
+					fmt.Sprintf("control channel reassociated with session %s", ps.SessionID), 0)
+			}
+		default:
+			// Control channel não estava perdido — nada a fazer
+		}
+		return true
+	})
+
 	// Emite evento de conexão do agente
 	if h.Events != nil {
 		h.Events.PushEvent("info", "agent_connected", agentName, fmt.Sprintf("control channel established (keepalive %ds, v%s)", intervalSecs, clientVersion), 0)

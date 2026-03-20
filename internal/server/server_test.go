@@ -589,6 +589,96 @@ func TestControlChannelExit_SignalsControlLostForAgent(t *testing.T) {
 	}
 }
 
+// TestParallelSession_ResetControlLost verifica o ciclo completo:
+// signal → channel fechado → reset → channel aberto novamente → signal novamente.
+func TestParallelSession_ResetControlLost(t *testing.T) {
+	ps := &ParallelSession{
+		ControlLost: make(chan struct{}),
+	}
+
+	// Sinaliza a perda
+	ps.signalControlLost()
+	select {
+	case <-ps.ControlLost:
+		// OK — fechado
+	default:
+		t.Fatal("ControlLost should be closed after signalControlLost")
+	}
+
+	// Reset recria o channel
+	ps.resetControlLost()
+	select {
+	case <-ps.ControlLost:
+		t.Fatal("ControlLost should be open after resetControlLost")
+	default:
+		// OK — aberto
+	}
+
+	// Pode ser sinalizado novamente sem panic
+	ps.signalControlLost()
+	select {
+	case <-ps.ControlLost:
+		// OK — fechado novamente
+	default:
+		t.Fatal("ControlLost should be closed after second signalControlLost")
+	}
+}
+
+// TestControlChannelReconnect_ReassociatesSession verifica que quando
+// o control channel reconecta, sessões com ControlLost sinalizado
+// são resetadas (simulação da lógica de reassociação do handleControlChannel).
+func TestControlChannelReconnect_ReassociatesSession(t *testing.T) {
+	sessions := &sync.Map{}
+
+	ps := &ParallelSession{
+		SessionID:   "session-reconnect",
+		AgentName:   "agent-reconnect",
+		ControlLost: make(chan struct{}),
+	}
+	sessions.Store("session-reconnect", ps)
+
+	// Simula queda do control channel
+	ps.signalControlLost()
+	select {
+	case <-ps.ControlLost:
+		// OK — ControlLost sinalizado
+	default:
+		t.Fatal("ControlLost should be closed after signal")
+	}
+
+	// Simula reconexão do agent (lógica do handleControlChannel)
+	targetAgent := "agent-reconnect"
+	sessions.Range(func(_, value any) bool {
+		ps, ok := value.(*ParallelSession)
+		if !ok || ps.AgentName != targetAgent {
+			return true
+		}
+		select {
+		case <-ps.ControlLost:
+			ps.resetControlLost()
+		default:
+		}
+		return true
+	})
+
+	// Após reassociação, ControlLost deve estar aberto novamente
+	select {
+	case <-ps.ControlLost:
+		t.Fatal("ControlLost should be open after reassociation reset")
+	default:
+		// OK
+	}
+
+	// Uma nova queda pode ser detectada
+	ps.signalControlLost()
+	select {
+	case <-ps.ControlLost:
+		// OK — segunda queda detectada
+	default:
+		t.Fatal("ControlLost should be closed after second signal post-reassociation")
+	}
+}
+
 func TestHandleParallelJoin_RejectsClosingSessionBeforeAckOK(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	handler := &Handler{
