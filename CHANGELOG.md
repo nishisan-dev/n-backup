@@ -9,6 +9,12 @@ e o versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
+---
+
+## [v3.4.0] — 2026-03-20
+
+Resiliência de sessão — registro de sessões expiradas, detecção de perda do control channel e reassociação automática.
+
 ### Corrigido
 - **Sessões expiradas registradas no histórico**: o `CleanupExpiredSessions` agora chama `recordSessionEnd` com resultado `expired` antes de remover sessões parciais e paralelas expiradas. Sessões que antes desapareciam silenciosamente agora são visíveis no Session History do dashboard com badge `expired`.
 - **Evento `session_expired`**: emitido no EventStore quando uma sessão é removida por expiração, incluindo nome do agent, storage, backup e tempo idle. Visível na aba Events do WebUI.
@@ -16,7 +22,6 @@ e o versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 ### Adicionado
 - **Detecção de perda do Control Channel**: quando o control channel cai durante uma sessão paralela ativa, o server detecta a perda e inicia um grace period configurável (`control_lost_grace_period`, default 5m) antes de abortar. Sessões abortadas por perda de controle são registradas com resultado `control_lost` e emitem evento `session_control_lost`. Resolve sessões que ficavam orphaned indefinidamente esperando `ControlIngestionDone`.
 - **Reassociação de Control Channel**: ao reconectar, o server detecta sessões com `ControlLost` sinalizado e reseta o channel, permitindo que o `ControlIngestionDone` seja entregue durante o grace period. Emite evento `control_reassociated`.
-
 
 
 ## [v3.3.4] — 2026-03-06
