@@ -16,7 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nishisan-dev/n-backup/internal/config"
 	"github.com/nishisan-dev/n-backup/internal/protocol"
+	"github.com/nishisan-dev/n-backup/internal/server/observability"
 )
 
 type trackingConn struct {
@@ -269,7 +271,8 @@ func TestCleanupExpiredSessions_MixedTypes(t *testing.T) {
 	sessions.Store("parallel-fresh", freshParallel)
 
 	// Deve NÃO dar panic
-	CleanupExpiredSessions(sessions, 1*time.Hour, logger)
+	h := &Handler{sessions: sessions, cfg: &config.ServerConfig{}}
+	h.CleanupExpiredSessions(1*time.Hour, logger)
 
 	// Verifica que sessões expiradas foram removidas
 	if _, ok := sessions.Load("partial-expired"); ok {
@@ -333,7 +336,8 @@ func TestCleanupExpiredSessions_ParallelSessionClosesStreamsAndCancels(t *testin
 	sessions := &sync.Map{}
 	sessions.Store("parallel-expired", expiredParallel)
 
-	CleanupExpiredSessions(sessions, 1*time.Hour, logger)
+	h := &Handler{sessions: sessions, cfg: &config.ServerConfig{}}
+	h.CleanupExpiredSessions(1*time.Hour, logger)
 
 	if _, ok := sessions.Load("parallel-expired"); ok {
 		t.Fatal("parallel-expired should have been cleaned")
@@ -388,7 +392,8 @@ func TestCleanupExpiredSessions_ActiveSessionNotCleaned(t *testing.T) {
 	sessions.Store("parallel-active", activeParallel)
 
 	// Cleanup com TTL de 1h — NÃO deve limpar nenhuma sessão
-	CleanupExpiredSessions(sessions, 1*time.Hour, logger)
+	h := &Handler{sessions: sessions, cfg: &config.ServerConfig{}}
+	h.CleanupExpiredSessions(1*time.Hour, logger)
 
 	if _, ok := sessions.Load("partial-active"); !ok {
 		t.Error("partial-active should NOT have been cleaned (LastActivity is recent)")
@@ -400,6 +405,108 @@ func TestCleanupExpiredSessions_ActiveSessionNotCleaned(t *testing.T) {
 	// Verifica que o tmp file da partial ativa NÃO foi removido
 	if _, err := os.Stat(activePartial.TmpPath); os.IsNotExist(err) {
 		t.Error("active tmp file should NOT have been removed")
+	}
+}
+
+// TestCleanupExpiredSessions_RecordsExpiredInHistory verifica que sessões expiradas
+// são registradas no SessionHistory com resultado "expired" e que eventos
+// session_expired são emitidos no EventStore.
+func TestCleanupExpiredSessions_RecordsExpiredInHistory(t *testing.T) {
+	dir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	sessions := &sync.Map{}
+
+	// PartialSession expirada
+	tmpPath := filepath.Join(dir, "expired-hist.tmp")
+	os.WriteFile(tmpPath, []byte("data"), 0644)
+	expiredPartial := &PartialSession{
+		TmpPath:         tmpPath,
+		AgentName:       "agent-hist",
+		StorageName:     "storage-hist",
+		BackupName:      "backup-hist",
+		BaseDir:         dir,
+		CompressionMode: "gzip",
+		CreatedAt:       time.Now().Add(-3 * time.Hour),
+	}
+	expiredPartial.LastActivity.Store(time.Now().Add(-2 * time.Hour).UnixNano())
+	expiredPartial.BytesWritten.Store(1024)
+	sessions.Store("partial-hist", expiredPartial)
+
+	// ParallelSession expirada
+	assembler, err := NewChunkAssembler("par-hist", dir, logger)
+	if err != nil {
+		t.Fatalf("NewChunkAssembler: %v", err)
+	}
+	expiredParallel := &ParallelSession{
+		SessionID:   "par-hist",
+		Assembler:   assembler,
+		AgentName:   "agent-par-hist",
+		StorageName: "storage-par-hist",
+		BackupName:  "backup-par-hist",
+		MaxStreams:  4,
+		Done:        make(chan struct{}),
+		CreatedAt:   time.Now().Add(-3 * time.Hour),
+	}
+	expiredParallel.LastActivity.Store(time.Now().Add(-2 * time.Hour).UnixNano())
+	expiredParallel.DiskWriteBytes.Store(2048)
+	sessions.Store("parallel-hist", expiredParallel)
+
+	// Cria stores de observabilidade
+	historyFile := filepath.Join(dir, "session-history.jsonl")
+	sessionHistory, err := observability.NewSessionHistoryStore(historyFile, 100, 1000)
+	if err != nil {
+		t.Fatalf("NewSessionHistoryStore: %v", err)
+	}
+	defer sessionHistory.Close()
+
+	eventsFile := filepath.Join(dir, "events.jsonl")
+	eventStore, err := observability.NewEventStore(eventsFile, 100, 1000)
+	if err != nil {
+		t.Fatalf("NewEventStore: %v", err)
+	}
+	defer eventStore.Close()
+
+	h := &Handler{
+		sessions:       sessions,
+		cfg:            &config.ServerConfig{},
+		SessionHistory: sessionHistory,
+		Events:         eventStore,
+	}
+
+	h.CleanupExpiredSessions(1*time.Hour, logger)
+
+	// Verifica que ambas sessões foram removidas
+	if _, ok := sessions.Load("partial-hist"); ok {
+		t.Fatal("partial-hist should have been cleaned")
+	}
+	if _, ok := sessions.Load("parallel-hist"); ok {
+		t.Fatal("parallel-hist should have been cleaned")
+	}
+
+	// Verifica que o histórico contém 2 entradas com resultado "expired"
+	history := sessionHistory.Recent(0)
+	if len(history) != 2 {
+		t.Fatalf("expected 2 history entries, got %d", len(history))
+	}
+
+	// Verifica que ambas entradas têm resultado "expired"
+	for _, entry := range history {
+		if entry.Result != "expired" {
+			t.Errorf("expected result 'expired', got %q for session %s", entry.Result, entry.SessionID)
+		}
+	}
+
+	// Verifica que eventos session_expired foram emitidos
+	events := eventStore.Recent(10)
+	expiredCount := 0
+	for _, ev := range events {
+		if ev.Type == "session_expired" {
+			expiredCount++
+		}
+	}
+	if expiredCount != 2 {
+		t.Errorf("expected 2 session_expired events, got %d", expiredCount)
 	}
 }
 

@@ -18,12 +18,12 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -131,8 +131,9 @@ func countBackups(baseDir string) int {
 // CleanupExpiredSessions remove sessões parciais expiradas e seus arquivos .tmp.
 // O critério de expiração é baseado em LastActivity (último I/O bem-sucedido),
 // não em CreatedAt, para evitar matar sessões ativas com backups grandes.
-func CleanupExpiredSessions(sessions *sync.Map, ttl time.Duration, logger *slog.Logger) {
-	sessions.Range(func(key, value any) bool {
+// Sessões expiradas são registradas no histórico e emitem evento para o dashboard.
+func (h *Handler) CleanupExpiredSessions(ttl time.Duration, logger *slog.Logger) {
+	h.sessions.Range(func(key, value any) bool {
 		switch s := value.(type) {
 		case *PartialSession:
 			lastAct := time.Unix(0, s.LastActivity.Load())
@@ -144,8 +145,12 @@ func CleanupExpiredSessions(sessions *sync.Map, ttl time.Duration, logger *slog.
 					"age", time.Since(s.CreatedAt).Round(time.Second),
 					"idle", time.Since(lastAct).Round(time.Second),
 				)
+				h.recordSessionEnd(key.(string), s.AgentName, s.StorageName, s.BackupName, "single", s.CompressionMode, "expired", s.CreatedAt, s.BytesWritten.Load())
+				if h.Events != nil {
+					h.Events.PushEvent("error", "session_expired", s.AgentName, fmt.Sprintf("%s/%s expired (idle %s)", s.StorageName, s.BackupName, time.Since(lastAct).Round(time.Second)), 0)
+				}
 				os.Remove(s.TmpPath)
-				sessions.Delete(key)
+				h.sessions.Delete(key)
 			}
 		case *ParallelSession:
 			lastAct := time.Unix(0, s.LastActivity.Load())
@@ -157,6 +162,10 @@ func CleanupExpiredSessions(sessions *sync.Map, ttl time.Duration, logger *slog.
 					"age", time.Since(s.CreatedAt).Round(time.Second),
 					"idle", time.Since(lastAct).Round(time.Second),
 				)
+				h.recordSessionEnd(key.(string), s.AgentName, s.StorageName, s.BackupName, "parallel", s.StorageInfo.CompressionMode, "expired", s.CreatedAt, s.DiskWriteBytes.Load())
+				if h.Events != nil {
+					h.Events.PushEvent("error", "session_expired", s.AgentName, fmt.Sprintf("%s/%s expired (idle %s)", s.StorageName, s.BackupName, time.Since(lastAct).Round(time.Second)), 0)
+				}
 				s.Closing.Store(true)
 				for _, slot := range s.Slots {
 					if slot.CancelFn != nil {
@@ -169,7 +178,7 @@ func CleanupExpiredSessions(sessions *sync.Map, ttl time.Duration, logger *slog.
 					slot.ConnMu.Unlock()
 				}
 				s.Assembler.Cleanup()
-				sessions.Delete(key)
+				h.sessions.Delete(key)
 			}
 		}
 		return true

@@ -61,7 +61,7 @@ func Run(ctx context.Context, cfg *config.ServerConfig, logger *slog.Logger) err
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				CleanupExpiredSessions(sessions, sessionTTL, logger)
+				handler.CleanupExpiredSessions(sessionTTL, logger)
 			}
 		}
 	}()
@@ -142,7 +142,7 @@ func RunWithListener(ctx context.Context, ln net.Listener, cfg *config.ServerCon
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				CleanupExpiredSessions(sessions, sessionTTL, logger)
+				handler.CleanupExpiredSessions(sessionTTL, logger)
 			}
 		}
 	}()
