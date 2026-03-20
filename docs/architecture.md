@@ -360,7 +360,7 @@ O agent mantém uma conexão TLS persistente com o server (magic `CTRL`) para:
 
 O canal reconecta automaticamente com exponential backoff (`reconnect_delay` até `max_reconnect_delay`).
 
-**Detecção de perda (v3.4.0+):** Quando o control channel cai durante uma sessão paralela ativa, o server sinaliza `ControlLost` e inicia um grace period configurável (`control_lost_grace_period`, default 5m). Se o agent não reconectar dentro do período, a sessão é abortada com resultado `control_lost`.
+**Detecção de perda (v3.4.0+):** Quando o control channel cai durante uma sessão paralela ativa, o server sinaliza `ControlLost` e inicia um grace period configurável (`control_lost_grace_period`, default 5m). Se o agent reconectar dentro do período, o channel é resetado via `resetControlLost()` (mutex-protected) e a sessão continua. Caso contrário, a sessão é abortada com resultado `control_lost`. Evento `control_reassociated` é emitido na reconexão.
 
 ```yaml
 daemon:

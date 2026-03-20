@@ -15,6 +15,7 @@ e o versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ### Adicionado
 - **Detecção de perda do Control Channel**: quando o control channel cai durante uma sessão paralela ativa, o server detecta a perda e inicia um grace period configurável (`control_lost_grace_period`, default 5m) antes de abortar. Sessões abortadas por perda de controle são registradas com resultado `control_lost` e emitem evento `session_control_lost`. Resolve sessões que ficavam orphaned indefinidamente esperando `ControlIngestionDone`.
+- **Reassociação de Control Channel**: ao reconectar, o server detecta sessões com `ControlLost` sinalizado e reseta o channel, permitindo que o `ControlIngestionDone` seja entregue durante o grace period. Emite evento `control_reassociated`.
 
 
 

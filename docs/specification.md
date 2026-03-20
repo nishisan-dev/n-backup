@@ -896,7 +896,8 @@ Quando o control channel cai durante uma sessão paralela ativa, o server detect
    - Durante o grace period, aguarda `IngestionDone` (reconexão do agent)
    - Se o agent reconectar e enviar `ControlIngestionDone` dentro do grace period → sessão continua normalmente
    - Se o grace period expirar → sessão é abortada com resultado `control_lost`
-3. O resultado `control_lost` é registrado no Session History e um evento `session_control_lost` é emitido
+3. **Reassociação**: quando o agent reconecta o control channel, o server verifica sessões com `ControlLost` sinalizado e reseta o channel via `resetControlLost()` (protegido por mutex). Isso permite que novas quedas sejam detectadas e emite evento `control_reassociated`
+4. O resultado `control_lost` é registrado no Session History e um evento `session_control_lost` é emitido
 
 #### Configuração
 
