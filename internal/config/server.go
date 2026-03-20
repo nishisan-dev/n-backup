@@ -17,14 +17,15 @@ import (
 
 // ServerConfig representa a configuração completa do nbackup-server.
 type ServerConfig struct {
-	Server       ServerListen           `yaml:"server"`
-	TLS          TLSServer              `yaml:"tls"`
-	Storages     map[string]StorageInfo `yaml:"storages"`
-	Logging      LoggingInfo            `yaml:"logging"`
-	FlowRotation FlowRotationConfig     `yaml:"flow_rotation"`
-	GapDetection GapDetectionConfig     `yaml:"gap_detection"`
-	WebUI        WebUIConfig            `yaml:"web_ui"`
-	ChunkBuffer  ChunkBufferConfig      `yaml:"chunk_buffer"`
+	Server                  ServerListen           `yaml:"server"`
+	TLS                     TLSServer              `yaml:"tls"`
+	Storages                map[string]StorageInfo  `yaml:"storages"`
+	Logging                 LoggingInfo            `yaml:"logging"`
+	FlowRotation            FlowRotationConfig     `yaml:"flow_rotation"`
+	GapDetection            GapDetectionConfig     `yaml:"gap_detection"`
+	WebUI                   WebUIConfig            `yaml:"web_ui"`
+	ChunkBuffer             ChunkBufferConfig      `yaml:"chunk_buffer"`
+	ControlLostGracePeriod  time.Duration          `yaml:"control_lost_grace_period"` // default: 5m
 }
 
 // ChunkBufferConfig define o buffer de chunks em memória compartilhado globalmente
@@ -363,6 +364,12 @@ func (c *ServerConfig) validate() error {
 
 	// Gap Detection: deprecated in v3.0.0 — kept for YAML backward compat.
 	// Ignored at runtime; WarnDeprecated() emits a log warning at startup.
+
+	// Control Lost Grace Period: tempo de espera após queda do control channel
+	// antes de abortar sessão paralela ativa. Default: 5 minutos.
+	if c.ControlLostGracePeriod <= 0 {
+		c.ControlLostGracePeriod = 5 * time.Minute
+	}
 
 	// Web UI defaults e validação
 	if c.WebUI.Enabled {

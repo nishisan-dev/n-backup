@@ -510,6 +510,85 @@ func TestCleanupExpiredSessions_RecordsExpiredInHistory(t *testing.T) {
 	}
 }
 
+// TestParallelSession_SignalControlLost verifica que signalControlLost fecha o channel
+// ControlLost de forma segura e idempotente (pode ser chamado múltiplas vezes sem panic).
+func TestParallelSession_SignalControlLost(t *testing.T) {
+	ps := &ParallelSession{
+		ControlLost: make(chan struct{}),
+	}
+
+	// Antes de sinalizar, o channel deve estar aberto
+	select {
+	case <-ps.ControlLost:
+		t.Fatal("ControlLost should be open before signalControlLost")
+	default:
+		// OK — channel está aberto (bloqueante)
+	}
+
+	// Sinaliza
+	ps.signalControlLost()
+
+	// Após sinalizar, o channel deve estar fechado
+	select {
+	case <-ps.ControlLost:
+		// OK — channel foi fechado
+	default:
+		t.Fatal("ControlLost should be closed after signalControlLost")
+	}
+
+	// Chamar novamente não deve causar panic (idempotente via sync.Once)
+	ps.signalControlLost()
+}
+
+// TestControlChannelExit_SignalsControlLostForAgent verifica que quando o defer
+// de sinalização de ControlLost executa, apenas sessões do agent correto são afetadas.
+func TestControlChannelExit_SignalsControlLostForAgent(t *testing.T) {
+	sessions := &sync.Map{}
+
+	// Sessão do agent-A
+	psA := &ParallelSession{
+		SessionID:   "session-a",
+		AgentName:   "agent-A",
+		ControlLost: make(chan struct{}),
+	}
+	sessions.Store("session-a", psA)
+
+	// Sessão do agent-B (não deve ser afetado)
+	psB := &ParallelSession{
+		SessionID:   "session-b",
+		AgentName:   "agent-B",
+		ControlLost: make(chan struct{}),
+	}
+	sessions.Store("session-b", psB)
+
+	// Simula o defer do handleControlChannel para agent-A
+	targetAgent := "agent-A"
+	sessions.Range(func(_, value any) bool {
+		ps, ok := value.(*ParallelSession)
+		if !ok || ps.AgentName != targetAgent {
+			return true
+		}
+		ps.signalControlLost()
+		return true
+	})
+
+	// Verifica que session-a recebeu o sinal
+	select {
+	case <-psA.ControlLost:
+		// OK
+	default:
+		t.Fatal("session-a ControlLost should be closed for agent-A")
+	}
+
+	// Verifica que session-b NÃO recebeu o sinal
+	select {
+	case <-psB.ControlLost:
+		t.Fatal("session-b ControlLost should NOT be closed (belongs to agent-B)")
+	default:
+		// OK — not closed
+	}
+}
+
 func TestHandleParallelJoin_RejectsClosingSessionBeforeAckOK(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	handler := &Handler{

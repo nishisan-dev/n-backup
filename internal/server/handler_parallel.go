@@ -65,11 +65,13 @@ type ParallelSession struct {
 	WalkComplete    atomic.Int32  // 1 = prescan concluído, total confiável (via ControlProgress)
 	ClientVersion   string        // Versão do client (protocolo v3+)
 	AutoScaleInfo   atomic.Value  // *observability.AutoScaleInfo (atualizado via ControlAutoScaleStats)
-	IngestionDone   chan struct{} // fechado quando agent envia ControlIngestionDone
-	ingestionOnce   sync.Once     // garante close único do IngestionDone
-	Aborted         chan struct{} // fechado quando a sessão é abortada antes do finalize
-	abortOnce       sync.Once     // garante close único do Aborted
-	AbortErr        atomic.Value  // error do aborto (quando houver)
+	IngestionDone    chan struct{} // fechado quando agent envia ControlIngestionDone
+	ingestionOnce    sync.Once     // garante close único do IngestionDone
+	Aborted          chan struct{} // fechado quando a sessão é abortada antes do finalize
+	abortOnce        sync.Once     // garante close único do Aborted
+	AbortErr         atomic.Value  // error do aborto (quando houver)
+	ControlLost      chan struct{} // fechado quando o control channel deste agent cai
+	controlLostOnce  sync.Once     // garante close único do ControlLost
 
 	// Lifecycle phases — rastreamento de fase pós-streaming para WebUI
 	Phase      *SessionPhaseTracker // fase atual da sessão
@@ -77,6 +79,12 @@ type ParallelSession struct {
 	PCProgress  *PostCommitProgress  // progresso do upload pós-commit (nil quando não ativo)
 
 	Logger *slog.Logger // Session logger (enriquecido com session_log_dir quando habilitado)
+}
+
+// signalControlLost fecha o channel ControlLost de forma segura (idempotente).
+// Chamado por handleControlChannel quando o control channel do agent é encerrado.
+func (ps *ParallelSession) signalControlLost() {
+	ps.controlLostOnce.Do(func() { close(ps.ControlLost) })
 }
 
 // abort marca a sessão como abortada, fecha o channel Aborted e cancela todos os slots.
@@ -187,6 +195,7 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		CreatedAt:     now,
 		IngestionDone: make(chan struct{}),
 		Aborted:       make(chan struct{}),
+		ControlLost:   make(chan struct{}),
 		Phase:         NewSessionPhaseTracker(),
 	}
 
@@ -225,6 +234,33 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	select {
 	case <-pSession.IngestionDone:
 		logger.Info("agent confirmed ingestion complete")
+	case <-pSession.ControlLost:
+		// Control channel caiu — aguarda reconexão por grace period antes de abortar.
+		gracePeriod := h.cfg.ControlLostGracePeriod
+		logger.Warn("control channel lost during active session, waiting for reconnection",
+			"grace_period", gracePeriod)
+		select {
+		case <-pSession.IngestionDone:
+			logger.Info("agent delivered IngestionDone after control reconnect")
+		case <-time.After(gracePeriod):
+			logger.Error("control channel not recovered after grace period — aborting session",
+				"grace_period", gracePeriod)
+			pSession.abort(fmt.Errorf("control channel lost and not recovered within %s", gracePeriod))
+			h.recordSessionEnd(sessionID, agentName, storageName, backupName, "parallel",
+				storageInfo.CompressionMode, "control_lost", now, pSession.DiskWriteBytes.Load())
+			h.sessions.Delete(sessionID)
+			protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+			if h.Events != nil {
+				h.Events.PushEvent("error", "session_control_lost", agentName,
+					fmt.Sprintf("%s/%s aborted: control channel lost for %s", storageName, backupName, gracePeriod), 0)
+			}
+			return
+		case <-ctx.Done():
+			logger.Error("context cancelled during control lost grace period")
+			h.sessions.Delete(sessionID)
+			protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+			return
+		}
 	case <-pSession.Aborted:
 		pSession.StreamWg.Wait()
 		// Sinaliza ao ChunkBuffer para parar de drenar chunks desta sessão,

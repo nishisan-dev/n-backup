@@ -106,6 +106,19 @@ func (h *Handler) handleControlChannel(ctx context.Context, conn net.Conn, logge
 	h.registerControlConn(agentName, cci, writeMu)
 	defer h.unregisterControlConn(agentName, cci, writeMu)
 
+	// Sinaliza ControlLost para todas as sessões paralelas ativas deste agent
+	// quando esta função retornar (control channel encerrado por qualquer motivo).
+	defer func() {
+		h.sessions.Range(func(_, value any) bool {
+			ps, ok := value.(*ParallelSession)
+			if !ok || ps.AgentName != agentName {
+				return true
+			}
+			ps.signalControlLost()
+			return true
+		})
+	}()
+
 	logger = logger.With("agent", agentName)
 	logger.Info("control channel established",
 		"keepalive_interval_s", intervalSecs,
