@@ -1,0 +1,36 @@
+@startuml control_channel_resilience
+!theme plain
+title Control Channel Resilience — Detecção de Perda e Grace Period
+
+participant "Agent" as agent
+participant "Server\n(handleControlChannel)" as ctrl
+participant "Server\n(handleParallelBackup)" as parallel
+participant "Session\nHistory" as history
+
+== Sessão Paralela Ativa ==
+agent -> ctrl : ControlPing (CPNG)
+ctrl -> agent : ControlPong (CPNG + load + disk)
+note over parallel : select aguardando\nIngestionDone
+
+== Queda do Control Channel ==
+agent -x ctrl : <font color=red>EOF / timeout / reset</font>
+ctrl -> ctrl : defer: detecta saída do loop
+ctrl -> parallel : <font color=red>signalControlLost()</font>\nfecha channel ControlLost
+
+alt Agent Reconecta a Tempo
+    note over parallel : Entra em grace period\n(control_lost_grace_period, default 5m)
+    agent -> ctrl : TLS + CTRL magic\n(reconexão)
+    ctrl -> parallel : Novo handleControlChannel\ncom mesmo agentName
+    agent -> ctrl : ControlIngestionDone (CIDN)
+    ctrl -> parallel : fecha channel IngestionDone
+    note over parallel #LightGreen : IngestionDone recebido\ndurante grace period\n→ sessão continua normalmente
+    parallel -> parallel : Finalize + Commit
+else Grace Period Expira
+    note over parallel : time.After(gracePeriod) expirado
+    parallel -> parallel : <font color=red>abort()</font>
+    parallel -> history : recordSessionEnd(\n  result="control_lost")
+    parallel -> agent : FinalACK(WriteError)
+    note over parallel #Salmon : Sessão abortada\nEvento session_control_lost emitido
+end
+
+@enduml

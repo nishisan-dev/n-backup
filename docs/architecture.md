@@ -360,6 +360,8 @@ O agent mantém uma conexão TLS persistente com o server (magic `CTRL`) para:
 
 O canal reconecta automaticamente com exponential backoff (`reconnect_delay` até `max_reconnect_delay`).
 
+**Detecção de perda (v3.4.0+):** Quando o control channel cai durante uma sessão paralela ativa, o server sinaliza `ControlLost` e inicia um grace period configurável (`control_lost_grace_period`, default 5m). Se o agent não reconectar dentro do período, a sessão é abortada com resultado `control_lost`.
+
 ```yaml
 daemon:
   control_channel:
@@ -398,7 +400,7 @@ O nbackup-server embarca uma **SPA de observabilidade** acessível via HTTP, ser
 - **Polling adaptativo**: atualiza dados a cada 2s (ativo) e views sob demanda
 - **Views**: Overview, Sessions, Events, Config
 - **Session Detail**: sparklines de throughput (Canvas), streams com uptime/reconnects, assembler progress
-- **Session History**: tabela com badges coloridos por resultado (ok/checksum/write_error/timeout/expired)
+- **Session History**: tabela com badges coloridos por resultado (ok/checksum/write_error/timeout/expired/control_lost)
 - **Connected Agents**: tabela com stats em gauges visuais (CPU/RAM/Disk)
 - **Storages**: gauges de uso de disco com thresholds visuais (verde/amarelo/vermelho)
 

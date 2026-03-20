@@ -884,6 +884,29 @@ O agent mantém uma conexão TLS persistente com o server para keep-alive e orqu
 
 Ver seção 3.6 para detalhes dos frames.
 
+### 5.8 Detecção de Perda do Control Channel (v3.4.0+)
+
+Quando o control channel cai durante uma sessão paralela ativa, o server detecta a perda e inicia um **grace period** configurável antes de abortar a sessão. Sem este mecanismo, a sessão ficaria presa indefinidamente no select esperando `ControlIngestionDone`.
+
+#### Comportamento
+
+1. `handleControlChannel` registra um `defer` que sinaliza `ControlLost` em todas as sessões paralelas ativas do agent ao sair
+2. O select de `handleParallelBackup` monitora o channel `ControlLost`:
+   - Se `ControlLost` for fechado, entra em grace period
+   - Durante o grace period, aguarda `IngestionDone` (reconexão do agent)
+   - Se o agent reconectar e enviar `ControlIngestionDone` dentro do grace period → sessão continua normalmente
+   - Se o grace period expirar → sessão é abortada com resultado `control_lost`
+3. O resultado `control_lost` é registrado no Session History e um evento `session_control_lost` é emitido
+
+#### Configuração
+
+```yaml
+# server.yaml
+control_lost_grace_period: 5m   # default: 5m — tempo de espera antes de abortar
+```
+
+![Detecção de controle perdido](https://uml.nishisan.dev/proxy?src=https://raw.githubusercontent.com/nishisan-dev/n-backup/refs/heads/main/docs/diagrams/control_channel_resilience.puml)
+
 ---
 
 ## 6. Estrutura do Projeto
