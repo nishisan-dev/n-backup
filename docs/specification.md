@@ -810,6 +810,7 @@ Quando a conexão cai mid-stream, o agent tenta reconectar e resumir automaticam
 - Se o offset não estiver mais no buffer, o backup reinicia do zero.
 - Sessões parciais no server expiram após 1 hora (TTL).
 - O `.tmp` parcial é deletado na expiração.
+- Sessões expiradas são registradas no Session History com resultado `expired` e emitem evento `session_expired` para o dashboard.
 
 #### Parallel Streams — Resume via Re-Join (v1.2.3+)
 

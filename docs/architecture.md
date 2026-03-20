@@ -143,7 +143,7 @@ O **n-backup** é um sistema de backup client-server de alta performance escrito
 | **HandlerParallel** | `internal/server/handler_parallel.go` | Fluxo de backup paralelo: ParallelInit/Join, ChunkSACK, multi-stream |
 | **HandlerControl** | `internal/server/handler_control.go` | Canal de controle persistente: ControlPing/Pong, ControlRotate, ControlAdmit/Defer/Abort, SlotPark/Resume |
 | **HandlerHealth** | `internal/server/handler_health.go` | Health check: PING/PONG com status e disco |
-| **HandlerStorage** | `internal/server/handler_storage.go` | Operações de storage: commit atômico, rotação, integração com PostCommit |
+| **HandlerStorage** | `internal/server/handler_storage.go` | Operações de storage: commit atômico, rotação, integração com PostCommit. Registra sessões expiradas no histórico e emite evento `session_expired` |
 | **HandlerObservability** | `internal/server/handler_observability.go` | Emissão de eventos e métricas para WebUI (início/fim de sessão, rotações, reconexões) |
 | **Storage** | `internal/server/storage.go` | Escrita atômica (`.tmp` → rename), rotação por `max_backups`, organização por agent. Rotação emite log e evento com lista de backups removidos |
 | **Assembler** | `internal/server/assembler.go` | Reassembla chunks de streams paralelos na ordem correta via `GlobalSeq`. Staging de chunks suporta 1 ou 2 níveis de sharding (`chunk_shard_levels`) para reduzir entradas por diretório |
@@ -398,7 +398,7 @@ O nbackup-server embarca uma **SPA de observabilidade** acessível via HTTP, ser
 - **Polling adaptativo**: atualiza dados a cada 2s (ativo) e views sob demanda
 - **Views**: Overview, Sessions, Events, Config
 - **Session Detail**: sparklines de throughput (Canvas), streams com uptime/reconnects, assembler progress
-- **Session History**: tabela com badges coloridos por resultado (ok/checksum/write_error/timeout)
+- **Session History**: tabela com badges coloridos por resultado (ok/checksum/write_error/timeout/expired)
 - **Connected Agents**: tabela com stats em gauges visuais (CPU/RAM/Disk)
 - **Storages**: gauges de uso de disco com thresholds visuais (verde/amarelo/vermelho)
 

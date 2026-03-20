@@ -9,7 +9,11 @@ e o versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
----
+### Corrigido
+- **Sessões expiradas registradas no histórico**: o `CleanupExpiredSessions` agora chama `recordSessionEnd` com resultado `expired` antes de remover sessões parciais e paralelas expiradas. Sessões que antes desapareciam silenciosamente agora são visíveis no Session History do dashboard com badge `expired`.
+- **Evento `session_expired`**: emitido no EventStore quando uma sessão é removida por expiração, incluindo nome do agent, storage, backup e tempo idle. Visível na aba Events do WebUI.
+
+
 
 ## [v3.3.4] — 2026-03-06
 
