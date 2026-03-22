@@ -28,4 +28,5 @@ const API = {
         return this.get(`/api/v1/sessions/active-history?limit=${limit}${sid}`, init);
     },
     syncStatus(init) { return this.get('/api/v1/sync/status', init); },
+    bucketHistory(limit = 50, init) { return this.get(`/api/v1/buckets/history?limit=${limit}`, init); },
 };

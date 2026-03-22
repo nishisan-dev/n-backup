@@ -68,6 +68,14 @@
             </svg>
             Sessões
         </button>
+        <button class="nav-tab" data-view="uploads">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="16 16 12 12 8 16" />
+                <line x1="12" y1="21" x2="12" y2="12" />
+                <path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3" />
+            </svg>
+            Uploads
+        </button>
         <button class="nav-tab" data-view="events">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
@@ -180,6 +188,11 @@
 
             <div class="card sync-status-card" id="sync-status-card" style="display:none"></div>
 
+            <div class="card" id="overview-uploads-card" style="display:none">
+                <h2 class="card-title">☁ Últimos Uploads</h2>
+                <div id="overview-uploads-body"></div>
+            </div>
+
             <div class="card" id="overview-agents-card" style="display:none">
                 <h2 class="card-title">Agentes Conectados</h2>
                 <div class="table-wrap">
@@ -287,6 +300,38 @@
                         <tbody id="session-history-body"></tbody>
                     </table>
                 </div>
+            </div>
+        </div>
+
+        <!-- Uploads View -->
+        <div class="view" id="view-uploads">
+            <div class="view-header">
+                <h2>Histórico de Uploads</h2>
+                <div class="view-header-actions">
+                    <select id="uploads-limit" class="select-mini">
+                        <option value="25">25</option>
+                        <option value="50" selected>50</option>
+                        <option value="100">100</option>
+                    </select>
+                </div>
+            </div>
+            <div id="uploads-summary" class="uploads-summary-bar"></div>
+            <div class="table-wrap">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Hora</th>
+                            <th>Agent</th>
+                            <th>Storage/Backup</th>
+                            <th>Bucket</th>
+                            <th>Modo</th>
+                            <th>Status</th>
+                            <th>Duração</th>
+                            <th>Erro</th>
+                        </tr>
+                    </thead>
+                    <tbody id="uploads-body"></tbody>
+                </table>
             </div>
         </div>
 

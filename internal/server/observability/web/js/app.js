@@ -64,7 +64,7 @@
 
     // ============ Hash Routing ============
 
-    const VALID_VIEWS = ['overview', 'sessions', 'events', 'config'];
+    const VALID_VIEWS = ['overview', 'sessions', 'uploads', 'events', 'config'];
 
     function pushRoute(hash) {
         if (window.location.hash === '#' + hash) return;
@@ -143,13 +143,14 @@
     async function fetchOverview() {
         const { requestId, signal } = beginViewRequest();
         try {
-            const [health, metrics, sessions, agents, storages, syncStatus] = await Promise.all([
+            const [health, metrics, sessions, agents, storages, syncStatus, bucketHistory] = await Promise.all([
                 API.health({ signal }),
                 API.metrics({ signal }),
                 API.sessions({ signal }),
                 API.agents({ signal }),
                 API.storages({ signal }),
                 API.syncStatus({ signal }),
+                API.bucketHistory(10, { signal }),
             ]);
             if (!isLatestRequest(requestId)) return;
 
@@ -164,6 +165,7 @@
             Components.renderOverviewAgents(agents);
             Components.renderOverviewStorages(storages);
             Components.renderOverviewSessions(sessions);
+            Components.renderOverviewUploads(bucketHistory);
 
             // Throughput global: calcula delta de traffic_in total
             if (lastGlobalTraffic !== null) {
@@ -263,6 +265,21 @@
         }
     }
 
+    async function fetchUploads() {
+        const { requestId, signal } = beginViewRequest();
+        try {
+            const limit = parseInt(document.getElementById('uploads-limit').value) || 50;
+            const entries = await API.bucketHistory(limit, { signal });
+            if (!isLatestRequest(requestId)) return;
+            updateConnectionStatus('connected');
+            Components.renderUploadsView(entries);
+        } catch (err) {
+            if (isAbortError(err) || !isLatestRequest(requestId)) return;
+            updateConnectionStatus('error');
+            console.error('fetchUploads error:', err);
+        }
+    }
+
     async function fetchConfig() {
         if (configLoaded) {
             cancelInFlightRequest();
@@ -293,6 +310,7 @@
                 }
                 break;
             case 'events': fetchEvents(); break;
+            case 'uploads': fetchUploads(); break;
             case 'config': fetchConfig(); break;
         }
     }
@@ -376,6 +394,9 @@
 
     // Events limit change
     document.getElementById('events-limit').addEventListener('change', fetchEvents);
+
+    // Uploads limit change
+    document.getElementById('uploads-limit').addEventListener('change', fetchUploads);
 
     // Visibility change — pause polling when tab hidden
     document.addEventListener('visibilitychange', () => {

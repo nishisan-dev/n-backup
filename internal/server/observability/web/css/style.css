@@ -1059,6 +1059,92 @@ body {
     margin-top: 24px;
 }
 
+/* ============ Bucket Uploads ============ */
+
+.uploads-mini-summary {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 12px;
+    padding: 8px 0;
+}
+
+.uploads-mini-stat {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+
+.uploads-ok {
+    color: var(--accent-emerald);
+}
+
+.uploads-fail {
+    color: var(--accent-rose);
+}
+
+.uploads-summary-bar {
+    margin-bottom: 16px;
+}
+
+.uploads-summary-stats {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.uploads-summary-stats strong {
+    color: var(--text-primary);
+}
+
+.uploads-summary-bar-track {
+    height: 6px;
+    background: rgba(244, 63, 94, 0.2);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.uploads-summary-bar-fill {
+    height: 100%;
+    background: var(--accent-emerald);
+    border-radius: 3px;
+    transition: width 0.5s ease;
+}
+
+.status-ok {
+    color: var(--accent-emerald);
+    font-weight: 600;
+    font-size: 0.8rem;
+}
+
+.status-error {
+    color: var(--accent-rose);
+    font-weight: 600;
+    font-size: 0.8rem;
+}
+
+.row-error {
+    background: rgba(244, 63, 94, 0.04);
+}
+
+.row-error:hover {
+    background: rgba(244, 63, 94, 0.08) !important;
+}
+
+.error-text {
+    color: var(--accent-rose);
+    font-size: 0.75rem;
+    font-family: var(--font-mono);
+    cursor: help;
+}
+
+.badge-mode {
+    background: rgba(139, 92, 246, 0.15);
+    color: #a78bfa;
+}
+
 /* ============ Theme Toggle ============ */
 
 .theme-toggle {

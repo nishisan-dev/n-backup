@@ -1049,4 +1049,98 @@ const Components = {
                 </div>
             </div>`;
     },
+
+    // ============ Bucket Uploads ============
+
+    renderOverviewUploads(entries) {
+        const card = document.getElementById('overview-uploads-card');
+        const body = document.getElementById('overview-uploads-body');
+        if (!entries || entries.length === 0) {
+            card.style.display = 'none';
+            return;
+        }
+        card.style.display = '';
+
+        const success = entries.filter(e => e.success).length;
+        const failed = entries.length - success;
+
+        let html = `<div class="uploads-mini-summary">`;
+        html += `<span class="uploads-mini-stat uploads-ok">✓ ${success} ok</span>`;
+        if (failed > 0) html += `<span class="uploads-mini-stat uploads-fail">✗ ${failed} falha(s)</span>`;
+        html += `</div>`;
+
+        html += `<div class="table-wrap"><table class="data-table"><thead><tr>
+            <th>Hora</th><th>Agent</th><th>Bucket</th><th>Modo</th><th>Status</th><th>Duração</th>
+        </tr></thead><tbody>`;
+
+        // Mostra mais recentes primeiro (reversed)
+        const reversed = [...entries].reverse();
+        for (const e of reversed) {
+            const time = e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : '—';
+            const statusClass = e.success ? 'status-ok' : 'status-error';
+            const statusText = e.success ? '✓ OK' : '✗ Falha';
+            html += `<tr>
+                <td>${time}</td>
+                <td>${esc(e.agent || '—')}</td>
+                <td>${esc(e.bucket_name || '—')}</td>
+                <td><span class="badge badge-mode">${esc(e.mode)}</span></td>
+                <td><span class="${statusClass}">${statusText}</span></td>
+                <td>${esc(e.duration || '—')}</td>
+            </tr>`;
+        }
+        html += `</tbody></table></div>`;
+        body.innerHTML = html;
+    },
+
+    renderUploadsView(entries) {
+        const body = document.getElementById('uploads-body');
+        const summaryEl = document.getElementById('uploads-summary');
+        if (!entries || entries.length === 0) {
+            body.innerHTML = `<tr><td colspan="8" class="empty-state">Nenhum upload registrado.</td></tr>`;
+            summaryEl.innerHTML = '';
+            return;
+        }
+
+        // Summary bar
+        const total = entries.length;
+        const success = entries.filter(e => e.success).length;
+        const failed = total - success;
+        const pct = total > 0 ? Math.round(success / total * 100) : 0;
+        summaryEl.innerHTML = `
+            <div class="uploads-summary-stats">
+                <span><strong>${total}</strong> uploads</span>
+                <span class="uploads-ok">✓ ${success} (${pct}%)</span>
+                ${failed > 0 ? `<span class="uploads-fail">✗ ${failed}</span>` : ''}
+            </div>
+            <div class="uploads-summary-bar-track">
+                <div class="uploads-summary-bar-fill" style="width:${pct}%"></div>
+            </div>`;
+
+        // Table rows (reversed = mais recente primeiro)
+        const reversed = [...entries].reverse();
+        let html = '';
+        for (const e of reversed) {
+            const time = e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : '—';
+            const statusClass = e.success ? 'status-ok' : 'status-error';
+            const statusText = e.success ? '✓ OK' : '✗ Falha';
+            const storageBackup = [e.storage, e.backup].filter(Boolean).join('/') || '—';
+            const errText = e.error ? `<span class="error-text" title="${esc(e.error)}">${truncate(e.error, 40)}</span>` : '—';
+            html += `<tr class="${e.success ? '' : 'row-error'}">
+                <td>${time}</td>
+                <td>${esc(e.agent || '—')}</td>
+                <td>${esc(storageBackup)}</td>
+                <td>${esc(e.bucket_name || '—')}</td>
+                <td><span class="badge badge-mode">${esc(e.mode)}</span></td>
+                <td><span class="${statusClass}">${statusText}</span></td>
+                <td>${esc(e.duration || '—')}</td>
+                <td>${errText}</td>
+            </tr>`;
+        }
+        body.innerHTML = html;
+    },
 };
+
+function truncate(s, max) {
+    if (!s || s.length <= max) return s || '';
+    return s.substring(0, max) + '…';
+}
