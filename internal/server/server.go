@@ -218,6 +218,13 @@ func startWebUI(ctx context.Context, cfg *config.ServerConfig, handler *Handler,
 	}
 	handler.ActiveSessionHistory = activeStore
 
+	bucketStore, err := observability.NewBucketUploadStore(cfg.WebUI.BucketUploadFile, 200, cfg.WebUI.BucketUploadMaxLines)
+	if err != nil {
+		logger.Error("creating bucket upload store", "error", err, "path", cfg.WebUI.BucketUploadFile)
+		bucketStore, _ = observability.NewBucketUploadStore(filepath.Join(os.TempDir(), "nbackup-bucket-uploads.jsonl"), 200, cfg.WebUI.BucketUploadMaxLines)
+	}
+	handler.BucketUploads = bucketStore
+
 	router := observability.NewRouter(handler, cfg, acl, store)
 
 	// Inicia scanner de storage com cache periódico
@@ -260,9 +267,6 @@ func startWebUI(ctx context.Context, cfg *config.ServerConfig, handler *Handler,
 				for _, sess := range sessions {
 					handler.ActiveSessionHistory.PushSnapshot(sess, now)
 				}
-				if handler.Events != nil {
-					handler.Events.PushEvent("info", "active_snapshot", "", fmt.Sprintf("saved %d active session snapshots", len(sessions)), 0)
-				}
 			}
 		}
 	}()
@@ -285,6 +289,11 @@ func startWebUI(ctx context.Context, cfg *config.ServerConfig, handler *Handler,
 		if activeStore != nil {
 			if err := activeStore.Close(); err != nil {
 				logger.Error("active session store close error", "error", err)
+			}
+		}
+		if bucketStore != nil {
+			if err := bucketStore.Close(); err != nil {
+				logger.Error("bucket upload store close error", "error", err)
 			}
 		}
 		logger.Info("web UI shutdown complete")
