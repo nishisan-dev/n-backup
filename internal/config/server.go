@@ -81,6 +81,10 @@ type WebUIConfig struct {
 	// Intervalo de refresh dos dados de storage (disco + contagem de backups)
 	StorageScanInterval time.Duration `yaml:"storage_scan_interval"` // default: 1h, mínimo: 30s
 
+	// Persistência de histórico de uploads pós-commit para Object Storage
+	BucketUploadFile     string `yaml:"bucket_upload_file"`      // default: "bucket-uploads.jsonl"
+	BucketUploadMaxLines int    `yaml:"bucket_upload_max_lines"` // default: 5000
+
 	// Parsed é preenchido em validate(); não vem do YAML.
 	ParsedCIDRs []*net.IPNet `yaml:"-"`
 }
@@ -411,6 +415,12 @@ func (c *ServerConfig) validate() error {
 		}
 		if c.WebUI.StorageScanInterval < 30*time.Second {
 			c.WebUI.StorageScanInterval = 30 * time.Second
+		}
+		if c.WebUI.BucketUploadFile == "" {
+			c.WebUI.BucketUploadFile = "bucket-uploads.jsonl"
+		}
+		if c.WebUI.BucketUploadMaxLines <= 0 {
+			c.WebUI.BucketUploadMaxLines = 5000
 		}
 		if len(c.WebUI.AllowOrigins) == 0 {
 			return fmt.Errorf("web_ui.allow_origins is required when web_ui is enabled (deny-by-default)")
