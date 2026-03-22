@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/nishisan-dev/n-backup/internal/config"
 	"github.com/nishisan-dev/n-backup/internal/objstore"
+	"github.com/nishisan-dev/n-backup/internal/server/observability"
 )
 
 // defaultBackendFactory cria um objstore.Backend real a partir de BucketConfig.
@@ -84,10 +86,31 @@ func shouldAsyncUpload(buckets []config.BucketConfig) bool {
 	return true
 }
 
+// BucketUploadContext carrega informações do caller para emissão de BucketUploadEntry.
+type BucketUploadContext struct {
+	Agent     string
+	Storage   string
+	Backup    string
+	SessionID string
+}
+
+// bucketCtxFromSession cria BucketUploadContext a partir de uma PartialSession.
+// Retorna contexto vazio se session é nil (resume path).
+func bucketCtxFromSession(s *PartialSession) BucketUploadContext {
+	if s == nil {
+		return BucketUploadContext{}
+	}
+	return BucketUploadContext{
+		Agent:   s.AgentName,
+		Storage: s.StorageName,
+		Backup:  s.BackupName,
+	}
+}
+
 // runArchivePreRotate executa uploads de archive ANTES do Rotate local.
 // Necessário porque o Rotate deleta os arquivos — archive precisa deles intactos.
 // archiveCandidates: nomes dos arquivos que SERÃO deletados pelo Rotate.
-func (h *Handler) runArchivePreRotate(storageInfo config.StorageInfo, archiveCandidates []string, agentDir string, logger *slog.Logger) {
+func (h *Handler) runArchivePreRotate(storageInfo config.StorageInfo, archiveCandidates []string, agentDir string, bctx BucketUploadContext, logger *slog.Logger) {
 	archiveBuckets := filterBucketsByMode(storageInfo.Buckets, config.BucketModeArchive)
 	if len(archiveBuckets) == 0 || len(archiveCandidates) == 0 {
 		return
@@ -105,12 +128,12 @@ func (h *Handler) runArchivePreRotate(storageInfo config.StorageInfo, archiveCan
 	// Para archive, finalPath não é usado (archive só envia rotatedFiles).
 	// Passamos os candidates como rotatedFiles; eles ainda existem no disco.
 	results := o.Execute(context.Background(), "", archiveCandidates, agentDir)
-	h.logPostCommitResults(results, logger)
+	h.logPostCommitResults(results, bctx, logger)
 }
 
 // runPostCommitSync executa operações de sync e offload pós-commit.
 // Archive é excluído pois já foi tratado por runArchivePreRotate.
-func (h *Handler) runPostCommitSync(storageInfo config.StorageInfo, finalPath string, rotatedFiles []string, agentDir string, logger *slog.Logger) {
+func (h *Handler) runPostCommitSync(storageInfo config.StorageInfo, finalPath string, rotatedFiles []string, agentDir string, bctx BucketUploadContext, logger *slog.Logger) {
 	// Filtra archive — já tratado antes do Rotate
 	buckets := filterBucketsExcluding(storageInfo.Buckets, config.BucketModeArchive)
 	if len(buckets) == 0 {
@@ -127,11 +150,11 @@ func (h *Handler) runPostCommitSync(storageInfo config.StorageInfo, finalPath st
 	}
 
 	results := o.Execute(context.Background(), finalPath, rotatedFiles, agentDir)
-	h.logPostCommitResults(results, logger)
+	h.logPostCommitResults(results, bctx, logger)
 }
 
 // logPostCommitResults registra resultados e emite eventos para a WebUI.
-func (h *Handler) logPostCommitResults(results []PostCommitResult, logger *slog.Logger) {
+func (h *Handler) logPostCommitResults(results []PostCommitResult, bctx BucketUploadContext, logger *slog.Logger) {
 	for _, r := range results {
 		if !r.Success {
 			logger.Error("post-commit bucket operation failed",
@@ -150,5 +173,25 @@ func (h *Handler) logPostCommitResults(results []PostCommitResult, logger *slog.
 					fmt.Sprintf("bucket %s (%s) completed in %s", r.BucketName, r.Mode, r.Duration.Round(1)), 0)
 			}
 		}
+
+		// Registra no histórico de uploads de bucket
+		if h.BucketUploads != nil {
+			errStr := ""
+			if r.Error != nil {
+				errStr = r.Error.Error()
+			}
+			h.BucketUploads.Push(observability.BucketUploadEntry{
+				Agent:      bctx.Agent,
+				Storage:    bctx.Storage,
+				Backup:     bctx.Backup,
+				SessionID:  bctx.SessionID,
+				BucketName: r.BucketName,
+				Mode:       r.Mode,
+				Success:    r.Success,
+				Error:      errStr,
+				Duration:   r.Duration.Truncate(time.Millisecond).String(),
+			})
+		}
 	}
 }
+

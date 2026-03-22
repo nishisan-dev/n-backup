@@ -786,7 +786,7 @@ func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWrit
 	// (antes da deleção, para que os arquivos ainda existam no disco).
 	if hasArchiveBuckets(storageInfo.Buckets) {
 		candidates, _ := ListRotationCandidates(writer.AgentDir(), storageInfo.MaxBackups)
-		h.runArchivePreRotate(storageInfo, candidates, writer.AgentDir(), logger)
+		h.runArchivePreRotate(storageInfo, candidates, writer.AgentDir(), BucketUploadContext{Agent: pSession.AgentName, Storage: pSession.StorageName, Backup: pSession.BackupName, SessionID: pSession.SessionID}, logger)
 	}
 
 	// Rotação
@@ -819,11 +819,11 @@ func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWrit
 		protocol.WriteFinalACK(conn, protocol.FinalStatusOK)
 		// Libera lock explicitamente — o defer é idempotente (sync.Map.Delete noop)
 		h.locks.Delete(lockKey)
-		go h.runPostCommitSync(storageInfo, finalPath, removed, writer.AgentDir(), logger)
+		go h.runPostCommitSync(storageInfo, finalPath, removed, writer.AgentDir(), BucketUploadContext{Agent: pSession.AgentName, Storage: pSession.StorageName, Backup: pSession.BackupName, SessionID: pSession.SessionID}, logger)
 		return "ok"
 	}
 
-	h.runPostCommitSync(storageInfo, finalPath, removed, writer.AgentDir(), logger)
+	h.runPostCommitSync(storageInfo, finalPath, removed, writer.AgentDir(), BucketUploadContext{Agent: pSession.AgentName, Storage: pSession.StorageName, Backup: pSession.BackupName, SessionID: pSession.SessionID}, logger)
 
 	logger.Info("backup committed",
 		"path", finalPath,

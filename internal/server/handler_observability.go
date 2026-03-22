@@ -253,6 +253,15 @@ func (h *Handler) SyncStatusSnapshot() observability.SyncStatusDTO {
 	return status
 }
 
+// BucketUploadHistorySnapshot retorna as últimas entradas de uploads de bucket.
+// Implementa observability.HandlerMetrics.
+func (h *Handler) BucketUploadHistorySnapshot() []observability.BucketUploadEntry {
+	if h.BucketUploads == nil {
+		return []observability.BucketUploadEntry{}
+	}
+	return h.BucketUploads.Recent(0)
+}
+
 // SessionsSnapshot retorna lista resumida de todas as sessões ativas.
 // Implementa observability.HandlerMetrics.
 func (h *Handler) SessionsSnapshot() []observability.SessionSummary {

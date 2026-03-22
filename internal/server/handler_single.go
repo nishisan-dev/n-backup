@@ -486,7 +486,8 @@ func (h *Handler) validateAndCommitSingle(conn net.Conn, writer *AtomicWriter, t
 	// (antes da deleção, para que os arquivos ainda existam no disco).
 	if hasArchiveBuckets(storageInfo.Buckets) {
 		candidates, _ := ListRotationCandidates(writer.AgentDir(), storageInfo.MaxBackups)
-		h.runArchivePreRotate(storageInfo, candidates, writer.AgentDir(), logger)
+		bctx := bucketCtxFromSession(session)
+		h.runArchivePreRotate(storageInfo, candidates, writer.AgentDir(), bctx, logger)
 	}
 
 	// Rotação
@@ -519,11 +520,11 @@ func (h *Handler) validateAndCommitSingle(conn net.Conn, writer *AtomicWriter, t
 		protocol.WriteFinalACK(conn, protocol.FinalStatusOK)
 		// Libera lock explicitamente — o defer é idempotente (sync.Map.Delete noop)
 		h.locks.Delete(lockKey)
-		go h.runPostCommitSync(storageInfo, finalPath, removed, writer.AgentDir(), logger)
+		go h.runPostCommitSync(storageInfo, finalPath, removed, writer.AgentDir(), bucketCtxFromSession(session), logger)
 		return "ok", dataSize
 	}
 
-	h.runPostCommitSync(storageInfo, finalPath, removed, writer.AgentDir(), logger)
+	h.runPostCommitSync(storageInfo, finalPath, removed, writer.AgentDir(), bucketCtxFromSession(session), logger)
 
 	logger.Info("backup committed",
 		"path", finalPath,

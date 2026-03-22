@@ -44,6 +44,9 @@ func (m *mockMetrics) ActiveSessionHistorySnapshot(sessionID string, limit int) 
 }
 func (m *mockMetrics) ChunkBufferStats() *ChunkBufferDTO { return m.bufferStats }
 func (m *mockMetrics) SyncStatusSnapshot() SyncStatusDTO { return m.syncStatus }
+func (m *mockMetrics) BucketUploadHistorySnapshot() []BucketUploadEntry {
+	return []BucketUploadEntry{}
+}
 
 func newMockMetrics() *mockMetrics {
 	return &mockMetrics{

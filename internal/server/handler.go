@@ -108,6 +108,9 @@ type Handler struct {
 	// ActiveSessionHistory mantém snapshots periódicos de sessões ativas (nil quando WebUI desabilitada).
 	ActiveSessionHistory *observability.ActiveSessionStore
 
+	// BucketUploads mantém histórico de uploads pós-commit para Object Storage (nil quando WebUI desabilitada).
+	BucketUploads *observability.BucketUploadStore
+
 	// storageCache mantém snapshot cacheado de StorageUsage, atualizado por StartStorageScanner.
 	// Evita syscall.Statfs + filepath.WalkDir a cada request HTTP.
 	storageCache atomic.Value // []observability.StorageUsage

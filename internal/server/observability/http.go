@@ -33,6 +33,7 @@ type HandlerMetrics interface {
 	ActiveSessionHistorySnapshot(sessionID string, limit int) []ActiveSessionSnapshotEntry
 	ChunkBufferStats() *ChunkBufferDTO
 	SyncStatusSnapshot() SyncStatusDTO
+	BucketUploadHistorySnapshot() []BucketUploadEntry
 }
 
 // MetricsData contém os dados de métricas coletados do Handler.
@@ -61,6 +62,7 @@ func NewRouter(metrics HandlerMetrics, cfg *config.ServerConfig, acl *ACL, store
 	mux.HandleFunc("GET /api/v1/sessions/active-history", makeActiveSessionHistoryHandler(metrics))
 	mux.HandleFunc("GET /api/v1/config/effective", makeConfigHandler(cfg))
 	mux.HandleFunc("GET /api/v1/sync/status", makeSyncStatusHandler(metrics))
+	mux.HandleFunc("GET /api/v1/buckets/history", makeBucketUploadHistoryHandler(metrics))
 
 	// Events endpoint (se store fornecido)
 	if store != nil {
@@ -410,5 +412,18 @@ func makeSyncStatusHandler(metrics HandlerMetrics) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		status := metrics.SyncStatusSnapshot()
 		writeJSON(w, http.StatusOK, status)
+	}
+}
+
+// makeBucketUploadHistoryHandler retorna um handler com histórico de uploads de bucket.
+func makeBucketUploadHistoryHandler(metrics HandlerMetrics) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		limit := parseInt(r.URL.Query().Get("limit"), 50)
+		entries := metrics.BucketUploadHistorySnapshot()
+		// Aplica limit se necessário
+		if limit > 0 && limit < len(entries) {
+			entries = entries[len(entries)-limit:]
+		}
+		writeJSON(w, http.StatusOK, entries)
 	}
 }
