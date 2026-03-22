@@ -704,6 +704,17 @@ body {
     color: var(--text-muted);
 }
 
+.footer-github {
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    transition: color var(--transition-fast);
+}
+
+.footer-github:hover {
+    color: var(--text-primary);
+}
+
 /* ============ Sparklines ============ */
 
 .sparkline-section {
