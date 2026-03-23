@@ -149,8 +149,10 @@ func (s *Scheduler) executeJob(job *BackupJob, entry config.BackupEntry, runFn f
 	atomic.StoreInt32(&job.MaxStreams, int32(entry.Parallels))
 	atomic.StoreInt32(&job.ActiveStreams, 0)
 
-	// Context com timeout previne jobs zumbis (BUG 3: deadlock = job eterno)
-	jobCtx, jobCancel := context.WithTimeout(context.Background(), MaxBackupDuration)
+	// Context sem timeout no nível do job — o timeout real (MaxBackupDuration)
+	// é aplicado POR TENTATIVA dentro de RunBackup/runParallelBackup.
+	// Isso garante que cada retry tem o timeout integral, não o remanescente.
+	jobCtx, jobCancel := context.WithCancel(context.Background())
 	defer jobCancel()
 
 	err := runFn(jobCtx, s.cfg, entry, entryLogger, job)

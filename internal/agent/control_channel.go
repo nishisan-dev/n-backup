@@ -540,6 +540,28 @@ func (cc *ControlChannel) pingLoop() {
 					}
 				}(streamIdx)
 
+			case protocol.MagicControlAssemblyProgress:
+				// Server enviou progresso da montagem do arquivo final
+				prog, err := protocol.ReadControlAssemblyProgressPayload(conn)
+				if err != nil {
+					cc.logger.Warn("control channel: reading assembly progress payload", "error", err)
+					return
+				}
+
+				phaseStr := "receiving"
+				switch prog.Phase {
+				case protocol.AssemblyPhaseAssembling:
+					phaseStr = "assembling"
+				case protocol.AssemblyPhaseDone:
+					phaseStr = "done"
+				}
+
+				cc.logger.Info("control channel: assembly progress",
+					"total_chunks", prog.TotalChunks,
+					"assembled_chunks", prog.AssembledChunks,
+					"phase", phaseStr,
+				)
+
 			default:
 				cc.logger.Warn("control channel: unknown magic from server",
 					"magic", string(magic[:]))

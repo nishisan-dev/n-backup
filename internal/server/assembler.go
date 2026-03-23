@@ -611,6 +611,7 @@ func (ca *ChunkAssembler) Finalize() (string, int64, error) {
 }
 
 // finalizeLazy monta os chunks staged em ordem de sequência e remove os temporários.
+// Usa bufio.Reader (64KB) para reduzir overhead de syscalls em reads sequenciais.
 // Deve ser chamado com ca.mu held.
 func (ca *ChunkAssembler) finalizeLazy() error {
 	if len(ca.pendingChunks) == 0 {
@@ -632,7 +633,9 @@ func (ca *ChunkAssembler) finalizeLazy() error {
 		if err != nil {
 			return fmt.Errorf("opening lazy chunk seq %d: %w", seq, err)
 		}
-		if _, err := io.Copy(ca.outBuf, f); err != nil {
+		// Bufio.Reader reduz syscalls para reads sequenciais de chunks pequenos.
+		br := bufio.NewReaderSize(f, 64*1024)
+		if _, err := io.Copy(ca.outBuf, br); err != nil {
 			f.Close()
 			return fmt.Errorf("flushing lazy chunk seq %d: %w", seq, err)
 		}

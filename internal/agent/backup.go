@@ -139,6 +139,11 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 	var sendMu sync.Mutex
 
 	for attempt := 0; ; attempt++ {
+		// Per-attempt timeout: cada retry tem o timeout integral (MaxBackupDuration).
+		// O context pai (ctx) pode ser cancelado externamente (ex: shutdown).
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, MaxBackupDuration)
+		defer attemptCancel()
+
 		if attempt > 0 {
 			// Backoff exponencial
 			delay := resumeBackoff * time.Duration(1<<(attempt-1))
@@ -148,8 +153,8 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 			logger.Info("attempting resume", "attempt", attempt, "delay", delay)
 
 			select {
-			case <-ctx.Done():
-				return ctx.Err()
+			case <-attemptCtx.Done():
+				return attemptCtx.Err()
 			case <-time.After(delay):
 			}
 
@@ -255,9 +260,9 @@ func RunBackup(ctx context.Context, cfg *config.AgentConfig, entry config.Backup
 
 		// Espera sender terminar ou falhar
 		select {
-		case <-ctx.Done():
+		case <-attemptCtx.Done():
 			conn.Close()
-			return ctx.Err()
+			return attemptCtx.Err()
 
 		case err := <-senderErr:
 			conn.Close()
@@ -577,6 +582,7 @@ func runParallelBackup(ctx context.Context, cfg *config.AgentConfig, entry confi
 	// O retorno bem-sucedido de WaitAllSenders agora significa que todos os
 	// streams terminaram e não há bytes pendentes de ChunkSACK.
 	// Context com timeout previne deadlock eterno.
+	// Per-attempt timeout para WaitAllSenders.
 	sendersCtx, sendersCancel := context.WithTimeout(ctx, MaxBackupDuration)
 	defer sendersCancel()
 

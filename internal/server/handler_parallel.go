@@ -26,12 +26,14 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -760,6 +762,35 @@ func (h *Handler) validateAndCommitWithTrailer(conn net.Conn, writer *AtomicWrit
 			"client", fmt.Sprintf("%x", trailer.Checksum),
 			"server", fmt.Sprintf("%x", serverChecksum),
 		)
+
+		// P1-5: Hash parcial para diagnóstico — re-lê o arquivo em checkpoints
+		// para identificar onde a divergência de dados começa.
+		checkpoints := []int64{1 << 20, 10 << 20, 100 << 20} // 1MB, 10MB, 100MB
+		if f, err := os.Open(tmpPath); err == nil {
+			h := sha256.New()
+			buf := make([]byte, 32*1024)
+			var read int64
+			cpIdx := 0
+			for cpIdx < len(checkpoints) {
+				n, readErr := f.Read(buf)
+				if n > 0 {
+					h.Write(buf[:n])
+					read += int64(n)
+				}
+				if cpIdx < len(checkpoints) && read >= checkpoints[cpIdx] {
+					logger.Error("partial_hash_checkpoint",
+						"offset", checkpoints[cpIdx],
+						"partial_sha256", fmt.Sprintf("%x", h.Sum(nil)),
+					)
+					cpIdx++
+				}
+				if readErr != nil {
+					break
+				}
+			}
+			f.Close()
+		}
+
 		writer.Abort(tmpPath)
 		protocol.WriteFinalACK(conn, protocol.FinalStatusChecksumMismatch)
 		return "checksum_mismatch"

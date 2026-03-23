@@ -531,3 +531,48 @@ func ReadControlIngestionDonePayload(r io.Reader) (sessionID string, err error) 
 	}
 	return string(sid), nil
 }
+
+// MagicControlAssemblyProgress é o magic para frames ControlAssemblyProgress (Server → Agent).
+// Informa o agente sobre o progresso da montagem do arquivo final durante finalize.
+var MagicControlAssemblyProgress = [4]byte{'C', 'A', 'S', 'P'}
+
+// Assembly progress phase constants.
+const (
+	AssemblyPhaseReceiving  = byte(0x00)
+	AssemblyPhaseAssembling = byte(0x01)
+	AssemblyPhaseDone       = byte(0x02)
+)
+
+// ControlAssemblyProgress contém informações de progresso da montagem (Server → Agent).
+type ControlAssemblyProgress struct {
+	TotalChunks     uint32 // total de chunks a montar
+	AssembledChunks uint32 // chunks já montados
+	Phase           byte   // 0=receiving, 1=assembling, 2=done
+}
+
+// WriteControlAssemblyProgress escreve o frame ControlAssemblyProgress (Server → Agent).
+// Frame: [Magic 4B][TotalChunks 4B][AssembledChunks 4B][Phase 1B] = 13B
+func WriteControlAssemblyProgress(w io.Writer, totalChunks, assembledChunks uint32, phase byte) error {
+	buf := make([]byte, 13)
+	copy(buf[0:4], MagicControlAssemblyProgress[:])
+	binary.BigEndian.PutUint32(buf[4:8], totalChunks)
+	binary.BigEndian.PutUint32(buf[8:12], assembledChunks)
+	buf[12] = phase
+	_, err := w.Write(buf)
+	return err
+}
+
+// ReadControlAssemblyProgressPayload lê o payload de ControlAssemblyProgress.
+// O magic já foi lido pelo dispatcher.
+func ReadControlAssemblyProgressPayload(r io.Reader) (*ControlAssemblyProgress, error) {
+	var buf [9]byte // TotalChunks(4) + AssembledChunks(4) + Phase(1)
+	if _, err := io.ReadFull(r, buf[:]); err != nil {
+		return nil, fmt.Errorf("reading ControlAssemblyProgress payload: %w", err)
+	}
+	return &ControlAssemblyProgress{
+		TotalChunks:     binary.BigEndian.Uint32(buf[0:4]),
+		AssembledChunks: binary.BigEndian.Uint32(buf[4:8]),
+		Phase:           buf[8],
+	}, nil
+}
+
