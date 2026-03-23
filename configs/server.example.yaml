@@ -17,7 +17,7 @@ storages:
     assembler_mode: eager             # eager|lazy (default: eager)
     assembler_pending_mem_limit: 8mb  # limite de pending em memória no modo eager
     chunk_shard_levels: 1             # 1|2 — níveis de sharding de chunks no staging (default: 1)
-    chunk_fsync: false                # true = fsync a cada write de chunk no staging (mais seguro, mais lento)
+    chunk_fsync: true                 # v4.0.0+ default: true = fsync a cada write de chunk no staging (mais seguro)
     verify_integrity: true            # valida integridade do archive (tar -tf) antes de rotacionar backups antigos (default: false)
 
     # Destinos de Object Storage pós-commit (opcional).
@@ -67,7 +67,7 @@ storages:
     compression_mode: zst             # usa Zstandard para compressão mais rápida
     assembler_mode: lazy
     assembler_pending_mem_limit: 8mb
-    chunk_fsync: false
+    chunk_fsync: false                # override explícito — default v4.0.0+ é true
 
 logging:
   level: info                      # debug, info, warn, error

@@ -112,7 +112,7 @@ Client                                     Server
 ```
 
 - **Magic**: `0x4E 0x42 0x4B 0x50` ("NBKP")
-- **Ver**: Versão do protocolo (`0x05` — v5 com SlotID no ChunkHeader e ControlSlotPark/Resume)
+- **Ver**: Versão do protocolo (`0x06` — v6 com CRC32 per-chunk e ChunkHeader 13B)
 - **AgentName**: Identificador UTF-8 do agent, delimitado por `\n`
 - **StorageName**: Nome do storage de destino no server, delimitado por `\n`
 - **BackupName**: Nome do backup entry, delimitado por `\n`
@@ -264,24 +264,27 @@ Client                                     Server
 
 O agent faz até **3 tentativas** de reconnect por stream com backoff exponencial (1s, 2s, 4s). Se todas falharem, o stream é marcado como **permanentemente morto**. O backup continua nos streams restantes. Se todos os streams morrerem, o backup falha com `ErrAllStreamsDead`.
 
-#### ChunkHeader Framing (v5)
+#### ChunkHeader Framing (v6)
 
 Nos streams paralelos, cada chunk é precedido por um header:
 
 ```
-┌──────────┬──────────┬────────┐
-│ GlobalSeq │ Length    │ SlotID  │
-│ 4B uint32 │ 4B uint32 │ 1 byte  │
-└──────────┴──────────┴────────┘
+┌──────────┬──────────┬────────┬──────────┐
+│ GlobalSeq │ Length    │ SlotID  │ CRC32    │
+│ 4B uint32 │ 4B uint32 │ 1 byte  │ 4B uint32│
+└──────────┴──────────┴────────┴──────────┘
 ```
 
-Total: **9 bytes**.
+Total: **13 bytes**.
 
 - **GlobalSeq**: sequência global do chunk (0, 1, 2, ...) — usada pelo server para reassemblar na ordem correta
 - **Length**: tamanho dos dados que seguem (payload)
 - **SlotID**: identifica o slot (stream) que originou o chunk — permite ao server rastrear métricas por slot
+- **CRC32**: checksum IEEE do payload — o server valida após ler o payload e rejeita com `ErrChunkCRCMismatch` se mismatch
 
 Seguido por `Length` bytes de payload.
+
+> **Breaking Change (v4.0.0):** O ChunkHeader cresceu de 9 para 13 bytes com a adição do campo CRC32. Clientes v3.x são incompatíveis com servers v4.x.
 
 #### ParallelInit (Client → Server)
 
@@ -592,6 +595,22 @@ Sinaliza ao server que o agent vai parar de enviar chunks por este slot. O serve
 
 Sinaliza ao server que o agent vai retomar envio por este slot. O server atualiza o estado do slot de `Disabled` para `Receiving`.
 
+##### ControlAssemblyProgress (Server → Agent) (v4.0.0+)
+
+```
+┌──────────┬──────────────┬────────────────┬───────┐
+│ "CASP"   │ TotalChunks   │ AssembledChunks │ Phase │
+│ 4 bytes  │ 4B uint32     │ 4B uint32       │ 1B    │
+└──────────┴──────────────┴────────────────┴───────┘
+```
+
+- **Magic**: `0x43 0x41 0x53 0x50` ("CASP")
+- **TotalChunks**: total de chunks a montar
+- **AssembledChunks**: chunks já montados no finalize
+- **Phase**: `0x00` = Receiving, `0x01` = Assembling, `0x02` = Done
+
+Permite ao agent acompanhar o progresso da montagem do arquivo final durante a fase de finalize (especialmente relevante para `assembler_mode: lazy` com grande volume de chunks).
+
 #### RTT EWMA
 
 O RTT é calculado via Exponentially Weighted Moving Average (α = 0.25):
@@ -690,13 +709,13 @@ storages:
     max_backups: 5
     assembler_mode: eager
     assembler_pending_mem_limit: 8mb
-    chunk_fsync: false
+    chunk_fsync: true
     verify_integrity: true   # valida integridade do archive antes de rotacionar (default: false)
   home-dirs:
     base_dir: /var/backups/home
     max_backups: 10
     assembler_mode: lazy
-    chunk_fsync: false
+    chunk_fsync: false       # override explícito — default v4.0.0+ é true
 
 logging:
   level: info
@@ -781,7 +800,7 @@ Tentativa 5 → falha → ABORT, log error
 
 **Streams paralelos individuais (v1.2.3+):** cada stream tem retry independente (3 tentativas, backoff 1s/2s/4s). Se um stream falha, os demais continuam operando. O backup só é abortado quando **todos os streams** estão mortos (`ErrAllStreamsDead`). Conexões TCP possuem **write deadline** para detecção de half-open connections.
 
-**Timeout de job:** o scheduler configura `context.WithTimeout(24h)` para cada job de backup. Isso previne zombie jobs que rodariam indefinidamente em caso de deadlock.
+**Timeout de job:** o scheduler configura `context.WithCancel` para cada job de backup. O timeout real (`MaxBackupDuration = 24h`) é aplicado **por tentativa** dentro de `RunBackup`, garantindo que cada retry tem o timeout integral — não o remanescente de um timeout compartilhado.
 
 ### 5.2 Lock de Execução
 
