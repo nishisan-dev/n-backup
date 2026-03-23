@@ -654,3 +654,110 @@ func TestControlSlotResume_RoundTrip(t *testing.T) {
 		t.Errorf("expected slotID %d, got %d", slotID, got)
 	}
 }
+
+func TestControlAssemblyProgress_RoundTrip(t *testing.T) {
+	tests := []struct {
+		name      string
+		total     uint32
+		assembled uint32
+		phase     byte
+	}{
+		{"receiving", 100, 0, AssemblyPhaseReceiving},
+		{"assembling_partial", 100, 42, AssemblyPhaseAssembling},
+		{"assembling_complete", 100, 100, AssemblyPhaseAssembling},
+		{"done", 100, 100, AssemblyPhaseDone},
+		{"zero_chunks", 0, 0, AssemblyPhaseReceiving},
+		{"large_count", 1_000_000, 500_000, AssemblyPhaseAssembling},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+
+			if err := WriteControlAssemblyProgress(&buf, tt.total, tt.assembled, tt.phase); err != nil {
+				t.Fatalf("WriteControlAssemblyProgress: %v", err)
+			}
+
+			// Frame size: Magic(4) + TotalChunks(4) + AssembledChunks(4) + Phase(1) = 13
+			if buf.Len() != 13 {
+				t.Errorf("expected frame size 13, got %d", buf.Len())
+			}
+
+			// Consume magic (like dispatcher would)
+			var magic [4]byte
+			buf.Read(magic[:])
+			if magic != MagicControlAssemblyProgress {
+				t.Fatalf("expected magic CASP, got %q", magic)
+			}
+
+			prog, err := ReadControlAssemblyProgressPayload(&buf)
+			if err != nil {
+				t.Fatalf("ReadControlAssemblyProgressPayload: %v", err)
+			}
+
+			if prog.TotalChunks != tt.total {
+				t.Errorf("expected TotalChunks %d, got %d", tt.total, prog.TotalChunks)
+			}
+			if prog.AssembledChunks != tt.assembled {
+				t.Errorf("expected AssembledChunks %d, got %d", tt.assembled, prog.AssembledChunks)
+			}
+			if prog.Phase != tt.phase {
+				t.Errorf("expected Phase %d, got %d", tt.phase, prog.Phase)
+			}
+		})
+	}
+}
+
+func TestChunkHeader_CRC32Validation(t *testing.T) {
+	// Testa que um CRC32 escrito e lido é consistente com o payload
+	var buf bytes.Buffer
+
+	payload := []byte("test payload data for CRC32 validation")
+	crc := crc32.ChecksumIEEE(payload)
+
+	if err := WriteChunkHeader(&buf, 1, uint32(len(payload)), 0, crc); err != nil {
+		t.Fatalf("WriteChunkHeader: %v", err)
+	}
+
+	hdr, err := ReadChunkHeader(&buf)
+	if err != nil {
+		t.Fatalf("ReadChunkHeader: %v", err)
+	}
+
+	// Valida que o CRC32 lido corresponde ao calculado do payload
+	if hdr.CRC32 != crc {
+		t.Errorf("CRC32 mismatch: header has %08x, expected %08x", hdr.CRC32, crc)
+	}
+
+	// Simula validação do server: recalcula CRC32 e compara
+	computedCRC := crc32.ChecksumIEEE(payload)
+	if computedCRC != hdr.CRC32 {
+		t.Errorf("CRC32 server validation failed: computed %08x != header %08x", computedCRC, hdr.CRC32)
+	}
+}
+
+func TestChunkHeader_CRC32MismatchDetection(t *testing.T) {
+	// Simula o cenário onde o payload é corrompido após o CRC32 ser calculado
+	var buf bytes.Buffer
+
+	originalPayload := []byte("original data")
+	crc := crc32.ChecksumIEEE(originalPayload)
+
+	if err := WriteChunkHeader(&buf, 1, uint32(len(originalPayload)), 0, crc); err != nil {
+		t.Fatalf("WriteChunkHeader: %v", err)
+	}
+
+	hdr, err := ReadChunkHeader(&buf)
+	if err != nil {
+		t.Fatalf("ReadChunkHeader: %v", err)
+	}
+
+	// Payload corrompido (1 byte diferente)
+	corruptedPayload := []byte("original datb")
+	computedCRC := crc32.ChecksumIEEE(corruptedPayload)
+
+	if computedCRC == hdr.CRC32 {
+		t.Fatal("corrupted payload should produce different CRC32")
+	}
+}
+

@@ -823,3 +823,153 @@ func verifyTarGz(t *testing.T, backupPath, sourceDir string) {
 func testLogger() *slog.Logger {
 	return slog.Default()
 }
+
+// TestEndToEnd_ParallelCRC32Mismatch testa que o server detecta e rejeita
+// um chunk com CRC32 inválido, fechando o stream de dados.
+// Isso simula corrupção de dados em trânsito (rara, mas possível).
+func TestEndToEnd_ParallelCRC32Mismatch(t *testing.T) {
+	pkiDir := t.TempDir()
+	storageDir := t.TempDir()
+	agentName := "test-agent-crc"
+	pki := generatePKI(t, pkiDir, agentName)
+
+	serverCfg := &config.ServerConfig{
+		Storages: map[string]config.StorageInfo{
+			testStorageName: {BaseDir: storageDir, MaxBackups: 3},
+		},
+		Logging: config.LoggingInfo{Level: "debug", Format: "text"},
+	}
+
+	serverTLS, err := tls.LoadX509KeyPair(pki.serverCertPath, pki.serverKeyPath)
+	if err != nil {
+		t.Fatalf("loading server cert: %v", err)
+	}
+
+	caPool := loadCAPool(t, pki.caCertPath)
+
+	serverTLSCfg := &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{serverTLS},
+		ClientCAs:    caPool,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+	}
+
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", serverTLSCfg)
+	if err != nil {
+		t.Fatalf("TLS listen: %v", err)
+	}
+	defer ln.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger := testLogger()
+	go server.RunWithListener(ctx, ln, serverCfg, logger)
+
+	// Client TLS config
+	clientTLS, err := tls.LoadX509KeyPair(pki.clientCertPath, pki.clientKeyPath)
+	if err != nil {
+		t.Fatalf("loading client cert: %v", err)
+	}
+
+	clientTLSCfg := &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{clientTLS},
+		RootCAs:      caPool,
+		ServerName:   "localhost",
+	}
+
+	// Conn primária
+	conn, err := tls.Dial("tcp", ln.Addr().String(), clientTLSCfg)
+	if err != nil {
+		t.Fatalf("TLS dial: %v", err)
+	}
+	defer conn.Close()
+
+	// 1. Handshake
+	if err := protocol.WriteHandshake(conn, agentName, testStorageName, testBackupName, "v4.0.0-crctest"); err != nil {
+		t.Fatalf("WriteHandshake: %v", err)
+	}
+
+	ack, err := protocol.ReadACK(conn)
+	if err != nil {
+		t.Fatalf("ReadACK: %v", err)
+	}
+	if ack.Status != protocol.StatusGo {
+		t.Fatalf("expected StatusGo, got %d: %s", ack.Status, ack.Message)
+	}
+
+	sessionID := ack.SessionID
+
+	// 2. ParallelInit: 1 stream
+	if err := protocol.WriteParallelInit(conn, 1, 256*1024); err != nil {
+		t.Fatalf("WriteParallelInit: %v", err)
+	}
+
+	initACK, err := protocol.ReadParallelInitACK(conn)
+	if err != nil {
+		t.Fatalf("ReadParallelInitACK: %v", err)
+	}
+	if initACK.Status != protocol.ParallelInitStatusOK {
+		t.Fatalf("expected ParallelInitStatusOK, got %d", initACK.Status)
+	}
+
+	// 3. Abre stream 0 com ParallelJoin
+	var stream0Conn *tls.Conn
+	for retry := 0; retry < 10; retry++ {
+		sc, err := tls.Dial("tcp", ln.Addr().String(), clientTLSCfg)
+		if err != nil {
+			t.Fatalf("stream TLS dial: %v", err)
+		}
+
+		if err := protocol.WriteParallelJoin(sc, sessionID, 0, protocol.JoinReasonNone); err != nil {
+			sc.Close()
+			t.Fatalf("WriteParallelJoin: %v", err)
+		}
+
+		joinACK, err := protocol.ReadParallelACK(sc)
+		if err != nil {
+			sc.Close()
+			t.Fatalf("ReadParallelACK: %v", err)
+		}
+
+		if joinACK.Status == protocol.ParallelStatusOK {
+			stream0Conn = sc
+			break
+		}
+
+		sc.Close()
+		time.Sleep(50 * time.Millisecond)
+	}
+	if stream0Conn == nil {
+		t.Fatal("ParallelJoin failed after retries")
+	}
+	defer stream0Conn.Close()
+
+	// 4. Envia chunk com CRC32 INVÁLIDO deliberadamente
+	payload := make([]byte, 1024)
+	for i := range payload {
+		payload[i] = byte(i % 256)
+	}
+	correctCRC := crc32.ChecksumIEEE(payload)
+	wrongCRC := correctCRC ^ 0xDEADBEEF // Bit-flip para forçar mismatch
+
+	if err := protocol.WriteChunkHeader(stream0Conn, 0, uint32(len(payload)), 0, wrongCRC); err != nil {
+		t.Fatalf("WriteChunkHeader: %v", err)
+	}
+	if _, err := stream0Conn.Write(payload); err != nil {
+		t.Fatalf("writing chunk data: %v", err)
+	}
+
+	// 5. O server deve fechar a conexão ao detectar CRC32 mismatch.
+	// Tentamos ler para detectar o close (read deve falhar com EOF ou error).
+	stream0Conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	garbage := make([]byte, 1)
+	_, readErr := stream0Conn.Read(garbage)
+	if readErr == nil {
+		t.Fatal("expected read error after CRC32 mismatch, but read succeeded")
+	}
+	t.Logf("server correctly rejected corrupted chunk: %v", readErr)
+}
+
+

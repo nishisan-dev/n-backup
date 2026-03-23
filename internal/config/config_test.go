@@ -576,6 +576,62 @@ storages:
 	}
 }
 
+func TestLoadServerConfig_ChunkFsyncDisabledExplicit(t *testing.T) {
+	content := `
+server:
+  listen: "0.0.0.0:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  server_cert: /tmp/server.pem
+  server_key: /tmp/server-key.pem
+storages:
+  default:
+    base_dir: /tmp/backups
+    max_backups: 3
+    chunk_fsync: false
+`
+	cfgPath := writeTempConfig(t, content)
+	cfg, err := LoadServerConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s, _ := cfg.GetStorage("default")
+	if s.FsyncChunkWrites() {
+		t.Errorf("explicit chunk_fsync: false should override default true, but got true")
+	}
+	if s.ChunkFsync == nil {
+		t.Fatal("expected ChunkFsync to be non-nil (explicitly set)")
+	}
+	if *s.ChunkFsync != false {
+		t.Errorf("expected *ChunkFsync to be false, got %v", *s.ChunkFsync)
+	}
+}
+
+func TestLoadServerConfig_ChunkFsyncDefaultTrue(t *testing.T) {
+	// Quando chunk_fsync não é especificado no YAML, o default v4.0.0 é true
+	content := `
+server:
+  listen: "0.0.0.0:9847"
+tls:
+  ca_cert: /tmp/ca.pem
+  server_cert: /tmp/server.pem
+  server_key: /tmp/server-key.pem
+storages:
+  default:
+    base_dir: /tmp/backups
+    max_backups: 3
+`
+	cfgPath := writeTempConfig(t, content)
+	cfg, err := LoadServerConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s, _ := cfg.GetStorage("default")
+	if !s.FsyncChunkWrites() {
+		t.Errorf("v4.0.0 default: chunk_fsync should be true when omitted, got false")
+	}
+}
+
 func TestLoadServerConfig_InvalidChunkShardLevels(t *testing.T) {
 	content := `
 server:
