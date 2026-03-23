@@ -110,8 +110,8 @@ func TestLoadServerConfig_ExampleFile(t *testing.T) {
 	if scripts.ChunkShardLevels != 1 {
 		t.Errorf("expected scripts.chunk_shard_levels 1, got %d", scripts.ChunkShardLevels)
 	}
-	if scripts.FsyncChunkWrites() {
-		t.Errorf("expected scripts.chunk_fsync false (explicit), got true")
+	if !scripts.FsyncChunkWrites() {
+		t.Errorf("expected scripts.chunk_fsync true (v4.0.0 example), got false")
 	}
 
 	home, ok := cfg.GetStorage("home-dirs")
