@@ -18,6 +18,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"log/slog"
 	"math/big"
@@ -573,14 +574,16 @@ func TestEndToEnd_ParallelBackupSession(t *testing.T) {
 	chunkSize := 256 * 1024
 	rawData := streamBuf.Bytes()
 	var globalSeq uint32
+	crcTab := crc32.MakeTable(crc32.IEEE)
 	for off := 0; off < len(rawData); {
 		end := off + chunkSize
 		if end > len(rawData) {
 			end = len(rawData)
 		}
 		chunk := rawData[off:end]
+		chunkCRC := crc32.Checksum(chunk, crcTab)
 
-		if err := protocol.WriteChunkHeader(stream0Conn, globalSeq, uint32(len(chunk)), 0); err != nil {
+		if err := protocol.WriteChunkHeader(stream0Conn, globalSeq, uint32(len(chunk)), 0, chunkCRC); err != nil {
 			t.Fatalf("WriteChunkHeader seq %d: %v", globalSeq, err)
 		}
 		if _, err := stream0Conn.Write(chunk); err != nil {

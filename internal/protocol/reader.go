@@ -422,7 +422,7 @@ func ReadChunkSACK(r io.Reader) (*ChunkSACK, error) {
 }
 
 // ReadChunkHeader lê o header de chunk paralelo (Client → Server).
-// Formato: [GlobalSeq uint32 4B] [Length uint32 4B] [SlotID uint8 1B]
+// Formato: [GlobalSeq uint32 4B] [Length uint32 4B] [SlotID uint8 1B] [CRC32 uint32 4B]
 func ReadChunkHeader(r io.Reader) (*ChunkHeader, error) {
 	var globalSeq uint32
 	if err := binary.Read(r, binary.BigEndian, &globalSeq); err != nil {
@@ -436,10 +436,15 @@ func ReadChunkHeader(r io.Reader) (*ChunkHeader, error) {
 	if _, err := io.ReadFull(r, slotID[:]); err != nil {
 		return nil, fmt.Errorf("reading chunk header slot id: %w", err)
 	}
+	var crc32val uint32
+	if err := binary.Read(r, binary.BigEndian, &crc32val); err != nil {
+		return nil, fmt.Errorf("reading chunk header crc32: %w", err)
+	}
 	return &ChunkHeader{
 		GlobalSeq: globalSeq,
 		Length:    length,
 		SlotID:    slotID[0],
+		CRC32:     crc32val,
 	}, nil
 }
 

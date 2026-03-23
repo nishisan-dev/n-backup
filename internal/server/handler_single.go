@@ -46,9 +46,9 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	}
 
 	handshakeVersion := versionBuf[0]
-	if handshakeVersion < 0x03 || handshakeVersion > protocol.ProtocolVersion {
+	if handshakeVersion < protocol.ProtocolVersion {
 		logger.Error("unsupported protocol version", "version", handshakeVersion)
-		protocol.WriteACKLegacy(conn, protocol.StatusReject, "unsupported protocol version", "")
+		protocol.WriteACK(conn, protocol.StatusReject, "unsupported protocol version", "", protocol.CompressionGzip)
 		return
 	}
 
@@ -142,18 +142,11 @@ func (h *Handler) handleBackup(ctx context.Context, conn net.Conn, logger *slog.
 	sessionID := generateSessionID()
 	logger = logger.With("session", sessionID)
 
-	// ACK GO — v4+ inclui compression mode, v3 usa legacy
+	// ACK GO
 	compressionMode := storageInfo.CompressionModeByte()
-	if handshakeVersion >= 0x04 {
-		if err := protocol.WriteACK(conn, protocol.StatusGo, "", sessionID, compressionMode); err != nil {
-			logger.Error("writing ACK", "error", err)
-			return
-		}
-	} else {
-		if err := protocol.WriteACKLegacy(conn, protocol.StatusGo, "", sessionID); err != nil {
-			logger.Error("writing ACK", "error", err)
-			return
-		}
+	if err := protocol.WriteACK(conn, protocol.StatusGo, "", sessionID, compressionMode); err != nil {
+		logger.Error("writing ACK", "error", err)
+		return
 	}
 
 	// Detecta modo: lê 1 byte discriminador
@@ -540,14 +533,10 @@ func (h *Handler) validateAndCommitSingle(conn net.Conn, writer *AtomicWriter, t
 // (agentName, storageName, backupName, clientVersion).
 const maxHandshakeFieldLen = 512
 
-// sendACK envia um ACK condicional baseado na versão do handshake.
-// Para v4+, inclui o byte de CompressionMode (default gzip para rejeições).
-// Para v3, usa WriteACKLegacy sem o byte adicional.
-func sendACK(conn net.Conn, handshakeVersion byte, status byte, message, sessionID string) error {
-	if handshakeVersion >= 0x04 {
-		return protocol.WriteACK(conn, status, message, sessionID, protocol.CompressionGzip)
-	}
-	return protocol.WriteACKLegacy(conn, status, message, sessionID)
+// sendACK envia um ACK com CompressionMode default (gzip).
+// Desde v4.0.0, todos os clients devem suportar o campo CompressionMode.
+func sendACK(conn net.Conn, _ byte, status byte, message, sessionID string) error {
+	return protocol.WriteACK(conn, status, message, sessionID, protocol.CompressionGzip)
 }
 
 // readUntilNewline lê bytes até encontrar '\n', retornando a string sem o delimitador.

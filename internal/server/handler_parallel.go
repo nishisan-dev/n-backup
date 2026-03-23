@@ -28,6 +28,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"log/slog"
 	"net"
@@ -178,7 +179,7 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 		Mode:             storageInfo.AssemblerMode,
 		PendingMemLimit:  storageInfo.AssemblerPendingMemRaw,
 		ShardLevels:      storageInfo.ChunkShardLevels,
-		FsyncChunkWrites: storageInfo.ChunkFsync,
+		FsyncChunkWrites: storageInfo.FsyncChunkWrites(),
 	})
 	if err != nil {
 		logger.Error("creating chunk assembler", "error", err)
@@ -456,7 +457,7 @@ func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, read
 		// Quanto menor o deadline, mais rápido o agent detecta a falha e reconecta.
 		conn.SetReadDeadline(time.Now().Add(streamReadDeadline))
 
-		// Lê ChunkHeader (8 bytes: GlobalSeq + Length)
+		// Lê ChunkHeader (13 bytes: GlobalSeq + Length + SlotID + CRC32)
 		hdr, err := protocol.ReadChunkHeader(reader)
 		if err != nil {
 			if err == io.EOF || err.Error() == "reading chunk header seq: EOF" {
@@ -478,6 +479,26 @@ func (h *Handler) receiveParallelStream(ctx context.Context, conn net.Conn, read
 		chunkData, err := h.readParallelChunkPayload(conn, reader, hdr.Length, hdr.GlobalSeq, session)
 		if err != nil {
 			return bytesReceived, err
+		}
+
+		// Validação de integridade per-chunk via CRC32 IEEE (Protocol v6).
+		// Rejeita chunk se mismatch — força reconexão do stream.
+		computedCRC := crc32.ChecksumIEEE(chunkData)
+		if computedCRC != hdr.CRC32 {
+			logger.Error("chunk_crc_mismatch",
+				"stream", streamIndex,
+				"globalSeq", hdr.GlobalSeq,
+				"expected_crc", fmt.Sprintf("%08x", hdr.CRC32),
+				"computed_crc", fmt.Sprintf("%08x", computedCRC),
+				"length", hdr.Length,
+			)
+			if h.Events != nil {
+				h.Events.PushEvent("error", "chunk_crc_mismatch", session.AgentName,
+					fmt.Sprintf("stream %d seq %d: CRC32 %08x != %08x",
+						streamIndex, hdr.GlobalSeq, computedCRC, hdr.CRC32), 0)
+			}
+			return bytesReceived, fmt.Errorf("%w: stream %d seq %d expected %08x got %08x",
+				protocol.ErrChunkCRCMismatch, streamIndex, hdr.GlobalSeq, hdr.CRC32, computedCRC)
 		}
 
 		// Entrega o chunk ao assembler — diretamente ou via buffer de memória.

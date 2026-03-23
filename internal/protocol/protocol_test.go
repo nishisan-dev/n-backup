@@ -7,6 +7,7 @@ package protocol
 import (
 	"bytes"
 	"crypto/sha256"
+	"hash/crc32"
 	"testing"
 )
 
@@ -559,8 +560,10 @@ func TestChunkHeader_RoundTrip(t *testing.T) {
 	globalSeq := uint32(42)
 	length := uint32(65536)
 	slotID := uint8(3)
+	testData := bytes.Repeat([]byte("x"), int(length))
+	crc := crc32.ChecksumIEEE(testData)
 
-	if err := WriteChunkHeader(&buf, globalSeq, length, slotID); err != nil {
+	if err := WriteChunkHeader(&buf, globalSeq, length, slotID, crc); err != nil {
 		t.Fatalf("WriteChunkHeader: %v", err)
 	}
 
@@ -578,14 +581,17 @@ func TestChunkHeader_RoundTrip(t *testing.T) {
 	if hdr.SlotID != slotID {
 		t.Errorf("expected slotID %d, got %d", slotID, hdr.SlotID)
 	}
+	if hdr.CRC32 != crc {
+		t.Errorf("expected CRC32 %d, got %d", crc, hdr.CRC32)
+	}
 }
 
 func TestChunkHeader_FrameSize(t *testing.T) {
 	var buf bytes.Buffer
-	if err := WriteChunkHeader(&buf, 1, 1024, 0); err != nil {
+	if err := WriteChunkHeader(&buf, 1, 1024, 0, 0xDEADBEEF); err != nil {
 		t.Fatalf("WriteChunkHeader: %v", err)
 	}
-	// GlobalSeq(4) + Length(4) + SlotID(1) = 9 bytes
+	// GlobalSeq(4) + Length(4) + SlotID(1) + CRC32(4) = 13 bytes
 	if buf.Len() != ChunkHeaderSize {
 		t.Errorf("expected ChunkHeader size %d, got %d", ChunkHeaderSize, buf.Len())
 	}

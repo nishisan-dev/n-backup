@@ -204,7 +204,7 @@ type StorageInfo struct {
 	AssemblerPendingMemRaw int64          `yaml:"-"`
 	CompressionMode        string         `yaml:"compression_mode"`   // gzip|zst (default: gzip)
 	ChunkShardLevels       int            `yaml:"chunk_shard_levels"` // 1|2 (default: 1, número de níveis de sharding de chunks)
-	ChunkFsync             bool           `yaml:"chunk_fsync"`        // fsync nos writes de chunk staging (default: false)
+	ChunkFsync             *bool          `yaml:"chunk_fsync"`        // fsync nos writes de chunk staging (default: true desde v4.0.0)
 	VerifyIntegrity        bool           `yaml:"verify_integrity"`   // valida integridade do archive antes do rotate (default: false)
 	Buckets                []BucketConfig `yaml:"buckets"`            // destinos de object storage pós-commit (opcional)
 }
@@ -217,6 +217,15 @@ func (s StorageInfo) CompressionModeByte() byte {
 	default:
 		return protocol.CompressionGzip
 	}
+}
+
+// FsyncChunkWrites retorna se o fsync de chunk writes está habilitado.
+// Default: true (desde v4.0.0).
+func (s StorageInfo) FsyncChunkWrites() bool {
+	if s.ChunkFsync == nil {
+		return true
+	}
+	return *s.ChunkFsync
 }
 
 // FileExtension retorna a extensão de arquivo para backups deste storage.
@@ -313,6 +322,12 @@ func (c *ServerConfig) validate() error {
 		}
 		if s.ChunkShardLevels < 1 || s.ChunkShardLevels > 2 {
 			return fmt.Errorf("storages.%s.chunk_shard_levels must be 1 or 2, got %d", name, s.ChunkShardLevels)
+		}
+
+		// Chunk fsync: default true (desde v4.0.0 para integridade de dados)
+		if s.ChunkFsync == nil {
+			fsyncDefault := true
+			s.ChunkFsync = &fsyncDefault
 		}
 
 		// Bucket configs (object storage pós-commit)

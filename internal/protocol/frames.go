@@ -43,8 +43,8 @@ type ParallelACK struct {
 }
 
 // ProtocolVersion é a versão atual do protocolo.
-// v5: slots first-class, SlotID no ChunkHeader, ControlSlotPark/Resume.
-const ProtocolVersion byte = 0x05
+// v6: CRC32 per-chunk no ChunkHeader para validação de integridade inline.
+const ProtocolVersion byte = 0x06
 
 // Status codes para ACK (Server → Client após Handshake).
 const (
@@ -78,9 +78,10 @@ const (
 
 // Erros do protocolo.
 var (
-	ErrInvalidMagic   = errors.New("protocol: invalid magic bytes")
-	ErrInvalidVersion = errors.New("protocol: unsupported protocol version")
-	ErrTruncatedFrame = errors.New("protocol: truncated frame")
+	ErrInvalidMagic      = errors.New("protocol: invalid magic bytes")
+	ErrInvalidVersion    = errors.New("protocol: unsupported protocol version")
+	ErrTruncatedFrame    = errors.New("protocol: truncated frame")
+	ErrChunkCRCMismatch  = errors.New("protocol: chunk CRC32 mismatch")
 )
 
 // Handshake representa o frame de handshake enviado pelo client.
@@ -176,16 +177,19 @@ type ChunkSACK struct {
 	Offset      uint64
 }
 
-// ChunkHeaderSize é o tamanho em bytes do ChunkHeader no wire: GlobalSeq(4B) + Length(4B) + SlotID(1B).
-const ChunkHeaderSize = 9
+// ChunkHeaderSize é o tamanho em bytes do ChunkHeader no wire:
+// GlobalSeq(4B) + Length(4B) + SlotID(1B) + CRC32(4B) = 13 bytes.
+const ChunkHeaderSize = 13
 
 // ChunkHeader precede cada chunk no stream paralelo (Client → Server).
-// Permite ao server reconstruir a ordem global dos chunks e rastrear o slot de origem.
-// Formato: [GlobalSeq uint32 4B] [Length uint32 4B] [SlotID uint8 1B]
+// Permite ao server reconstruir a ordem global dos chunks, rastrear o slot de origem
+// e validar integridade dos dados via CRC32.
+// Formato: [GlobalSeq uint32 4B] [Length uint32 4B] [SlotID uint8 1B] [CRC32 uint32 4B]
 type ChunkHeader struct {
 	GlobalSeq uint32 // sequência global do chunk (0, 1, 2, ...)
 	Length    uint32 // tamanho dos dados que seguem
 	SlotID    uint8  // slot que originou o chunk
+	CRC32     uint32 // CRC-32 IEEE do payload (validação de integridade per-chunk)
 }
 
 // ControlSlotPark é enviado pelo agent ao server para indicar que vai parar

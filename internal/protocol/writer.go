@@ -74,28 +74,7 @@ func WriteACK(w io.Writer, status byte, message string, sessionID string, compre
 	return nil
 }
 
-// WriteACKLegacy escreve o frame ACK sem CompressionMode (backward compat v3).
-// Usado para agents que não suportam o campo extra.
-func WriteACKLegacy(w io.Writer, status byte, message string, sessionID string) error {
-	if _, err := w.Write([]byte{status}); err != nil {
-		return fmt.Errorf("writing ack status: %w", err)
-	}
-	if message != "" {
-		if _, err := w.Write([]byte(message)); err != nil {
-			return fmt.Errorf("writing ack message: %w", err)
-		}
-	}
-	if _, err := w.Write([]byte{'\n'}); err != nil {
-		return fmt.Errorf("writing ack delimiter: %w", err)
-	}
-	if _, err := w.Write([]byte(sessionID)); err != nil {
-		return fmt.Errorf("writing ack session id: %w", err)
-	}
-	if _, err := w.Write([]byte{'\n'}); err != nil {
-		return fmt.Errorf("writing ack session delimiter: %w", err)
-	}
-	return nil
-}
+// WriteACKLegacy foi removido na v4.0.0 — não há mais suporte a agents sem CompressionMode.
 
 // WriteTrailer escreve o frame trailer (Client → Server).
 // Formato: [Magic "DONE" 4B] [SHA-256 32B] [Size uint64 8B]
@@ -265,8 +244,8 @@ func WriteChunkSACK(w io.Writer, streamIndex uint8, chunkSeq uint32, offset uint
 }
 
 // WriteChunkHeader escreve o header de chunk paralelo (Client → Server).
-// Formato: [GlobalSeq uint32 4B] [Length uint32 4B] [SlotID uint8 1B]
-func WriteChunkHeader(w io.Writer, globalSeq, length uint32, slotID uint8) error {
+// Formato: [GlobalSeq uint32 4B] [Length uint32 4B] [SlotID uint8 1B] [CRC32 uint32 4B]
+func WriteChunkHeader(w io.Writer, globalSeq, length uint32, slotID uint8, crc32val uint32) error {
 	if err := binary.Write(w, binary.BigEndian, globalSeq); err != nil {
 		return fmt.Errorf("writing chunk header seq: %w", err)
 	}
@@ -275,6 +254,9 @@ func WriteChunkHeader(w io.Writer, globalSeq, length uint32, slotID uint8) error
 	}
 	if _, err := w.Write([]byte{slotID}); err != nil {
 		return fmt.Errorf("writing chunk header slot id: %w", err)
+	}
+	if err := binary.Write(w, binary.BigEndian, crc32val); err != nil {
+		return fmt.Errorf("writing chunk header crc32: %w", err)
 	}
 	return nil
 }
