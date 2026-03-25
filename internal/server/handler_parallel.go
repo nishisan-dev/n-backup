@@ -331,7 +331,14 @@ func (h *Handler) handleParallelBackup(ctx context.Context, conn net.Conn, br io
 	if h.chunkBuffer != nil {
 		if err := h.chunkBuffer.Flush(assembler); err != nil {
 			logger.Error("flushing chunk buffer before finalize", "error", err)
+			h.recordSessionEnd(sessionID, agentName, storageName, backupName, "parallel",
+				storageInfo.CompressionMode, "flush_timeout", now, pSession.DiskWriteBytes.Load())
+			h.sessions.Delete(sessionID)
 			protocol.WriteFinalACK(conn, protocol.FinalStatusWriteError)
+			if h.Events != nil {
+				h.Events.PushEvent("error", "flush_timeout", agentName,
+					fmt.Sprintf("%s/%s flush failed: %v", storageName, backupName, err), 0)
+			}
 			return
 		}
 		// Verifica se algum chunk falhou permanentemente durante a drenagem.

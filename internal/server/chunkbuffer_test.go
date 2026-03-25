@@ -749,3 +749,131 @@ func TestChunkBuffer_MarkSessionAborted_NilSafe(t *testing.T) {
 	cb2 := NewChunkBuffer(newBufConfig(64*1024*1024, 0.0), newBufTestLogger())
 	cb2.MarkSessionAborted(nil) // não deve panic
 }
+
+// --- Stall Detector ---
+
+// TestChunkBuffer_Flush_StallDetected verifica que o flush falha rapidamente
+// quando nenhum progresso é feito (I/O travado).
+func TestChunkBuffer_Flush_StallDetected(t *testing.T) {
+	// Override temporais para teste rápido.
+	origStall := chunkBufferStallInterval
+	origMax := chunkBufferMaxFlushTimeout
+	chunkBufferStallInterval = 200 * time.Millisecond
+	chunkBufferMaxFlushTimeout = 5 * time.Second
+	t.Cleanup(func() {
+		chunkBufferStallInterval = origStall
+		chunkBufferMaxFlushTimeout = origMax
+	})
+
+	assembler := newBufAssembler(t, "stall-detect")
+	cb := NewChunkBuffer(newBufConfig(32*1024*1024, 1.0), newBufTestLogger())
+	// Sem drainer — chunks ficam no canal, counter nunca diminui.
+	// Push no canal diretamente.
+	data := []byte("STALL_DATA")
+	if _, err := cb.Push(0, data, assembler, nil); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	// Flush deve detectar stall e retornar erro após ~200ms.
+	start := time.Now()
+	err := cb.Flush(assembler)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected stall error from Flush, got nil")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("stall detection took too long: %s (expected ~200ms)", elapsed)
+	}
+	t.Logf("stall detected in %s: %v", elapsed, err)
+}
+
+// TestChunkBuffer_Flush_SlowProgress_Succeeds verifica que o flush aguarda
+// enquanto houver progresso, mesmo que lento.
+func TestChunkBuffer_Flush_SlowProgress_Succeeds(t *testing.T) {
+	origStall := chunkBufferStallInterval
+	origMax := chunkBufferMaxFlushTimeout
+	chunkBufferStallInterval = 300 * time.Millisecond
+	chunkBufferMaxFlushTimeout = 5 * time.Second
+	t.Cleanup(func() {
+		chunkBufferStallInterval = origStall
+		chunkBufferMaxFlushTimeout = origMax
+	})
+
+	assembler := newBufAssembler(t, "slow-progress")
+	cb := NewChunkBuffer(newBufConfig(32*1024*1024, 1.0), newBufTestLogger())
+	// Drainer com atraso: inicia após 100ms para simular I/O lento.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Push 3 chunks.
+	for i := 0; i < 3; i++ {
+		if _, err := cb.Push(uint32(i), []byte("SLOW"), assembler, nil); err != nil {
+			t.Fatalf("Push(%d): %v", i, err)
+		}
+	}
+
+	// Inicia drainer com delay — progresso lento.
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cb.StartDrainer(ctx)
+	}()
+
+	// Flush deve aguardar e retornar sucesso com progresso.
+	err := cb.Flush(assembler)
+	if err != nil {
+		t.Fatalf("expected Flush to succeed with slow progress, got: %v", err)
+	}
+}
+
+// TestChunkBuffer_Flush_MaxTimeout_EnforcesLimit verifica o safety net:
+// mesmo com progresso contínuo, o flush falha após chunkBufferMaxFlushTimeout.
+func TestChunkBuffer_Flush_MaxTimeout_EnforcesLimit(t *testing.T) {
+	origStall := chunkBufferStallInterval
+	origMax := chunkBufferMaxFlushTimeout
+	chunkBufferStallInterval = 100 * time.Millisecond
+	chunkBufferMaxFlushTimeout = 400 * time.Millisecond
+	t.Cleanup(func() {
+		chunkBufferStallInterval = origStall
+		chunkBufferMaxFlushTimeout = origMax
+	})
+
+	assembler := newBufAssembler(t, "max-timeout")
+	cb := NewChunkBuffer(newBufConfig(32*1024*1024, 1.0), newBufTestLogger())
+
+	// Simula progresso infinito: continuamente adiciona bytes ao counter
+	// para evitar stall detection, mas nunca chega a zero.
+	counter := cb.getSessionCounter(assembler)
+	counter.Store(1000000) // 1MB fake em voo
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Goroutine que faz "progresso falso" — diminui bytes mas nunca zera.
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				// Decrementa um pouco a cada tick para simular progresso.
+				if counter.Load() > 100 {
+					counter.Add(-10)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+	}()
+
+	start := time.Now()
+	err := cb.Flush(assembler)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected max timeout error from Flush, got nil")
+	}
+	if elapsed < 350*time.Millisecond || elapsed > 2*time.Second {
+		t.Errorf("max timeout took unexpected time: %s (expected ~400ms)", elapsed)
+	}
+	t.Logf("max timeout enforced in %s: %v", elapsed, err)
+}

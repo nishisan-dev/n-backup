@@ -23,8 +23,15 @@ const avgSlotSize = 1 * 1024 * 1024 // 1MB
 // drainPollInterval é o intervalo de polling do drainer quando drain_ratio > 0.
 const drainPollInterval = 5 * time.Millisecond
 
-// chunkBufferFlushTimeout é o tempo máximo que Flush aguarda o buffer da sessão esvaziar.
-const chunkBufferFlushTimeout = 30 * time.Second
+// chunkBufferStallInterval é o intervalo entre verificações de progresso no Flush.
+// Se nenhum byte for drenado neste intervalo, o flush é considerado travado.
+// Var (não const) para permitir override em testes.
+var chunkBufferStallInterval = 30 * time.Second
+
+// chunkBufferMaxFlushTimeout é o safety net absoluto para o flush.
+// Mesmo com progresso contínuo, o flush não pode exceder este limite.
+// Var (não const) para permitir override em testes.
+var chunkBufferMaxFlushTimeout = 30 * time.Minute
 
 // chunkBufferPushTimeout é o tempo máximo que Push aguarda por espaço livre no
 // canal de slots antes de retornar backpressure ao chamador.
@@ -439,9 +446,13 @@ func (cb *ChunkBuffer) drainRateMBs() float64 {
 // Flush aguarda que todos os chunks da sessão identificada por assembler sejam
 // drenados completamente para o assembler.
 //
-// FIX #1 — Flush scoped por sessão: não aguarda bytes de outras sessões,
-// eliminando o risco de bloquear sessões concorrentes (ex: sessão A não espera
-// pela sessão B que ainda está recebendo chunks).
+// Stall detector: em vez de um deadline absoluto, monitora progresso a cada
+// chunkBufferStallInterval. Se nenhum byte for drenado no intervalo, o flush
+// falha imediatamente (I/O travado). Se houver progresso, continua aguardando
+// até completar ou atingir chunkBufferMaxFlushTimeout (safety net).
+//
+// Flush é scoped por sessão: não aguarda bytes de outras sessões,
+// eliminando o risco de bloquear sessões concorrentes.
 //
 // Deve ser chamado antes de assembler.Finalize() para garantir integridade.
 func (cb *ChunkBuffer) Flush(assembler *ChunkAssembler) error {
@@ -463,19 +474,44 @@ func (cb *ChunkBuffer) Flush(assembler *ChunkAssembler) error {
 	// Força drain imediato independente do ratio.
 	cb.signalDrain()
 
-	deadline := time.Now().Add(chunkBufferFlushTimeout)
-	for time.Now().Before(deadline) {
-		if counter.Load() == 0 {
+	start := time.Now()
+	prevRemaining := counter.Load()
+	stallCheckAt := time.Now().Add(chunkBufferStallInterval)
+
+	for {
+		remaining := counter.Load()
+		if remaining == 0 {
 			cb.sessionBytes.Delete(assembler)
 			return nil
 		}
+
+		// Safety net: limite absoluto mesmo com progresso.
+		elapsed := time.Since(start)
+		if elapsed >= chunkBufferMaxFlushTimeout {
+			return fmt.Errorf("chunk buffer flush exceeded max timeout %s: %d bytes still in flight (elapsed %s)",
+				chunkBufferMaxFlushTimeout, remaining, elapsed.Round(time.Second))
+		}
+
+		// Stall detection: verifica progresso a cada intervalo.
+		if time.Now().After(stallCheckAt) {
+			if remaining >= prevRemaining {
+				// Zero progresso no intervalo — I/O travado.
+				return fmt.Errorf("chunk buffer flush stalled: no progress in %s (%d bytes remaining)",
+					chunkBufferStallInterval, remaining)
+			}
+			// Progresso detectado — reporta e reseta checkpoint.
+			cb.logger.Info("flush in progress",
+				"bytes_remaining", remaining,
+				"bytes_drained_interval", prevRemaining-remaining,
+				"elapsed", elapsed.Round(time.Second),
+			)
+			prevRemaining = remaining
+			stallCheckAt = time.Now().Add(chunkBufferStallInterval)
+		}
+
 		cb.signalDrain()
 		time.Sleep(drainPollInterval)
 	}
-
-	remaining := counter.Load()
-	return fmt.Errorf("chunk buffer flush timeout after %s: %d bytes still in flight for session",
-		chunkBufferFlushTimeout, remaining)
 }
 
 // Stats retorna um snapshot das métricas globais do buffer.
